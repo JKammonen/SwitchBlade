@@ -3,8 +3,17 @@ import SwiftUI
 
 @MainActor
 final class SwitcherPanelController {
-    // Use full available width; height is a generous % so ScrollView never clips.
     private let panel: SwitcherPanel
+    private let hostingView: NSHostingView<SwitcherView>
+    // CAShapeLayer mask is the only reliable way to get antialiased transparent
+    // corners on macOS. clipShape/RoundedRectangle in SwiftUI uses a CGContext
+    // software mask whose edges aren't composited cleanly against a clear window.
+    private let cardMaskLayer = CAShapeLayer()
+
+    // Mirror the card insets so the mask stays in sync with SwitcherView padding.
+    private let cardMarginX: CGFloat = 20
+    private let cardMarginY: CGFloat = 12
+    private let cardCornerRadius: CGFloat = 20
 
     init(store: SwitcherStore) {
         panel = SwitcherPanel(
@@ -23,10 +32,13 @@ final class SwitcherPanelController {
         panel.hidesOnDeactivate = false
         panel.isMovable = false
 
-        let hostingView = NSHostingView(rootView: SwitcherView(store: store))
+        hostingView = NSHostingView(rootView: SwitcherView(store: store))
         hostingView.wantsLayer = true
-        hostingView.layer?.isOpaque = false          // allow transparency through the layer
-        hostingView.layer?.backgroundColor = .clear  // no implicit grey backing
+        hostingView.layer?.isOpaque = false
+        hostingView.layer?.backgroundColor = .clear
+        // CAShapeLayer mask: GPU-composited, properly antialiased alpha at edges.
+        // Updated in sizeAndCenter every time the panel is resized.
+        hostingView.layer?.mask = cardMaskLayer
         panel.contentView = hostingView
 
         // Force SwiftUI to build the initial view tree off-screen so the first
@@ -55,8 +67,6 @@ final class SwitcherPanelController {
         let gap: CGFloat = 10
         let gridPadX: CGFloat = 14      // .padding(14)
         let gridPadY: CGFloat = 14 + 6  // .padding(14) + .padding(.vertical, 6)
-        let cardMarginX: CGFloat = 20   // .padding(.horizontal, 20) outside card
-        let cardMarginY: CGFloat = 12   // .padding(.vertical, 12) outside card
         let verticalSafety: CGFloat = 4
 
         let maxWidth = min(frame.width - 40, 1400)
@@ -86,6 +96,25 @@ final class SwitcherPanelController {
         panel.setFrame(CGRect(origin: origin,
                               size: CGSize(width: width, height: height)),
                        display: true)
+
+        updateCardMask(panelWidth: width, panelHeight: height)
+    }
+
+    /// Keeps the CAShapeLayer mask in sync with the panel size.
+    /// The card rect is the panel bounds inset by cardMarginX/Y.
+    private func updateCardMask(panelWidth: CGFloat, panelHeight: CGFloat) {
+        let cardRect = CGRect(
+            x: cardMarginX,
+            y: cardMarginY,
+            width: panelWidth  - cardMarginX * 2,
+            height: panelHeight - cardMarginY * 2
+        )
+        cardMaskLayer.frame = CGRect(origin: .zero,
+                                     size: CGSize(width: panelWidth, height: panelHeight))
+        cardMaskLayer.path = CGPath(roundedRect: cardRect,
+                                    cornerWidth: cardCornerRadius,
+                                    cornerHeight: cardCornerRadius,
+                                    transform: nil)
     }
 }
 

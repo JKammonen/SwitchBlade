@@ -61,14 +61,9 @@ struct SwitcherView: View {
         // edges). Grid content has 14 pt inset on all sides so it never reaches
         // the 20 pt corner area — clipShape is not needed.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(settings.backgroundColor.opacity(settings.backgroundOpacity))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
-        }
+        // Flat fill — the CAShapeLayer mask in SwitcherPanelController clips this
+        // to the rounded card shape with proper GPU antialiasing.
+        .background(settings.backgroundColor.opacity(settings.backgroundOpacity))
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
