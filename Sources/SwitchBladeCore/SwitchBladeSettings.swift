@@ -178,6 +178,16 @@ final class SwitchBladeSettings: ObservableObject {
         }
     }
 
+    // When true (default), only windows in the current Space are listed.
+    // Mirrors to WindowFilterState.shared so WindowCatalog (Sendable, not
+    // @MainActor) can read it on its non-actor hot path.
+    @Published var restrictToCurrentSpace: Bool {
+        didSet {
+            ud.set(restrictToCurrentSpace, forKey: "sb_restrictToCurrentSpace")
+            WindowFilterState.shared.restrictToCurrentSpace = restrictToCurrentSpace
+        }
+    }
+
     private init() {
         bgRed   = ud.object(forKey: "sb_bgR") as? Double ?? 0.0
         bgGreen = ud.object(forKey: "sb_bgG") as? Double ?? 0.0
@@ -202,9 +212,11 @@ final class SwitchBladeSettings: ObservableObject {
         badgeVerticalPadding = ud.object(forKey: "sb_badgeVPad")   as? Double ?? 6.0
         badgeUseAppColor    = ud.object(forKey: "sb_badgeUseAppColor") as? Bool ?? false
         language = AppLanguage(rawValue: ud.string(forKey: "sb_language") ?? "") ?? .system
+        restrictToCurrentSpace = ud.object(forKey: "sb_restrictToCurrentSpace") as? Bool ?? true
         // Mirror to the global LocalizationState immediately so first read on
         // launch is correct (didSet doesn't fire from this init).
         LocalizationState.shared.selection = language
+        WindowFilterState.shared.restrictToCurrentSpace = restrictToCurrentSpace
     }
 
     /// Convenience SwiftUI Color for the badge bar background.

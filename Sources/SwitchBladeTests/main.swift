@@ -11,7 +11,8 @@ func runAll() async -> Int {
         ("PermissionState",         PermissionStateTests.all),
         ("Localization",            LocalizationTests.all),
         ("SwitcherLayoutCalculator", SwitcherLayoutCalculatorTests.all),
-        ("SwitcherStore",           SwitcherStoreTests.all)
+        ("SwitcherStore",           SwitcherStoreTests.all),
+        ("MRUPersistence",          MRUPersistenceTests.all)
     ]
 
     var passed = 0

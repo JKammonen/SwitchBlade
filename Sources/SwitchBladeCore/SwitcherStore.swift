@@ -23,6 +23,12 @@ final class SwitcherStore: ObservableObject {
     private var previewLoadTask: Task<Void, Never>?
     private var previewGeneration = 0
     private var recentWindowIDs: [WindowItem.ID] = []
+    /// Bundle IDs in MRU order. Persists across launches so the first cold
+    /// open after a relaunch isn't a blank slate. Capped at `maxRecentBundles`.
+    private var recentBundleIDs: [String] = []
+    private let maxRecentBundles = 30
+    private let recentBundleIDsKey = "sb_recentBundleIDs"
+    private let userDefaults: UserDefaults
     nonisolated(unsafe) private var activationObserver: Any?
     private var previewCache: [CGWindowID: CachedPreview] = [:]
     private var previewCacheOrder: [CGWindowID] = []
@@ -37,11 +43,18 @@ final class SwitcherStore: ObservableObject {
         let bounds: CGRect
     }
 
-    init(catalog: WindowSnapshotProviding, activator: WindowActivating, permissionService: PermissionProviding) {
+    init(
+        catalog: WindowSnapshotProviding,
+        activator: WindowActivating,
+        permissionService: PermissionProviding,
+        userDefaults: UserDefaults = .standard
+    ) {
         self.catalog = catalog
         self.activator = activator
         self.permissionService = permissionService
         self.permissionState = permissionService.currentState()
+        self.userDefaults = userDefaults
+        self.recentBundleIDs = (userDefaults.array(forKey: recentBundleIDsKey) as? [String]) ?? []
 
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -114,6 +127,18 @@ final class SwitcherStore: ObservableObject {
         case Int(kVK_LeftArrow), Int(kVK_UpArrow):
             moveSelection(-1)
             return true
+        case Int(kVK_Home):
+            selectFirst()
+            return true
+        case Int(kVK_End):
+            selectLast()
+            return true
+        case Int(kVK_ANSI_Q) where event.modifierFlags.contains(.command):
+            quitSelectedApp()
+            return true
+        case Int(kVK_ANSI_H) where event.modifierFlags.contains(.command):
+            hideSelectedApp()
+            return true
         case Int(kVK_Return), Int(kVK_Space):
             commitSelection()
             return true
@@ -123,6 +148,16 @@ final class SwitcherStore: ObservableObject {
         default:
             return false
         }
+    }
+
+    private func selectFirst() {
+        guard let first = items.first else { return }
+        selectedID = first.id
+    }
+
+    private func selectLast() {
+        guard let last = items.last else { return }
+        selectedID = last.id
     }
 
     func hover(_ item: WindowItem) {
@@ -138,6 +173,32 @@ final class SwitcherStore: ObservableObject {
     func close(_ item: WindowItem) {
         activator.close(item)
         removeItem(withID: item.id)
+    }
+
+    /// Quits the entire app of the selected window. The switcher hides; if
+    /// other windows of the same pid are also listed, they're removed too.
+    private func quitSelectedApp() {
+        guard let selected = selectedItem else { return }
+        activator.quit(selected)
+        // Drop every tile belonging to the quitting app — they're about to die.
+        items.removeAll { $0.pid == selected.pid }
+        recentWindowIDs.removeAll { id in
+            items.first(where: { $0.id == id }) == nil
+        }
+        if items.isEmpty {
+            cancel()
+        } else {
+            selectedID = items.first?.id
+            hide()
+        }
+    }
+
+    /// Hides all windows of the selected app, keeping the app running. The
+    /// switcher closes; the items list is intact for the next cold open.
+    private func hideSelectedApp() {
+        guard let selected = selectedItem else { return }
+        activator.hide(selected)
+        hide()
     }
 
     func commitSelection() {
@@ -345,6 +406,20 @@ final class SwitcherStore: ObservableObject {
             orderedItems.append(item)
         }
 
+        // After the in-memory recents are exhausted, fall back to the persisted
+        // bundle-ID order. This kicks in on the first cycle after a fresh launch
+        // when `recentWindowIDs` is empty but `recentBundleIDs` was restored
+        // from UserDefaults.
+        if !recentBundleIDs.isEmpty {
+            let snapshotByBundle = Dictionary(grouping: snapshot, by: { $0.bundleIdentifier })
+            for bundleID in recentBundleIDs {
+                guard let group = snapshotByBundle[bundleID] else { continue }
+                for item in group where seenIDs.insert(item.id).inserted {
+                    orderedItems.append(item)
+                }
+            }
+        }
+
         for item in snapshot where seenIDs.insert(item.id).inserted {
             orderedItems.append(item)
         }
@@ -354,6 +429,17 @@ final class SwitcherStore: ObservableObject {
 
     private func rememberRecentSelection(_ selectedID: WindowItem.ID) {
         recentWindowIDs = [selectedID] + items.map(\.id).filter { $0 != selectedID }
+        // Also update persisted bundle-ID MRU so the next cold launch can seed
+        // a sensible order before the user has switched anything.
+        if let item = items.first(where: { $0.id == selectedID }),
+           let bundleID = item.bundleIdentifier, !bundleID.isEmpty {
+            recentBundleIDs.removeAll { $0 == bundleID }
+            recentBundleIDs.insert(bundleID, at: 0)
+            if recentBundleIDs.count > maxRecentBundles {
+                recentBundleIDs.removeLast(recentBundleIDs.count - maxRecentBundles)
+            }
+            userDefaults.set(recentBundleIDs, forKey: recentBundleIDsKey)
+        }
     }
 
     private func trackSystemActivation(pid: pid_t) {

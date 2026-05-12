@@ -21,6 +21,19 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         _ = closeMatchingWindow(item)
     }
 
+    func quit(_ item: WindowItem) {
+        Logger.activator.info("Quitting pid=\(item.pid, privacy: .public)")
+        // Never quit SwitchBlade itself.
+        guard item.pid != getpid() else { return }
+        NSRunningApplication(processIdentifier: item.pid)?.terminate()
+    }
+
+    func hide(_ item: WindowItem) {
+        Logger.activator.info("Hiding pid=\(item.pid, privacy: .public)")
+        guard item.pid != getpid() else { return }
+        NSRunningApplication(processIdentifier: item.pid)?.hide()
+    }
+
     private func raiseMatchingWindow(_ item: WindowItem) {
         let appElement = AXUIElementCreateApplication(item.pid)
         guard let windows = windows(for: appElement) else {

@@ -127,8 +127,14 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     }
 
     private func snapshotInternal(includeMinimized: Bool) -> SnapshotResult {
-        let options: CGWindowListOption = [.excludeDesktopElements]
-        guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+        // .optionOnScreenOnly when restricting to current Space — macOS only
+        // returns windows it considers on-screen, which excludes other Spaces.
+        // .optionAll lets windows from other Spaces through.
+        let restrictToCurrentSpace = WindowFilterState.shared.restrictToCurrentSpace
+        let listOptions: CGWindowListOption = restrictToCurrentSpace
+            ? [.optionOnScreenOnly, .excludeDesktopElements]
+            : [.optionAll, .excludeDesktopElements]
+        guard let rawList = CGWindowListCopyWindowInfo(listOptions, kCGNullWindowID) as? [[String: Any]] else {
             return SnapshotResult(visible: [], minimized: [])
         }
 
@@ -148,12 +154,15 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 return nil
             }
 
-            // Only include windows that are part of the on-screen window stack.
-            // This filters ghost CGWindows, background helper surfaces, etc.
-            let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
-            guard isOnScreen else {
-                return nil
+            // When restricting to current Space, also re-check isOnScreen per
+            // entry. The list option above already filters, but the explicit
+            // check protects against macOS occasionally returning stale rows.
+            // When not restricting, accept windows regardless of isOnScreen.
+            if restrictToCurrentSpace {
+                let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
+                guard isOnScreen else { return nil }
             }
+            visibleWindowIDs.insert(windowID)
             visibleWindowIDs.insert(windowID)
 
             let alpha = entry[kCGWindowAlpha as String] as? Double ?? 1
@@ -189,7 +198,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 isFrontmostApp: ownerPID == frontmostPID,
                 isMinimized: false,
                 preview: nil,
-                icon: application?.icon
+                icon: application?.icon,
+                bundleIdentifier: application?.bundleIdentifier
             )
         }
 
@@ -327,7 +337,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     isFrontmostApp: application.processIdentifier == frontmostPID,
                     isMinimized: true,
                     preview: nil,
-                    icon: application.icon
+                    icon: application.icon,
+                    bundleIdentifier: application.bundleIdentifier
                 )
             }
         }

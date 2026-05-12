@@ -57,6 +57,14 @@ struct SettingsView: View {
                 }
             }
 
+            group(title: L10n.tr(.settingsBehavior)) {
+                row(L10n.tr(.fieldRestrictToCurrentSpace)) {
+                    Toggle("", isOn: $settings.restrictToCurrentSpace)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            }
+
             group(title: L10n.tr(.settingsHotkey)) {
                 row(L10n.tr(.fieldModifier)) {
                     Picker("", selection: $settings.modifier) {

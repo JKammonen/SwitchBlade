@@ -224,6 +224,26 @@ private struct WindowTile: View {
                 .padding(.vertical, settings.badgeVerticalPadding)
                 .background(effectiveBadgeBackground)
 
+                // Minimized indicator — top-left chip. Always visible while the
+                // window is minimized so a user can tell at a glance which tiles
+                // would un-minimize on selection.
+                if item.isMinimized {
+                    VStack {
+                        HStack {
+                            Image(systemName: "dock.rectangle")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.9))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.black.opacity(0.55), in: Capsule())
+                            Spacer()
+                        }
+                        Spacer()
+                    }
+                    .padding(6)
+                    .allowsHitTesting(false)
+                }
+
                 // Close button
                 if isHovered || isSelected {
                     VStack {

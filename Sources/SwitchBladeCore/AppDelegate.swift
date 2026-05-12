@@ -45,6 +45,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let panelController = SwitcherPanelController(store: store)
+        // Click anywhere outside the rounded card area dismisses the switcher.
+        panelController.onClickOutside = { [weak store] in
+            store?.cancel()
+        }
         store.refreshPermissionState()
         presentPermissionGuidanceIfNeeded()
         store.onShow = { [weak panelController, weak store] in

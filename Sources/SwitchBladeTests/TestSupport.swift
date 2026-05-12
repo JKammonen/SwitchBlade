@@ -14,7 +14,8 @@ func makeItem(
     title: String = "Window",
     isFrontmostApp: Bool = false,
     isMinimized: Bool = false,
-    bounds: CGRect = CGRect(x: 0, y: 0, width: 800, height: 600)
+    bounds: CGRect = CGRect(x: 0, y: 0, width: 800, height: 600),
+    bundleIdentifier: String? = nil
 ) -> WindowItem {
     WindowItem(
         windowID: id,
@@ -25,7 +26,8 @@ func makeItem(
         isFrontmostApp: isFrontmostApp,
         isMinimized: isMinimized,
         preview: nil,
-        icon: nil
+        icon: nil,
+        bundleIdentifier: bundleIdentifier
     )
 }
 
@@ -70,14 +72,13 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
 final class MockWindowActivator: WindowActivating, @unchecked Sendable {
     private(set) var activatedItems: [WindowItem] = []
     private(set) var closedItems: [WindowItem] = []
+    private(set) var quitItems: [WindowItem] = []
+    private(set) var hiddenItems: [WindowItem] = []
 
-    func activate(_ item: WindowItem) {
-        activatedItems.append(item)
-    }
-
-    func close(_ item: WindowItem) {
-        closedItems.append(item)
-    }
+    func activate(_ item: WindowItem) { activatedItems.append(item) }
+    func close(_ item: WindowItem)    { closedItems.append(item) }
+    func quit(_ item: WindowItem)     { quitItems.append(item) }
+    func hide(_ item: WindowItem)     { hiddenItems.append(item) }
 }
 
 final class MockPermissionService: PermissionProviding, @unchecked Sendable {
@@ -91,14 +92,25 @@ final class MockPermissionService: PermissionProviding, @unchecked Sendable {
 func makeStore(
     catalog: MockWindowCatalog = MockWindowCatalog(),
     activator: MockWindowActivator = MockWindowActivator(),
-    permissions: MockPermissionService = MockPermissionService()
+    permissions: MockPermissionService = MockPermissionService(),
+    userDefaults: UserDefaults = makeIsolatedUserDefaults()
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
     let store = SwitcherStore(
         catalog: catalog,
         activator: activator,
-        permissionService: permissions
+        permissionService: permissions,
+        userDefaults: userDefaults
     )
     return (store, catalog, activator, permissions)
+}
+
+/// Per-test isolated UserDefaults — avoids cross-test pollution and stale
+/// MRU bleed-through from real app launches on the same machine.
+func makeIsolatedUserDefaults() -> UserDefaults {
+    let suite = "switchblade.tests.\(UUID().uuidString)"
+    let ud = UserDefaults(suiteName: suite)!
+    ud.removePersistentDomain(forName: suite)
+    return ud
 }
 
 /// Yield to MainActor a few times so deferred Task { @MainActor in } work runs.

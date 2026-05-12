@@ -17,6 +17,22 @@ public enum AppLanguage: String, CaseIterable, Sendable {
     }
 }
 
+/// Thread-safe, actor-agnostic storage of the user's "restrict to current
+/// Space" toggle. WindowCatalog (Sendable, non-MainActor) reads this in its
+/// hot path; SwitchBladeSettings mirrors the value on every change.
+public final class WindowFilterState: @unchecked Sendable {
+    public static let shared = WindowFilterState()
+    private let lock = NSLock()
+    private var _restrictToCurrentSpace = true
+
+    private init() {}
+
+    public var restrictToCurrentSpace: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _restrictToCurrentSpace }
+        set { lock.lock(); _restrictToCurrentSpace = newValue; lock.unlock() }
+    }
+}
+
 /// Thread-safe, actor-agnostic storage of the current effective language so
 /// localization can be queried from any isolation context (including struct
 /// computed properties like `PermissionState.message`).
@@ -55,11 +71,15 @@ public enum L10n {
     public enum Key: String, CaseIterable {
         // SettingsView — sections
         case settingsLanguage
+        case settingsBehavior
         case settingsHotkey
         case settingsBackground
         case settingsBadgeBar
         case settingsSelection
         case settingsPreviewSize
+
+        // Behavior
+        case fieldRestrictToCurrentSpace
 
         // SettingsView — fields
         case fieldLanguage
@@ -139,6 +159,8 @@ public enum L10n {
     // change at runtime, so `nonisolated(unsafe)` is correct here.
     nonisolated(unsafe) private static let englishTable: [Key: String] = [
         .settingsLanguage:                "Language",
+        .settingsBehavior:                "Behavior",
+        .fieldRestrictToCurrentSpace:     "Only current Space",
         .settingsHotkey:                  "Hotkey",
         .settingsBackground:              "Background",
         .settingsBadgeBar:                "Badge bar",
@@ -190,6 +212,8 @@ public enum L10n {
 
     nonisolated(unsafe) private static let finnishTable: [Key: String] = [
         .settingsLanguage:                "Kieli",
+        .settingsBehavior:                "Toiminta",
+        .fieldRestrictToCurrentSpace:     "Vain nykyinen Space",
         .settingsHotkey:                  "Pikanäppäin",
         .settingsBackground:              "Tausta",
         .settingsBadgeBar:                "Otsikkopalkki",

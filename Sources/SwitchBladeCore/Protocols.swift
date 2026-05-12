@@ -20,6 +20,12 @@ protocol WindowSnapshotProviding: Sendable {
 protocol WindowActivating: Sendable {
     func activate(_ item: WindowItem)
     func close(_ item: WindowItem)
+    /// Sends NSRunningApplication.terminate(). The whole app quits, not just
+    /// the selected window.
+    func quit(_ item: WindowItem)
+    /// Sends NSRunningApplication.hide(). All of the app's windows go away
+    /// without quitting; the app stays running and can be reactivated later.
+    func hide(_ item: WindowItem)
 }
 
 /// Permission-state dependency. Concrete PermissionService conforms; tests

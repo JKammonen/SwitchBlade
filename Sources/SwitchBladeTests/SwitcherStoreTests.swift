@@ -24,6 +24,11 @@ enum SwitcherStoreTests {
         ("Store/handleKeyDown_return_commits", handleKeyDown_returnCommits),
         ("Store/handleKeyDown_escape_cancels", handleKeyDown_escape),
         ("Store/handleKeyDown_unknownKey_false", handleKeyDown_unknown),
+        ("Store/handleKeyDown_home_selectsFirst", handleKeyDown_home),
+        ("Store/handleKeyDown_end_selectsLast", handleKeyDown_end),
+        ("Store/handleKeyDown_cmdQ_quitsSelectedApp", handleKeyDown_cmdQ),
+        ("Store/handleKeyDown_cmdH_hidesSelectedApp", handleKeyDown_cmdH),
+        ("Store/quit_removesAllWindowsOfThatPid", quit_removesAllPidWindows),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
         ("Store/commitSelection_withNoSelection_hides", commit_noSelection),
@@ -249,6 +254,81 @@ enum SwitcherStoreTests {
         ]
         store.cycle(forward: true)
         try expect(store.handleKeyDown(makeKeyDownEvent(keyCode: 0)) == false)
+    }
+
+    @MainActor static func handleKeyDown_home() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        store.cycle(forward: true)              // selected = 2
+        let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Home))
+        try expect(handled)
+        try expectEqual(store.selectedID, store.items.first?.id)
+    }
+
+    @MainActor static func handleKeyDown_end() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        store.cycle(forward: true)              // selected = 2
+        let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_End))
+        try expect(handled)
+        try expectEqual(store.selectedID, store.items.last?.id)
+    }
+
+    @MainActor static func handleKeyDown_cmdQ() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        store.cycle(forward: true)
+        store.selectedID = 2
+
+        let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
+        try expect(handled)
+        try expectEqual(activator.quitItems.map(\.id), [2])
+        try expect(!store.isVisible)
+    }
+
+    @MainActor static func handleKeyDown_cmdH() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        store.cycle(forward: true)
+        store.selectedID = 2
+
+        let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_H, modifiers: .command))
+        try expect(handled)
+        try expectEqual(activator.hiddenItems.map(\.id), [2])
+        try expect(!store.isVisible)
+    }
+
+    @MainActor static func quit_removesAllPidWindows() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        // Two windows of the same app (pid 200) + one of another app (pid 300)
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 200, title: "Other window"),
+            makeItem(id: 4, pid: 300)
+        ]
+        store.cycle(forward: true)
+        store.selectedID = 2
+
+        _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
+
+        // Both pid-200 windows are gone; other apps remain in the list state.
+        try expectEqual(activator.quitItems.map(\.pid), [200])
+        try expect(!store.items.contains(where: { $0.pid == 200 }))
     }
 
     // MARK: commit / cancel

@@ -10,6 +10,10 @@ struct WindowItem: Identifiable, Equatable {
     let isMinimized: Bool
     let preview: NSImage?
     let icon: NSImage?
+    /// Bundle identifier of the owning application, when available. Used to
+    /// rebuild the MRU ordering after an app restart (CGWindowIDs aren't
+    /// stable across launches but bundle IDs are).
+    let bundleIdentifier: String?
 
     var id: CGWindowID { windowID }
 
@@ -31,7 +35,8 @@ struct WindowItem: Identifiable, Equatable {
             isFrontmostApp: isFrontmostApp,
             isMinimized: isMinimized,
             preview: preview,
-            icon: icon
+            icon: icon,
+            bundleIdentifier: bundleIdentifier
         )
     }
 }
