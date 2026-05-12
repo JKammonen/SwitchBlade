@@ -44,9 +44,9 @@ struct PermissionState: Equatable {
     var message: String? {
         switch (needsAccessibility, needsScreenRecording) {
         case (false, false): return nil
-        case (true, false):  return "Enable Accessibility for exact window focus."
-        case (false, true):  return "Enable Screen Recording for live window previews."
-        default:             return "Enable Accessibility and Screen Recording for the full experience."
+        case (true, false):  return L10n.tr(.permissionMessageAccessibility)
+        case (false, true):  return L10n.tr(.permissionMessageScreenRecording)
+        default:             return L10n.tr(.permissionMessageBoth)
         }
     }
 }

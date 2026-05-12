@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import os.log
 @preconcurrency import ScreenCaptureKit
 
 // Cache for SCShareableContent. It is warmed once and refreshed on demand, not
@@ -18,13 +19,20 @@ actor SCContentCache {
 
     func refreshIfAllowed() async {
         // Guard: SCKit can trigger an OS permission dialog without Screen Recording access.
-        guard CGPreflightScreenCaptureAccess() else { return }
+        guard CGPreflightScreenCaptureAccess() else {
+            Logger.capture.notice("SCShareableContent refresh skipped — no Screen Recording permission")
+            return
+        }
+        let start = Date()
         do {
             content = try await SCShareableContent.current
             lastRefreshFailedAt = nil
             lastSuccessfulRefresh = Date()
+            let ms = Date().timeIntervalSince(start) * 1000
+            Logger.capture.info("SCShareableContent refresh ok in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
         } catch {
             lastRefreshFailedAt = Date()
+            Logger.capture.error("SCShareableContent refresh failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -205,7 +213,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // first preview slow after idle. 10 s is short enough to dodge that and
         // long enough to skip the fetch on rapid repeat Cmd+Tabs.
         await contentCache.refreshIfStale()
-        guard let content = await contentCache.content else { return [:] }
+        guard let content = await contentCache.content else {
+            Logger.capture.error("capturePreviews: no SCShareableContent available")
+            return [:]
+        }
         let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
         let maxDim = 320
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
@@ -213,7 +224,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             guard let window = windowsByID[windowID] else { return nil }
             return (windowID, window)
         }
-        guard !captureTargets.isEmpty else { return [:] }
+        guard !captureTargets.isEmpty else {
+            Logger.capture.notice("capturePreviews: no matching SCWindows for \(windowIDs.count, privacy: .public) requested IDs")
+            return [:]
+        }
+        let captureStart = Date()
 
         return await withTaskGroup(of: (CGWindowID, NSImage)?.self) { group in
             var nextIndex = 0
@@ -244,6 +259,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 _ = enqueueNextCapture()
             }
 
+            let ms = Date().timeIntervalSince(captureStart) * 1000
+            Logger.capture.info(
+                "Captured \(result.count, privacy: .public)/\(captureTargets.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+            )
             return result
         }
     }

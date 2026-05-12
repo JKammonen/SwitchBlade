@@ -15,7 +15,7 @@ enum SBBadgePosition: String, CaseIterable, Identifiable {
     case top    = "top"
 
     var id: String { rawValue }
-    var title: String { self == .bottom ? "Bottom" : "Top" }
+    var title: String { L10n.tr(self == .bottom ? .badgeBottom : .badgeTop) }
 }
 
 enum SBSelectionEffect: String, CaseIterable, Identifiable {
@@ -29,11 +29,11 @@ enum SBSelectionEffect: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .pump: return "Pump"
-        case .breathe: return "Breathe"
-        case .bounce: return "Bounce"
-        case .float: return "Float"
-        case .wobble: return "Wobble"
+        case .pump:    return L10n.tr(.selectionPump)
+        case .breathe: return L10n.tr(.selectionBreathe)
+        case .bounce:  return L10n.tr(.selectionBounce)
+        case .float:   return L10n.tr(.selectionFloat)
+        case .wobble:  return L10n.tr(.selectionWobble)
         }
     }
 }
@@ -49,9 +49,9 @@ enum SBModifier: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .command: return "⌘ Command"
-        case .option:  return "⌥ Option"
-        case .control: return "⌃ Control"
+        case .command: return L10n.tr(.modifierCommand)
+        case .option:  return L10n.tr(.modifierOption)
+        case .control: return L10n.tr(.modifierControl)
         }
     }
 
@@ -81,9 +81,9 @@ enum SBTriggerKey: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .tab:      return "Tab"
-        case .backtick: return "Backtick (`)"
-        case .space:    return "Space"
+        case .tab:      return L10n.tr(.keyTab)
+        case .backtick: return L10n.tr(.keyBacktick)
+        case .space:    return L10n.tr(.keySpace)
         }
     }
 
@@ -168,6 +168,16 @@ final class SwitchBladeSettings: ObservableObject {
         didSet { ud.set(badgeUseAppColor, forKey: "sb_badgeUseAppColor") }
     }
 
+    // Interface language. Mirrors to LocalizationState.shared so non-actor
+    // code paths (e.g. PermissionState.message) can localize without hopping
+    // onto MainActor.
+    @Published var language: AppLanguage {
+        didSet {
+            ud.set(language.rawValue, forKey: "sb_language")
+            LocalizationState.shared.selection = language
+        }
+    }
+
     private init() {
         bgRed   = ud.object(forKey: "sb_bgR") as? Double ?? 0.0
         bgGreen = ud.object(forKey: "sb_bgG") as? Double ?? 0.0
@@ -191,6 +201,10 @@ final class SwitchBladeSettings: ObservableObject {
         badgeFontSize       = ud.object(forKey: "sb_badgeFontSize") as? Double ?? 11.0
         badgeVerticalPadding = ud.object(forKey: "sb_badgeVPad")   as? Double ?? 6.0
         badgeUseAppColor    = ud.object(forKey: "sb_badgeUseAppColor") as? Bool ?? false
+        language = AppLanguage(rawValue: ud.string(forKey: "sb_language") ?? "") ?? .system
+        // Mirror to the global LocalizationState immediately so first read on
+        // launch is correct (didSet doesn't fire from this init).
+        LocalizationState.shared.selection = language
     }
 
     /// Convenience SwiftUI Color for the badge bar background.

@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import os.log
 
 @MainActor
 final class HotkeyMonitor {
@@ -86,6 +87,7 @@ final class HotkeyMonitor {
             },
             userInfo: unmanagedSelf
         ) else {
+            Logger.hotkey.error("CGEvent.tapCreate failed — Accessibility permission likely missing")
             return
         }
 
@@ -95,10 +97,12 @@ final class HotkeyMonitor {
 
         self.eventTap = eventTap
         self.eventTapSource = eventTapSource
+        Logger.hotkey.info("Event tap installed")
     }
 
     private func handleEventTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            Logger.hotkey.notice("Event tap disabled by system (\(type.rawValue, privacy: .public)) — re-enabling")
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }

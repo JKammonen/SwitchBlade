@@ -45,8 +45,20 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            group(title: "Hotkey") {
-                row("Modifier") {
+            group(title: L10n.tr(.settingsLanguage)) {
+                row(L10n.tr(.fieldLanguage)) {
+                    Picker("", selection: $settings.language) {
+                        ForEach(AppLanguage.allCases, id: \.self) { lang in
+                            Text(lang.displayName).tag(lang)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+
+            group(title: L10n.tr(.settingsHotkey)) {
+                row(L10n.tr(.fieldModifier)) {
                     Picker("", selection: $settings.modifier) {
                         ForEach(SBModifier.allCases) { m in Text(m.title).tag(m) }
                     }
@@ -54,7 +66,7 @@ struct SettingsView: View {
                     .fixedSize()
                 }
                 divider()
-                row("Trigger key") {
+                row(L10n.tr(.fieldTriggerKey)) {
                     Picker("", selection: $settings.triggerKey) {
                         ForEach(SBTriggerKey.allCases) { k in Text(k.title).tag(k) }
                     }
@@ -62,25 +74,25 @@ struct SettingsView: View {
                     .fixedSize()
                 }
                 divider()
-                Text("Active: \(settings.modifier.title) + \(settings.triggerKey.title)")
+                Text(L10n.tr(.fieldActiveCombo, "\(settings.modifier.title) + \(settings.triggerKey.title)"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
             }
 
-            group(title: "Background") {
-                row("Color") {
+            group(title: L10n.tr(.settingsBackground)) {
+                row(L10n.tr(.fieldColor)) {
                     ColorPicker("", selection: bgColorBinding, supportsOpacity: false)
                         .labelsHidden()
                         .fixedSize()
                 }
                 divider()
-                sliderRow("Opacity", value: $settings.backgroundOpacity, in: 0.0...1.0, unit: "%", scale: 100)
+                sliderRow(L10n.tr(.fieldOpacity), value: $settings.backgroundOpacity, in: 0.0...1.0, unit: "%", scale: 100)
             }
 
-            group(title: "Badge bar") {
-                row("Position") {
+            group(title: L10n.tr(.settingsBadgeBar)) {
+                row(L10n.tr(.fieldPosition)) {
                     Picker("", selection: $settings.badgePosition) {
                         ForEach(SBBadgePosition.allCases) { p in Text(p.title).tag(p) }
                     }
@@ -88,13 +100,13 @@ struct SettingsView: View {
                     .fixedSize()
                 }
                 divider()
-                row("App icon color") {
+                row(L10n.tr(.fieldAppIconColor)) {
                     Toggle("", isOn: $settings.badgeUseAppColor)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
                 divider()
-                row("Color") {
+                row(L10n.tr(.fieldColor)) {
                     ColorPicker("", selection: badgeColorBinding, supportsOpacity: false)
                         .labelsHidden()
                         .fixedSize()
@@ -102,17 +114,17 @@ struct SettingsView: View {
                         .opacity(settings.badgeUseAppColor ? 0.4 : 1)
                 }
                 divider()
-                sliderRow("Opacity", value: $settings.badgeOpacity, in: 0.0...1.0, unit: "%", scale: 100)
+                sliderRow(L10n.tr(.fieldOpacity), value: $settings.badgeOpacity, in: 0.0...1.0, unit: "%", scale: 100)
                 divider()
-                sliderRow("Icon size", value: $settings.badgeIconSize, in: 12...32, unit: "pt", scale: 1)
+                sliderRow(L10n.tr(.fieldIconSize), value: $settings.badgeIconSize, in: 12...32, unit: "pt", scale: 1)
                 divider()
-                sliderRow("Text size", value: $settings.badgeFontSize, in: 9...16, unit: "pt", scale: 1)
+                sliderRow(L10n.tr(.fieldTextSize), value: $settings.badgeFontSize, in: 9...16, unit: "pt", scale: 1)
                 divider()
-                sliderRow("Vert. padding", value: $settings.badgeVerticalPadding, in: 2...14, unit: "pt", scale: 1)
+                sliderRow(L10n.tr(.fieldVerticalPadding), value: $settings.badgeVerticalPadding, in: 2...14, unit: "pt", scale: 1)
             }
 
-            group(title: "Selection") {
-                row("Animation") {
+            group(title: L10n.tr(.settingsSelection)) {
+                row(L10n.tr(.fieldAnimation)) {
                     Picker("", selection: $settings.selectionEffect) {
                         ForEach(SBSelectionEffect.allCases) { effect in
                             Text(effect.title).tag(effect)
@@ -122,19 +134,19 @@ struct SettingsView: View {
                     .fixedSize()
                 }
                 divider()
-                row("Highlight color") {
+                row(L10n.tr(.fieldHighlightColor)) {
                     ColorPicker("", selection: highlightColorBinding, supportsOpacity: false)
                         .labelsHidden()
                         .fixedSize()
                 }
                 divider()
-                sliderRow("Strength", value: $settings.highlightStrength, in: 0.2...1.0, unit: "%", scale: 100)
+                sliderRow(L10n.tr(.fieldStrength), value: $settings.highlightStrength, in: 0.2...1.0, unit: "%", scale: 100)
                 divider()
-                sliderRow("Opacity", value: $settings.highlightOpacity, in: 0.15...1.0, unit: "%", scale: 100)
+                sliderRow(L10n.tr(.fieldOpacity), value: $settings.highlightOpacity, in: 0.15...1.0, unit: "%", scale: 100)
             }
 
-            group(title: "Preview size") {
-                sliderRow("Min width", value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
+            group(title: L10n.tr(.settingsPreviewSize)) {
+                sliderRow(L10n.tr(.fieldMinWidth), value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
             }
         }
         .padding(16)

@@ -1,4 +1,5 @@
 import AppKit
+import os.log
 
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -19,17 +20,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isPresentingPermissionAlert = false
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        Logger.app.info("SwitchBlade launching (pid: \(getpid(), privacy: .public))")
         // Run as a menu-bar-only agent — no Dock icon, and ensures our own
         // windows are excluded from the switcher (activationPolicy != .regular).
         NSApp.setActivationPolicy(.accessory)
 
         permissionService.requestIfNeeded()
+        let state = permissionService.currentState()
+        Logger.permissions.info(
+            "Permissions on launch: ax=\(state.hasAccessibility, privacy: .public), sr=\(state.hasScreenRecording, privacy: .public)"
+        )
 
         // Warm SC cache after a short delay so TCC has settled from the
         // accessibility prompt above. Only fires when SR is already granted.
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self, self.permissionService.currentState().hasScreenRecording else { return }
+            guard let self else { return }
+            guard self.permissionService.currentState().hasScreenRecording else {
+                Logger.capture.notice("Skipping SCKit warmup — Screen Recording not granted")
+                return
+            }
+            Logger.capture.info("Starting SCKit cache warmup")
             self.windowCatalog.startBackgroundRefresh()
         }
 
@@ -122,10 +133,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "SwitchBlade tarvitsee luvan: \(permission.title)"
+        alert.messageText = L10n.tr(.alertPermissionTitle, permission.title)
         alert.informativeText = guidanceText(for: state, primaryPermission: permission)
-        alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "Later")
+        alert.addButton(withTitle: L10n.tr(.alertOpenSettings))
+        alert.addButton(withTitle: L10n.tr(.alertLater))
 
         if alert.runModal() == .alertFirstButtonReturn {
             NSWorkspace.shared.open(permission.settingsURL)
@@ -134,6 +145,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func guidanceText(for state: PermissionState, primaryPermission: PermissionKind) -> String {
         let missingTitles = state.missingPermissions.map(\.title).joined(separator: ", ")
-        return "SwitchBlade tarvitsee luvan toimiakseen. Puuttuvat luvat: \(missingTitles). Avaa oikea System Settings -sivu ja laita SwitchBlade päälle."
+        return L10n.tr(.alertPermissionBody, missingTitles)
     }
 }

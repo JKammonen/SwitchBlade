@@ -1,5 +1,6 @@
 import Carbon.HIToolbox
 import Foundation
+import os.log
 import SwiftUI
 
 @MainActor
@@ -74,11 +75,13 @@ final class SwitcherStore: ObservableObject {
             let orderedItems = orderedItemsForDisplay(from: visibleSnapshot)
             guard !orderedItems.isEmpty else {
                 isSwitching = false
+                Logger.switcher.notice("Cycle aborted: snapshot is empty")
                 return
             }
 
             items = orderedItems.map(itemWithCachedPreview)
             selectedID = items[safe: items.count > 1 ? 1 : 0]?.id
+            Logger.switcher.info("Cold-open: \(orderedItems.count, privacy: .public) windows, selected #\(self.selectedID ?? 0, privacy: .public)")
             showWithPreviews()
 
             // Lazily fetch minimized windows off the main thread and merge them in.

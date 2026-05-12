@@ -1,8 +1,12 @@
 import AppKit
 import ApplicationServices
+import os.log
 
 final class WindowActivator: WindowActivating, @unchecked Sendable {
     func activate(_ item: WindowItem) {
+        Logger.activator.info(
+            "Activating pid=\(item.pid, privacy: .public) title=\(item.title, privacy: .private)"
+        )
         NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
         // raiseMatchingWindow must run on the main thread: kAXRaiseAction internally
         // calls makeKeyAndOrderFront: which is AppKit-main-thread-only. Running it

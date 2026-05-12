@@ -9,6 +9,7 @@ func runAll() async -> Int {
     let suites: [(String, [(String, @MainActor () async throws -> Void)])] = [
         ("WindowItem",              WindowItemTests.all),
         ("PermissionState",         PermissionStateTests.all),
+        ("Localization",            LocalizationTests.all),
         ("SwitcherLayoutCalculator", SwitcherLayoutCalculatorTests.all),
         ("SwitcherStore",           SwitcherStoreTests.all)
     ]
