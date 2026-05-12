@@ -24,6 +24,7 @@ final class SwitcherPanelController {
         panel.isMovable = false
 
         let hostingView = NSHostingView(rootView: SwitcherView(store: store))
+        hostingView.wantsLayer = true
         panel.contentView = hostingView
 
         // Force SwiftUI to build the initial view tree off-screen so the first
@@ -56,18 +57,27 @@ final class SwitcherPanelController {
         let cardMarginY: CGFloat = 12   // .padding(.vertical, 12) outside card
         let verticalSafety: CGFloat = 4
 
-        let width = min(frame.width - 40, 1400)
-        let cardWidth = width - cardMarginX * 2
-        let gridWidth = max(tileW, cardWidth - gridPadX * 2)
+        let maxWidth = min(frame.width - 40, 1400)
+        let maxCardWidth = maxWidth - cardMarginX * 2
+        let maxGridWidth = max(tileW, maxCardWidth - gridPadX * 2)
 
-        // Mirror SwiftUI's adaptive columns using the actual content width.
-        let columns = max(1, Int((gridWidth + gap) / (tileW + gap)))
+        // How many columns fit in the screen-wide layout — that's the upper bound.
+        let maxColumns = max(1, Int((maxGridWidth + gap) / (tileW + gap)))
+
+        // Shrink to actual item count so a 3-item panel doesn't reserve a 4th slot.
+        let columns = max(1, min(maxColumns, itemCount))
         let rows    = max(1, Int(ceil(Double(itemCount) / Double(columns))))
-        let columnW = (gridWidth - CGFloat(columns - 1) * gap) / CGFloat(columns)
+
+        // Per-tile width computed against the wide grid, but applied to the actual
+        // column count so visual tile size stays consistent regardless of item count.
+        let columnW = (maxGridWidth - CGFloat(maxColumns - 1) * gap) / CGFloat(maxColumns)
         let tileH   = columnW / SwitcherLayout.tileAspectRatio
-        let gridH   = CGFloat(rows) * tileH + CGFloat(rows - 1) * gap + gridPadY * 2
-        let cardH   = min(gridH, frame.height * 0.80)
-        let height  = cardH + cardMarginY * 2 + verticalSafety
+
+        let gridWidth = CGFloat(columns) * columnW + CGFloat(columns - 1) * gap
+        let gridH     = CGFloat(rows) * tileH + CGFloat(rows - 1) * gap + gridPadY * 2
+        let cardH     = min(gridH, frame.height * 0.80)
+        let height    = cardH + cardMarginY * 2 + verticalSafety
+        let width     = gridWidth + gridPadX * 2 + cardMarginX * 2
 
         let origin = CGPoint(x: frame.midX - width / 2,
                              y: frame.midY - height / 2)
