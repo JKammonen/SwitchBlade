@@ -25,6 +25,8 @@ final class SwitcherPanelController {
 
         let hostingView = NSHostingView(rootView: SwitcherView(store: store))
         hostingView.wantsLayer = true
+        hostingView.layer?.isOpaque = false          // allow transparency through the layer
+        hostingView.layer?.backgroundColor = .clear  // no implicit grey backing
         panel.contentView = hostingView
 
         // Force SwiftUI to build the initial view tree off-screen so the first

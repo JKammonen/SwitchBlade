@@ -62,6 +62,9 @@ struct SwitcherView: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
         }
+        // Composite the card into a single Metal-backed layer so clipShape
+        // corners are antialiased by the GPU, not the software renderer.
+        .drawingGroup()
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
