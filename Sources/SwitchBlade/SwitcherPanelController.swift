@@ -58,7 +58,7 @@ final class SwitcherPanelController {
         let columns = max(1, Int((gridWidth + gap) / (tileW + gap)))
         let rows    = max(1, Int(ceil(Double(itemCount) / Double(columns))))
         let columnW = (gridWidth - CGFloat(columns - 1) * gap) / CGFloat(columns)
-        let tileH   = columnW / 1.65
+        let tileH   = columnW / SwitcherLayout.tileAspectRatio
         let gridH   = CGFloat(rows) * tileH + CGFloat(rows - 1) * gap + gridPadY * 2
         let cardH   = min(gridH, frame.height * 0.80)
         let height  = cardH + cardMarginY * 2 + verticalSafety

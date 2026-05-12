@@ -4,6 +4,12 @@ import CoreGraphics
 import Foundation
 import SwiftUI
 
+enum SwitcherLayout {
+    /// Shared by `SwitcherView.WindowTile.aspectRatio(...)` and `SwitcherPanelController.sizeAndCenter`.
+    /// Changing one without the other clips tiles or leaves gaps.
+    static let tileAspectRatio: CGFloat = 1.65
+}
+
 enum SBBadgePosition: String, CaseIterable, Identifiable {
     case bottom = "bottom"
     case top    = "top"

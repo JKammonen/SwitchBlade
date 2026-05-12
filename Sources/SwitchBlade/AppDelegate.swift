@@ -69,6 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menuBarController = menuBar
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        hotkeyMonitor?.stop()
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         // Only refresh state display — do NOT re-request permissions here,
         // that causes repeated OS prompts whenever the app comes to front.

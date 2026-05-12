@@ -243,7 +243,7 @@ private struct WindowTile: View {
             .rotationEffect(isSelected ? selectionVisualState.rotation : .degrees(0))
         }
         // aspectRatio on the outer GeometryReader placeholder drives the height.
-        .aspectRatio(1.65, contentMode: .fit)
+        .aspectRatio(SwitcherLayout.tileAspectRatio, contentMode: .fit)
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .onHover { isHovered = $0; if $0 { onHover() } }
         .onTapGesture(perform: onSelect)

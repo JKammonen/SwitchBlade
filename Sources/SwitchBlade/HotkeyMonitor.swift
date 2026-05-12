@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 
+@MainActor
 final class HotkeyMonitor {
     enum Direction {
         case forward
@@ -24,28 +25,43 @@ final class HotkeyMonitor {
         installEventMonitors()
     }
 
-    deinit {
+    /// Tears down event tap and NSEvent monitors. Call before drop to guarantee
+    /// no callback fires after the owner is gone (deinit is non-isolated and
+    /// may race with the main RunLoop's tap callback otherwise).
+    func stop() {
         if let eventTapSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
+            self.eventTapSource = nil
         }
 
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
             CFMachPortInvalidate(eventTap)
+            self.eventTap = nil
         }
 
         if let localFlagsMonitor {
             NSEvent.removeMonitor(localFlagsMonitor)
+            self.localFlagsMonitor = nil
         }
 
         if let globalFlagsMonitor {
             NSEvent.removeMonitor(globalFlagsMonitor)
+            self.globalFlagsMonitor = nil
         }
 
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
+            self.localKeyMonitor = nil
         }
+
+        didInstallEventMonitors = false
     }
+
+    // No deinit cleanup: Swift 6 disallows touching @MainActor properties from
+    // a nonisolated deinit, and the prior race between the main RunLoop's tap
+    // callback and an off-thread deinit was exactly what we're guarding against.
+    // Owners MUST call stop() from MainActor before dropping the monitor.
 
     private func installEventTap() {
         guard eventTap == nil else {

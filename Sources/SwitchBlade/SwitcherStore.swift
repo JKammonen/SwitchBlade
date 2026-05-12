@@ -23,7 +23,9 @@ final class SwitcherStore: ObservableObject {
     private var previewGeneration = 0
     private var recentWindowIDs: [WindowItem.ID] = []
     private var previewCache: [CGWindowID: CachedPreview] = [:]
+    private var previewCacheOrder: [CGWindowID] = []
     private var previewCacheBySignature: [String: CachedPreview] = [:]
+    private var previewCacheBySignatureOrder: [String] = []
     private let maxCachedPreviews = 40
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
@@ -138,32 +140,28 @@ final class SwitcherStore: ObservableObject {
 
     private func showWithPreviews() {
         let windowIDs = items.filter { !$0.isMinimized }.map(\.windowID)
+
+        previewGeneration += 1
+        let generation = previewGeneration
+
         guard !windowIDs.isEmpty else {
             hoverEnabled = false
             isVisible = true
             onShow?()
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                hoverEnabled = true
-            }
+            scheduleHoverEnable(generation: generation)
             return
         }
 
         let initialPreviewCount = min(10, windowIDs.count)
 
-        previewGeneration += 1
-        let generation = previewGeneration
         let catalog = self.catalog
         previewLoadTask?.cancel()
 
         hoverEnabled = false
         isVisible = true
-        onShow?()        
+        onShow?()
 
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            hoverEnabled = true
-        }
+        scheduleHoverEnable(generation: generation)
 
         previewLoadTask = Task {
             let previews = await catalog.capturePreviews(
@@ -226,24 +224,41 @@ final class SwitcherStore: ObservableObject {
             guard let bounds = boundsByID[windowID] else { continue }
             let cachedPreview = CachedPreview(image: image, bounds: bounds)
             previewCache[windowID] = cachedPreview
+            previewCacheOrder.removeAll { $0 == windowID }
+            previewCacheOrder.append(windowID)
 
             if let item = itemsByID[windowID] {
-                previewCacheBySignature[previewSignature(for: item)] = cachedPreview
+                let signature = previewSignature(for: item)
+                previewCacheBySignature[signature] = cachedPreview
+                previewCacheBySignatureOrder.removeAll { $0 == signature }
+                previewCacheBySignatureOrder.append(signature)
             }
         }
 
         let liveIDs = Set(items.map(\.windowID))
         previewCache = previewCache.filter { liveIDs.contains($0.key) }
+        previewCacheOrder.removeAll { !liveIDs.contains($0) }
 
         let liveSignatures = Set(items.map(previewSignature(for:)))
         previewCacheBySignature = previewCacheBySignature.filter { liveSignatures.contains($0.key) }
+        previewCacheBySignatureOrder.removeAll { !liveSignatures.contains($0) }
 
-        while previewCache.count > maxCachedPreviews, let firstKey = previewCache.keys.first {
-            previewCache.removeValue(forKey: firstKey)
+        while previewCache.count > maxCachedPreviews, !previewCacheOrder.isEmpty {
+            let oldest = previewCacheOrder.removeFirst()
+            previewCache.removeValue(forKey: oldest)
         }
 
-        while previewCacheBySignature.count > maxCachedPreviews, let firstKey = previewCacheBySignature.keys.first {
-            previewCacheBySignature.removeValue(forKey: firstKey)
+        while previewCacheBySignature.count > maxCachedPreviews, !previewCacheBySignatureOrder.isEmpty {
+            let oldest = previewCacheBySignatureOrder.removeFirst()
+            previewCacheBySignature.removeValue(forKey: oldest)
+        }
+    }
+
+    private func scheduleHoverEnable(generation: Int) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard let self, self.previewGeneration == generation else { return }
+            self.hoverEnabled = true
         }
     }
 
