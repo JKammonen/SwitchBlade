@@ -1,0 +1,195 @@
+import AppKit
+import SwiftUI
+
+struct SettingsView: View {
+    @ObservedObject var settings: SwitchBladeSettings
+
+    private var badgeColorBinding: Binding<Color> {
+        Binding(
+            get: { settings.badgeColor },
+            set: { color in
+                if let ns = NSColor(color).usingColorSpace(.sRGB) {
+                    settings.badgeRed   = ns.redComponent
+                    settings.badgeGreen = ns.greenComponent
+                    settings.badgeBlue  = ns.blueComponent
+                }
+            }
+        )
+    }
+
+    private var bgColorBinding: Binding<Color> {
+        Binding(
+            get: { settings.backgroundColor },
+            set: { color in
+                if let ns = NSColor(color).usingColorSpace(.sRGB) {
+                    settings.bgRed   = ns.redComponent
+                    settings.bgGreen = ns.greenComponent
+                    settings.bgBlue  = ns.blueComponent
+                }
+            }
+        )
+    }
+
+    private var highlightColorBinding: Binding<Color> {
+        Binding(
+            get: { settings.highlightColor },
+            set: { color in
+                if let ns = NSColor(color).usingColorSpace(.sRGB) {
+                    settings.highlightRed   = ns.redComponent
+                    settings.highlightGreen = ns.greenComponent
+                    settings.highlightBlue  = ns.blueComponent
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            group(title: "Hotkey") {
+                row("Modifier") {
+                    Picker("", selection: $settings.modifier) {
+                        ForEach(SBModifier.allCases) { m in Text(m.title).tag(m) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                divider()
+                row("Trigger key") {
+                    Picker("", selection: $settings.triggerKey) {
+                        ForEach(SBTriggerKey.allCases) { k in Text(k.title).tag(k) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                divider()
+                Text("Active: \(settings.modifier.title) + \(settings.triggerKey.title)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            }
+
+            group(title: "Background") {
+                row("Color") {
+                    ColorPicker("", selection: bgColorBinding, supportsOpacity: false)
+                        .labelsHidden()
+                        .fixedSize()
+                }
+                divider()
+                sliderRow("Opacity", value: $settings.backgroundOpacity, in: 0.0...1.0, unit: "%", scale: 100)
+            }
+
+            group(title: "Badge bar") {
+                row("Position") {
+                    Picker("", selection: $settings.badgePosition) {
+                        ForEach(SBBadgePosition.allCases) { p in Text(p.title).tag(p) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                divider()
+                row("App icon color") {
+                    Toggle("", isOn: $settings.badgeUseAppColor)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                divider()
+                row("Color") {
+                    ColorPicker("", selection: badgeColorBinding, supportsOpacity: false)
+                        .labelsHidden()
+                        .fixedSize()
+                        .disabled(settings.badgeUseAppColor)
+                        .opacity(settings.badgeUseAppColor ? 0.4 : 1)
+                }
+                divider()
+                sliderRow("Opacity", value: $settings.badgeOpacity, in: 0.0...1.0, unit: "%", scale: 100)
+                divider()
+                sliderRow("Icon size", value: $settings.badgeIconSize, in: 12...32, unit: "pt", scale: 1)
+                divider()
+                sliderRow("Text size", value: $settings.badgeFontSize, in: 9...16, unit: "pt", scale: 1)
+                divider()
+                sliderRow("Vert. padding", value: $settings.badgeVerticalPadding, in: 2...14, unit: "pt", scale: 1)
+            }
+
+            group(title: "Selection") {
+                row("Animation") {
+                    Picker("", selection: $settings.selectionEffect) {
+                        ForEach(SBSelectionEffect.allCases) { effect in
+                            Text(effect.title).tag(effect)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                divider()
+                row("Highlight color") {
+                    ColorPicker("", selection: highlightColorBinding, supportsOpacity: false)
+                        .labelsHidden()
+                        .fixedSize()
+                }
+                divider()
+                sliderRow("Strength", value: $settings.highlightStrength, in: 0.2...1.0, unit: "%", scale: 100)
+                divider()
+                sliderRow("Opacity", value: $settings.highlightOpacity, in: 0.15...1.0, unit: "%", scale: 100)
+            }
+
+            group(title: "Preview size") {
+                sliderRow("Min width", value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: - helpers
+
+    private func group<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+                .padding(.bottom, 4)
+            VStack(spacing: 0) {
+                content()
+            }
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        }
+        .padding(.bottom, 14)
+    }
+
+    private func row<Content: View>(_ label: String, @ViewBuilder trailing: () -> Content) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 13))
+            Spacer()
+            trailing()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+    }
+
+    private func sliderRow(_ label: String, value: Binding<Double>, in range: ClosedRange<Double>, unit: String, scale: Double) -> some View {
+        let step: Double = unit == "%" ? 0.05 : 1
+        return HStack(spacing: 10) {
+            Text(label)
+                .font(.system(size: 13))
+            Slider(value: value, in: range, step: step)
+            Text("\(Int(value.wrappedValue * scale))\(unit)")
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+    }
+
+    private func divider() -> some View {
+        Divider().padding(.leading, 12)
+    }
+}
+

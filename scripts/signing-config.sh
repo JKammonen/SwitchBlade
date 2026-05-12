@@ -1,0 +1,6 @@
+#!/bin/zsh
+
+export SWITCHBLADE_CODESIGN_SUPPORT_DIR="$HOME/Library/Application Support/SwitchBlade/codesign"
+export SWITCHBLADE_CODESIGN_KEYCHAIN="$SWITCHBLADE_CODESIGN_SUPPORT_DIR/SwitchBladeCodesign.keychain-db"
+export SWITCHBLADE_CODESIGN_PASSWORD_FILE="$SWITCHBLADE_CODESIGN_SUPPORT_DIR/keychain-password.txt"
+export SWITCHBLADE_CODESIGN_IDENTITY_NAME="${CODESIGN_IDENTITY_NAME:-SwitchBlade Local Codesign}"
