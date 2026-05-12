@@ -37,7 +37,9 @@ final class SwitcherPanelController {
         hostingView.layer?.isOpaque = false
         hostingView.layer?.backgroundColor = .clear
         // CAShapeLayer mask: GPU-composited, properly antialiased alpha at edges.
+        // allowsEdgeAntialiasing = true ensures the mask edge is subpixel-smooth.
         // Updated in sizeAndCenter every time the panel is resized.
+        cardMaskLayer.allowsEdgeAntialiasing = true
         hostingView.layer?.mask = cardMaskLayer
         panel.contentView = hostingView
 

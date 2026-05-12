@@ -4,12 +4,12 @@ import ApplicationServices
 final class WindowActivator: @unchecked Sendable {
     func activate(_ item: WindowItem) {
         NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
-        // AX IPC (kAXWindowsAttribute, kAXRaiseAction) blocks the caller until the
-        // target app responds — move off the main thread so the switcher panel is
-        // already gone before any unresponsive-app delay hits.
-        Task.detached(priority: .userInitiated) { [self] in
-            self.raiseMatchingWindow(item)
-        }
+        // raiseMatchingWindow must run on the main thread: kAXRaiseAction internally
+        // calls makeKeyAndOrderFront: which is AppKit-main-thread-only. Running it
+        // off-thread causes EXC_BREAKPOINT ("Must only be used from the main thread").
+        // The panel is already dismissed before this point because commitSelection()
+        // defers the entire activate() call past one RunLoop cycle (Task @MainActor).
+        raiseMatchingWindow(item)
     }
 
     func close(_ item: WindowItem) {
