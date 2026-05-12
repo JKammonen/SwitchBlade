@@ -79,15 +79,19 @@ if command -v codesign >/dev/null 2>&1; then
             security unlock-keychain -p "$keychain_password" "$SWITCHBLADE_CODESIGN_KEYCHAIN" >/dev/null 2>&1 || true
         fi
 
-        existing_keychains=(${(f)$(security list-keychains -d user | tr -d '"')})
-        security list-keychains -d user -s "$SWITCHBLADE_CODESIGN_KEYCHAIN" ${existing_keychains[@]} >/dev/null 2>&1 || true
+        # Add the SwitchBlade keychain to the user search list without disturbing
+        # existing entries (bash-compatible; zsh (f) flag not used here).
+        existing_keychains="$(security list-keychains -d user | tr -d '"' | tr -s ' \n' ' ')"
+        security list-keychains -d user -s "$SWITCHBLADE_CODESIGN_KEYCHAIN" $existing_keychains >/dev/null 2>&1 || true
 
         identity_hash="$(security find-identity -v -p codesigning "$SWITCHBLADE_CODESIGN_KEYCHAIN" | awk -v name="$identity_name" '$0 ~ name { print $2; exit }')"
 
         if [[ -n "$identity_hash" ]]; then
             codesign --force --deep --sign "$identity_hash" --keychain "$SWITCHBLADE_CODESIGN_KEYCHAIN" "$app_bundle"
+            echo "Signed with identity: $identity_name"
         else
             codesign --force --deep --sign - "$app_bundle"
+            echo "Warning: local identity not found, used ad-hoc signing (TCC permissions will reset on rebuild)"
         fi
     else
         codesign --force --deep --sign - "$app_bundle"
