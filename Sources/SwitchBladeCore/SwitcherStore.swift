@@ -220,7 +220,12 @@ final class SwitcherStore: ObservableObject {
             }
 
             // Refresh SC content cache so the next Cmd+Tab is warm.
-            await catalog.refreshContentCache()
+            // Detached so a fast Cmd+Tab+release (which cancels previewLoadTask)
+            // still leaves the cache fresh — otherwise the next switch hits a
+            // stale cache and previews load slowly.
+            Task.detached(priority: .utility) { [catalog] in
+                await catalog.refreshContentCache()
+            }
         }
     }
 
