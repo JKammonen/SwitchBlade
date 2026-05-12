@@ -55,16 +55,20 @@ struct SwitcherView: View {
         }
         // Panel is sized to exactly fit the content + cardMargin padding outside.
         // No fixedSize or maxHeight tricks needed — NSPanel height is authoritative.
+        //
+        // Background and border are drawn as GPU-rendered Shape fills rather than
+        // via clipShape (which uses a CGContext software mask and produces jagged
+        // edges). Grid content has 14 pt inset on all sides so it never reaches
+        // the 20 pt corner area — clipShape is not needed.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(settings.backgroundColor.opacity(settings.backgroundOpacity))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(settings.backgroundColor.opacity(settings.backgroundOpacity))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
         }
-        // Composite the card into a single Metal-backed layer so clipShape
-        // corners are antialiased by the GPU, not the software renderer.
-        .drawingGroup()
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
