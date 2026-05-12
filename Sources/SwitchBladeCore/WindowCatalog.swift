@@ -41,6 +41,17 @@ actor SCContentCache {
         return Date().timeIntervalSince(lastSuccessfulRefresh) > Self.staleThreshold
     }
 
+    /// Refreshes inline when the cache is missing or stale, respecting the
+    /// failure cooldown. Doesn't return SCShareableContent (non-Sendable across
+    /// actor boundaries in Swift 6) — caller reads `.content` separately, which
+    /// is permitted via the `@preconcurrency` import.
+    func refreshIfStale() async {
+        if content == nil || isStale() {
+            guard shouldRetryAfterFailure() else { return }
+            await refreshIfAllowed()
+        }
+    }
+
     static func capture(window: SCWindow, maxDim: Int) async throws -> NSImage? {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = CGFloat(filter.pointPixelScale)
@@ -182,33 +193,19 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     func capturePreviews(
         for windowIDs: [CGWindowID],
-        maxCount: Int? = nil,
-        maxConcurrentCaptures: Int = 3
+        maxCount: Int?,
+        maxConcurrentCaptures: Int
     ) async -> [CGWindowID: NSImage] {
         // Single preflight syscall instead of currentState() which does three.
         guard CGPreflightScreenCaptureAccess() else { return [:] }
 
-        // Refresh BEFORE captures when cache is missing or older than ~10 s.
-        // Stale SCShareableContent → stale SCWindow refs → first SCScreenshotManager
-        // call after idle is dramatically slower (the capture pipeline has to
-        // re-resolve each window). 10 s threshold avoids re-fetching on rapid
-        // repeat Cmd+Tabs while still keeping the cache fresh after a small pause.
-        let cacheState = await (content: contentCache.content, stale: contentCache.isStale())
-        if cacheState.content == nil || cacheState.stale {
-            guard await contentCache.shouldRetryAfterFailure() else { return [:] }
-            await contentCache.refreshIfAllowed()
-        }
-
-        let cachedContent = await contentCache.content
-        let content: SCShareableContent
-        if let c = cachedContent {
-            content = c
-        } else {
-            guard await contentCache.shouldRetryAfterFailure() else { return [:] }
-            await contentCache.refreshIfAllowed()
-            guard let fresh = await contentCache.content else { return [:] }
-            content = fresh
-        }
+        // Refresh on the hot path when the cache is empty or older than ~10 s.
+        // Stale SCShareableContent → stale SCWindow refs → SCScreenshotManager
+        // re-resolves each window on first capture, which is what makes the
+        // first preview slow after idle. 10 s is short enough to dodge that and
+        // long enough to skip the fetch on rapid repeat Cmd+Tabs.
+        await contentCache.refreshIfStale()
+        guard let content = await contentCache.content else { return [:] }
         let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
         let maxDim = 320
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
