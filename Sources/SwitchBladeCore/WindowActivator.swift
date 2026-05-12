@@ -1,7 +1,7 @@
 import AppKit
 import ApplicationServices
 
-final class WindowActivator: @unchecked Sendable {
+final class WindowActivator: WindowActivating, @unchecked Sendable {
     func activate(_ item: WindowItem) {
         NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
         // raiseMatchingWindow must run on the main thread: kAXRaiseAction internally

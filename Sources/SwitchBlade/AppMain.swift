@@ -1,4 +1,5 @@
 import AppKit
+import SwitchBladeCore
 
 @main
 struct SwitchBladeMain {

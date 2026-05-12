@@ -1,7 +1,9 @@
 import AppKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate {
+    public override init() { super.init() }
+
     private let permissionService = PermissionService()
     private lazy var windowCatalog = WindowCatalog(permissionService: permissionService)
     private let windowActivator = WindowActivator()
@@ -16,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastPresentedMissingPermissions: [PermissionKind] = []
     private var isPresentingPermissionAlert = false
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         // Run as a menu-bar-only agent — no Dock icon, and ensures our own
         // windows are excluded from the switcher (activationPolicy != .regular).
         NSApp.setActivationPolicy(.accessory)
@@ -73,11 +75,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menuBarController = menuBar
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    public func applicationWillTerminate(_ notification: Notification) {
         hotkeyMonitor?.stop()
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) {
+    public func applicationDidBecomeActive(_ notification: Notification) {
         // Only refresh state display — do NOT re-request permissions here,
         // that causes repeated OS prompts whenever the app comes to front.
         store.refreshPermissionState()

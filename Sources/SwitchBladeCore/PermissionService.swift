@@ -51,7 +51,7 @@ struct PermissionState: Equatable {
     }
 }
 
-final class PermissionService: Sendable {
+final class PermissionService: PermissionProviding, Sendable {
     private let accessibilityPromptKey = "AXTrustedCheckOptionPrompt"
 
     func currentState() -> PermissionState {

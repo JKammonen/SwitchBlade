@@ -1,0 +1,66 @@
+import AppKit
+@testable import SwitchBladeCore
+
+enum WindowItemTests {
+
+    static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("WindowItem/displayTitle_usesTitleWhenAvailable", displayTitle_usesTitle),
+        ("WindowItem/displayTitle_fallsBackToAppName_whenEmpty", displayTitle_fallsBack),
+        ("WindowItem/subtitle_isAppName_whenTitlePresent", subtitle_appName),
+        ("WindowItem/subtitle_isFallback_whenTitleEmpty", subtitle_fallback),
+        ("WindowItem/id_isWindowID", id_isWindowID),
+        ("WindowItem/withPreview_setsPreview_keepsOtherFields", withPreview_setsPreview),
+        ("WindowItem/withPreview_canClearPreview", withPreview_canClear),
+        ("WindowItem/equatable_sameContents_areEqual", equatable_sameContents)
+    ]
+
+    @MainActor static func displayTitle_usesTitle() throws {
+        let item = makeItem(id: 1, appName: "Safari", title: "Apple News")
+        try expectEqual(item.displayTitle, "Apple News")
+    }
+
+    @MainActor static func displayTitle_fallsBack() throws {
+        let item = makeItem(id: 1, appName: "Calculator", title: "")
+        try expectEqual(item.displayTitle, "Calculator")
+    }
+
+    @MainActor static func subtitle_appName() throws {
+        let item = makeItem(id: 1, appName: "Safari", title: "Apple News")
+        try expectEqual(item.subtitle, "Safari")
+    }
+
+    @MainActor static func subtitle_fallback() throws {
+        let item = makeItem(id: 1, appName: "Calculator", title: "")
+        try expectEqual(item.subtitle, "App")
+    }
+
+    @MainActor static func id_isWindowID() throws {
+        let item = makeItem(id: 42)
+        try expectEqual(item.id, 42)
+    }
+
+    @MainActor static func withPreview_setsPreview() throws {
+        let item = makeItem(id: 1)
+        try expectNil(item.preview)
+
+        let img = NSImage(size: CGSize(width: 10, height: 10))
+        let updated = item.withPreview(img)
+
+        try expect(updated.preview === img)
+        try expectEqual(updated.id, item.id)
+        try expectEqual(updated.appName, item.appName)
+        try expectEqual(updated.title, item.title)
+    }
+
+    @MainActor static func withPreview_canClear() throws {
+        let img = NSImage(size: CGSize(width: 10, height: 10))
+        let cleared = makeItem(id: 1).withPreview(img).withPreview(nil)
+        try expectNil(cleared.preview)
+    }
+
+    @MainActor static func equatable_sameContents() throws {
+        let a = makeItem(id: 1, appName: "X", title: "Y")
+        let b = makeItem(id: 1, appName: "X", title: "Y")
+        try expectEqual(a, b)
+    }
+}

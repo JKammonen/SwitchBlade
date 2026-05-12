@@ -41,7 +41,7 @@ actor SCContentCache {
     }
 }
 
-final class WindowCatalog: Sendable {
+final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let excludedBundleIdentifiers: Set<String> = [
         "com.apple.PasswordsUIAgent",
         "com.apple.PasskeysUIService",

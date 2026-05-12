@@ -16,9 +16,9 @@ final class SwitcherStore: ObservableObject {
     /// Used so Command-release is detected even when the async show is still in flight.
     private(set) var isSwitching = false
 
-    private let catalog: WindowCatalog
-    private let activator: WindowActivator
-    private let permissionService: PermissionService
+    private let catalog: WindowSnapshotProviding
+    private let activator: WindowActivating
+    private let permissionService: PermissionProviding
     private var previewLoadTask: Task<Void, Never>?
     private var previewGeneration = 0
     private var recentWindowIDs: [WindowItem.ID] = []
@@ -36,7 +36,7 @@ final class SwitcherStore: ObservableObject {
         let bounds: CGRect
     }
 
-    init(catalog: WindowCatalog, activator: WindowActivator, permissionService: PermissionService) {
+    init(catalog: WindowSnapshotProviding, activator: WindowActivating, permissionService: PermissionProviding) {
         self.catalog = catalog
         self.activator = activator
         self.permissionService = permissionService
@@ -212,6 +212,7 @@ final class SwitcherStore: ObservableObject {
             if !deferredWindowIDs.isEmpty {
                 let allPreviews = await catalog.capturePreviews(
                     for: deferredWindowIDs,
+                    maxCount: nil,
                     maxConcurrentCaptures: 6
                 )
                 guard !Task.isCancelled else { return }
