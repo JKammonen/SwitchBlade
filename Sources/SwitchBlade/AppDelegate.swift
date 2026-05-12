@@ -132,6 +132,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func guidanceText(for state: PermissionState, primaryPermission: PermissionKind) -> String {
         let missingTitles = state.missingPermissions.map(\.title).joined(separator: ", ")
-        return "Command+Tab tarvitsee vähintään Input Monitoring -luvan. Puuttuvat luvat: \(missingTitles). Avaa oikea System Settings -sivu ja laita SwitchBlade päälle."
+        return "SwitchBlade tarvitsee luvan toimiakseen. Puuttuvat luvat: \(missingTitles). Avaa oikea System Settings -sivu ja laita SwitchBlade päälle."
     }
 }
