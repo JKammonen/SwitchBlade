@@ -28,7 +28,7 @@ final class SwitcherPanelController {
         panel.animationBehavior = .none
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovable = false
 
