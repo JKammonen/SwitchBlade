@@ -1,12 +1,15 @@
 import AppKit
 import ApplicationServices
 
-final class WindowActivator {
+final class WindowActivator: @unchecked Sendable {
     func activate(_ item: WindowItem) {
-        _ = MainActor.assumeIsolated {
-            NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
+        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
+        // AX IPC (kAXWindowsAttribute, kAXRaiseAction) blocks the caller until the
+        // target app responds — move off the main thread so the switcher panel is
+        // already gone before any unresponsive-app delay hits.
+        Task.detached(priority: .userInitiated) { [self] in
+            self.raiseMatchingWindow(item)
         }
-        raiseMatchingWindow(item)
     }
 
     func close(_ item: WindowItem) {

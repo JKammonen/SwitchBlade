@@ -145,7 +145,12 @@ final class SwitcherStore: ObservableObject {
 
         rememberRecentSelection(item.id)
         hide()
-        activator.activate(item)
+        // Defer past the current RunLoop cycle so panel.orderOut renders before
+        // WindowActivator starts synchronous AX IPC to the target app.
+        let activator = self.activator
+        Task { @MainActor in
+            activator.activate(item)
+        }
     }
 
     func cancel() {
