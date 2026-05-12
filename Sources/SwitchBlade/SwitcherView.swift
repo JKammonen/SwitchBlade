@@ -1,6 +1,17 @@
 import AppKit
 import SwiftUI
 
+/// Per-PID cache for dominant icon colors. One app may produce many tiles
+/// (e.g. ten Safari windows), and the sampling work is identical for each
+/// window of the same app — compute once, share across tiles and invocations.
+actor DominantColorCache {
+    static let shared = DominantColorCache()
+    private var cache: [pid_t: Color] = [:]
+
+    func color(for pid: pid_t) -> Color? { cache[pid] }
+    func set(_ color: Color, for pid: pid_t) { cache[pid] = color }
+}
+
 struct SwitcherView: View {
     @ObservedObject var store: SwitcherStore
     @ObservedObject private var settings = SwitchBladeSettings.shared
@@ -270,22 +281,29 @@ private struct WindowTile: View {
 
             selectionPulse = false
         }
-        .task(id: settings.badgeUseAppColor ? item.windowID : 0) {
+        .task(id: settings.badgeUseAppColor ? Int(item.pid) : 0) {
             guard settings.badgeUseAppColor, let icon = item.icon else {
                 appDominantColor = nil
+                return
+            }
+            if let cached = await DominantColorCache.shared.color(for: item.pid) {
+                appDominantColor = cached
                 return
             }
             // Run off the main thread, and only when the setting is enabled.
             let color = await Task.detached(priority: .utility) {
                 Self.dominantColor(from: icon)
             }.value
+            if let color {
+                await DominantColorCache.shared.set(color, for: item.pid)
+            }
             appDominantColor = color
         }
     }
 
     /// Samples the average color of non-transparent pixels in a scaled-down version of the icon.
     /// Marked nonisolated so it can run on a background thread via Task.detached.
-    nonisolated private static func dominantColor(from image: NSImage) -> Color? {
+    nonisolated static func dominantColor(from image: NSImage) -> Color? {
         let side = 12
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let colorSpace = CGColorSpaceCreateDeviceRGB()

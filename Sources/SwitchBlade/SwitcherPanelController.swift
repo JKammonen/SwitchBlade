@@ -22,7 +22,13 @@ final class SwitcherPanelController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovable = false
-        panel.contentView = NSHostingView(rootView: SwitcherView(store: store))
+
+        let hostingView = NSHostingView(rootView: SwitcherView(store: store))
+        panel.contentView = hostingView
+
+        // Force SwiftUI to build the initial view tree off-screen so the first
+        // user-visible show isn't paying the ~30–100ms first-render cost.
+        hostingView.layoutSubtreeIfNeeded()
     }
 
     func show(itemCount: Int) {

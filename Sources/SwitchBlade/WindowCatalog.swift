@@ -55,17 +55,47 @@ final class WindowCatalog: Sendable {
         self.permissionService = permissionService
     }
 
-    /// Call once at launch. Warms SCShareableContent without polling it forever.
+    /// Warms SCShareableContent cache. Safe to call only when SR permission is
+    /// confirmed — never call at launch before TCC has settled.
     func startBackgroundRefresh() {
         Task.detached(priority: .utility) { [contentCache] in
             await contentCache.refreshIfAllowed()
         }
     }
 
+    /// Re-warms the cache after a capture session so the next Cmd+Tab is fast.
+    func refreshContentCache() async {
+        await contentCache.refreshIfAllowed()
+    }
+
+    /// Fast path used on the Cmd+Tab critical path. Skips the AX walk for
+    /// minimized windows entirely; merge those in lazily via `snapshotMinimized`.
+    func snapshotVisibleOnly() -> [WindowItem] {
+        snapshotInternal(includeMinimized: false).visible
+    }
+
+    /// Returns minimized windows from an AX walk. ~150–500ms with many running
+    /// apps — call from a background task and merge into items after the panel
+    /// is already on screen. Safe to call AX read APIs off the main thread.
+    func snapshotMinimized() async -> [WindowItem] {
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        return minimizedItems(excluding: Set(), frontmostPID: frontmostPID)
+    }
+
     func snapshot() -> [WindowItem] {
+        let result = snapshotInternal(includeMinimized: true)
+        return result.visible + result.minimized
+    }
+
+    private struct SnapshotResult {
+        let visible: [WindowItem]
+        let minimized: [WindowItem]
+    }
+
+    private func snapshotInternal(includeMinimized: Bool) -> SnapshotResult {
         let options: CGWindowListOption = [.excludeDesktopElements]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
+            return SnapshotResult(visible: [], minimized: [])
         }
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -129,7 +159,10 @@ final class WindowCatalog: Sendable {
             )
         }
 
-        return visibleItems + minimizedItems(excluding: visibleWindowIDs, frontmostPID: frontmostPID)
+        let minimized = includeMinimized
+            ? minimizedItems(excluding: visibleWindowIDs, frontmostPID: frontmostPID)
+            : []
+        return SnapshotResult(visible: visibleItems, minimized: minimized)
     }
 
     func capturePreviews(
@@ -137,7 +170,8 @@ final class WindowCatalog: Sendable {
         maxCount: Int? = nil,
         maxConcurrentCaptures: Int = 3
     ) async -> [CGWindowID: NSImage] {
-        guard !permissionService.currentState().needsScreenRecording else { return [:] }
+        // Single preflight syscall instead of currentState() which does three.
+        guard CGPreflightScreenCaptureAccess() else { return [:] }
 
         // Use warm cached SCShareableContent — avoids slow SCShareableContent.current on hot path.
         let cachedContent = await contentCache.content
@@ -145,10 +179,7 @@ final class WindowCatalog: Sendable {
         if let c = cachedContent {
             content = c
         } else {
-            guard await contentCache.shouldRetryAfterFailure(),
-                  CGPreflightScreenCaptureAccess() else {
-                return [:]
-            }
+            guard await contentCache.shouldRetryAfterFailure() else { return [:] }
             await contentCache.refreshIfAllowed()
             guard let fresh = await contentCache.content else { return [:] }
             content = fresh

@@ -23,6 +23,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         permissionService.requestIfNeeded()
 
+        // Warm SC cache after a short delay so TCC has settled from the
+        // accessibility prompt above. Only fires when SR is already granted.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, self.permissionService.currentState().hasScreenRecording else { return }
+            self.windowCatalog.startBackgroundRefresh()
+        }
+
         let panelController = SwitcherPanelController(store: store)
         store.refreshPermissionState()
         presentPermissionGuidanceIfNeeded()
@@ -36,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let hotkeyMonitor = HotkeyMonitor()
         hotkeyMonitor.onHotkey = { [weak self] direction in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.store.cycle(forward: direction == .forward)
             }
         }
@@ -48,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotkeyMonitor.onCommandReleased = { [weak self] in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.store.commitSelection()
             }
         }

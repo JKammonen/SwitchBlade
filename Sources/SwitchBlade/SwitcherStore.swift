@@ -70,8 +70,8 @@ final class SwitcherStore: ObservableObject {
         if !isVisible {
             isSwitching = true
             previewLoadTask?.cancel()
-            let snapshot = catalog.snapshot()
-            let orderedItems = orderedItemsForDisplay(from: snapshot)
+            let visibleSnapshot = catalog.snapshotVisibleOnly()
+            let orderedItems = orderedItemsForDisplay(from: visibleSnapshot)
             guard !orderedItems.isEmpty else {
                 isSwitching = false
                 return
@@ -80,6 +80,16 @@ final class SwitcherStore: ObservableObject {
             items = orderedItems.map(itemWithCachedPreview)
             selectedID = items[safe: items.count > 1 ? 1 : 0]?.id
             showWithPreviews()
+
+            // Lazily fetch minimized windows off the main thread and merge them in.
+            // The AX walk is ~150–500ms with many apps — running it here would block
+            // the panel from appearing.
+            let mergeGeneration = previewGeneration
+            let catalog = self.catalog
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let minimized = await catalog.snapshotMinimized()
+                await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+            }
             return
         }
 
@@ -185,7 +195,7 @@ final class SwitcherStore: ObservableObject {
             let previews = await catalog.capturePreviews(
                 for: windowIDs,
                 maxCount: initialPreviewCount,
-                maxConcurrentCaptures: 3
+                maxConcurrentCaptures: 6
             )
 
             guard !Task.isCancelled else { return }
@@ -197,11 +207,14 @@ final class SwitcherStore: ObservableObject {
             if !deferredWindowIDs.isEmpty {
                 let allPreviews = await catalog.capturePreviews(
                     for: deferredWindowIDs,
-                    maxConcurrentCaptures: 3
+                    maxConcurrentCaptures: 6
                 )
                 guard !Task.isCancelled else { return }
                 self.applyPreviews(allPreviews, generation: generation)
             }
+
+            // Refresh SC content cache so the next Cmd+Tab is warm.
+            await catalog.refreshContentCache()
         }
     }
 
@@ -270,6 +283,16 @@ final class SwitcherStore: ObservableObject {
             let oldest = previewCacheBySignatureOrder.removeFirst()
             previewCacheBySignature.removeValue(forKey: oldest)
         }
+    }
+
+    private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) {
+        guard isVisible, previewGeneration == generation, !minimized.isEmpty else { return }
+        let existingIDs = Set(items.map(\.id))
+        let newItems = minimized
+            .filter { !existingIDs.contains($0.id) }
+            .map(itemWithCachedPreview)
+        guard !newItems.isEmpty else { return }
+        items = items + newItems
     }
 
     private func scheduleHoverEnable(generation: Int) {
