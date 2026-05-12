@@ -23,10 +23,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         permissionService.requestIfNeeded()
 
-        // Warm the SCShareableContent cache immediately so previews are
-        // ready before the user first presses Command+Tab.
-        windowCatalog.startBackgroundRefresh()
-
         let panelController = SwitcherPanelController(store: store)
         store.refreshPermissionState()
         presentPermissionGuidanceIfNeeded()

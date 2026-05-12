@@ -22,6 +22,7 @@ final class SwitcherStore: ObservableObject {
     private var previewLoadTask: Task<Void, Never>?
     private var previewGeneration = 0
     private var recentWindowIDs: [WindowItem.ID] = []
+    nonisolated(unsafe) private var activationObserver: Any?
     private var previewCache: [CGWindowID: CachedPreview] = [:]
     private var previewCacheOrder: [CGWindowID] = []
     private var previewCacheBySignature: [String: CachedPreview] = [:]
@@ -40,6 +41,23 @@ final class SwitcherStore: ObservableObject {
         self.activator = activator
         self.permissionService = permissionService
         self.permissionState = permissionService.currentState()
+
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  !self.isVisible else { return }
+            self.trackSystemActivation(pid: app.processIdentifier)
+        }
+    }
+
+    deinit {
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+        }
     }
 
     func refreshPermissionState() {
@@ -267,9 +285,12 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func orderedItemsForDisplay(from snapshot: [WindowItem]) -> [WindowItem] {
-        guard let currentFrontmost = snapshot.first else {
-            return []
-        }
+        guard !snapshot.isEmpty else { return [] }
+
+        // Use isFrontmostApp (from NSWorkspace) rather than snapshot.first (z-order).
+        // CGWindowList z-order may lag briefly after activation, causing the wrong
+        // app to appear as frontmost on a quick toggle press.
+        let currentFrontmost = snapshot.first(where: { $0.isFrontmostApp }) ?? snapshot[0]
 
         let liveIDs = Set(snapshot.map(\.id))
         recentWindowIDs.removeAll { !liveIDs.contains($0) }
@@ -296,6 +317,18 @@ final class SwitcherStore: ObservableObject {
 
     private func rememberRecentSelection(_ selectedID: WindowItem.ID) {
         recentWindowIDs = [selectedID] + items.map(\.id).filter { $0 != selectedID }
+    }
+
+    private func trackSystemActivation(pid: pid_t) {
+        // Move all windows of the newly activated app to the front of recentWindowIDs
+        // so the order reflects real system MRU, not just SwitchBlade-initiated switches.
+        let activated = recentWindowIDs.filter { id in
+            items.first(where: { $0.id == id })?.pid == pid
+        }
+        let rest = recentWindowIDs.filter { id in
+            items.first(where: { $0.id == id })?.pid != pid
+        }
+        recentWindowIDs = activated + rest
     }
 
     private func removeItem(withID id: WindowItem.ID) {
