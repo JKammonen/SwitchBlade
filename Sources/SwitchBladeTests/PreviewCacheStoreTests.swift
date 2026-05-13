@@ -8,7 +8,8 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/record_then_hydrated_returnsImage_byWindowID", roundTrip_byWindowID),
         ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
         ("PreviewCache/hydrated_fallsBackTo_signature_whenBoundsChange", signatureFallback),
-        ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature)
+        ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
+        ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate)
     ]
 
     @MainActor static func hydrated_noMatch() throws {
@@ -53,6 +54,21 @@ enum PreviewCacheStoreTests {
         let respawned = makeItem(id: 2, pid: 100, appName: "App", title: "Doc")
         let result = store.hydrated(respawned)
         try expect(result.preview === img)
+    }
+
+    /// User resizes a window: same windowID, different bounds. The cache still
+    /// hands back the previously-captured image so the tile has *something* to
+    /// show while a fresh capture is in flight (replaces it on landing).
+    @MainActor static func staleWhileRevalidate() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(id: 1, bounds: .init(x: 0, y: 0, width: 800, height: 600))
+        let img = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: img], liveItems: [original])
+
+        // Same windowID, but the window has been resized.
+        let resized = makeItem(id: 1, bounds: .init(x: 0, y: 0, width: 1200, height: 900))
+        let result = store.hydrated(resized)
+        try expect(result.preview === img, "expected stale image despite bounds drift")
     }
 
     @MainActor static func capacityEvictsSignature() throws {

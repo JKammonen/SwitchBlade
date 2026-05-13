@@ -26,12 +26,17 @@ final class PreviewCacheStore {
         let bounds: CGRect
     }
 
-    /// Returns a hydrated copy of `item` if we have a usable preview, otherwise
-    /// the item unchanged. Bounds-mismatched window-ID hits skip to the
-    /// signature fallback so a moved window doesn't show a stale snapshot.
+    /// Returns a hydrated copy of `item` if we have any usable preview,
+    /// otherwise the item unchanged.
+    ///
+    /// Stale-while-revalidate: a windowID hit returns its cached image even
+    /// when bounds drifted (user resized the window). The fresh capture is
+    /// still in flight and will replace this preview when it lands. The user
+    /// sees an instant, slightly off-aspect preview instead of a blank tile
+    /// for ~100 ms. Window IDs are stable for the lifetime of the window in
+    /// macOS, so there's no risk of showing the wrong window's image.
     func hydrated(_ item: WindowItem) -> WindowItem {
-        if let cached = byID[item.windowID],
-           cached.bounds.integral == item.bounds.integral {
+        if let cached = byID[item.windowID] {
             return item.withPreview(cached.image)
         }
         if let cached = bySignature[signature(for: item)] {
