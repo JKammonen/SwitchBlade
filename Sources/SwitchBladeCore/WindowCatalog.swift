@@ -156,6 +156,26 @@ private struct WindowCaptureOutcome {
     let secondAttempt: SCContentCache.CaptureAttemptResult?
 }
 
+enum WindowSharingPolicy {
+    static func canListWindow(appName: String, bundleIdentifier: String?, title: String, sharingState: Int) -> Bool {
+        if isMicrosoftTeams(appName: appName, bundleIdentifier: bundleIdentifier),
+           title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .localizedCaseInsensitiveContains("sharing indicator") {
+            return false
+        }
+
+        guard sharingState == 0 else { return true }
+        return isMicrosoftTeams(appName: appName, bundleIdentifier: bundleIdentifier)
+    }
+
+    private static func isMicrosoftTeams(appName: String, bundleIdentifier: String?) -> Bool {
+        let normalizedName = appName.lowercased()
+        let normalizedBundle = (bundleIdentifier ?? "").lowercased()
+        return normalizedName.contains("teams")
+            && normalizedBundle.hasPrefix("com.microsoft.teams")
+    }
+}
+
 final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let excludedBundleIdentifiers: Set<String> = [
         "com.apple.PasswordsUIAgent",
@@ -289,6 +309,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 bounds: bounds,
                 isFrontmostApp: ownerPID == frontmostPID,
                 isMinimized: false,
+                canCapturePreview: sharingState != 0,
                 preview: nil,
                 icon: application?.icon,
                 bundleIdentifier: application?.bundleIdentifier
@@ -439,17 +460,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         title: String,
         sharingState: Int
     ) -> Bool {
-        // sharingState == kCGWindowSharingNone (0) means macOS will refuse to
-        // surface the window via ScreenCaptureKit at all — Teams meetings,
-        // password autofill, DRM-protected video, ChatGPT desktop etc. We
-        // skip these on purpose: listing them would only add tiles that can
-        // never show a preview, and an oversized app-icon placeholder reads
-        // as "broken capture" more than as a useful entry. macOS native
-        // Cmd+Tab still reaches them — users with the rare need to switch to
-        // such windows should use that, not SwitchBlade.
-        guard sharingState != 0,
-              let application,
+        // sharingState == kCGWindowSharingNone (0) means macOS may refuse to
+        // capture a preview for the window. Most such windows are privacy /
+        // DRM / autofill surfaces and should stay hidden. Microsoft Teams is
+        // the important exception: real meeting/chat windows can use this
+        // sharing state, and switching to them is more important than showing
+        // a live preview. Those tiles fall back to the app-icon treatment.
+        guard let application,
               application.isFinishedLaunching else {
+            return false
+        }
+        guard WindowSharingPolicy.canListWindow(
+            appName: appName,
+            bundleIdentifier: application.bundleIdentifier,
+            title: title,
+            sharingState: sharingState
+        ) else {
             return false
         }
         // Allow .regular apps and also our own .accessory process (settings window etc.)
@@ -508,6 +534,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     bounds: axFrame(on: window) ?? CGRect(x: 0, y: 0, width: 640, height: 400),
                     isFrontmostApp: application.processIdentifier == frontmostPID,
                     isMinimized: true,
+                    canCapturePreview: false,
                     preview: nil,
                     icon: application.icon,
                     bundleIdentifier: application.bundleIdentifier

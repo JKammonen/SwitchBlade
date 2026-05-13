@@ -78,9 +78,10 @@ Always-active rules that apply here too:
    continuation. Cancellation is requested but ScreenCaptureKit may ignore it.
    Comments and naming are deliberately honest about this. Do not rename it to
    `captureWithTimeout` or claim it's a hard timeout.
-3. **No `sharingState=0` windows.** Teams meetings, ChatGPT desktop, autofill prompts
-   etc. set `kCGWindowSharingNone`. They cannot be captured. We filter them out;
-   listing them produced ugly placeholder tiles that read as "broken capture".
+3. **No `sharingState=0` windows except Microsoft Teams.** ChatGPT desktop, autofill
+   prompts, DRM surfaces, etc. set `kCGWindowSharingNone` and stay filtered out.
+   Microsoft Teams is the exception because real meeting/chat windows can use this
+   state; those tiles may fall back to the app-icon treatment instead of a preview.
 4. **Local signing cert, not ad-hoc.** `scripts/setup-local-codesign.sh` creates a
    stable self-signed identity. Ad-hoc signing would lose TCC permissions on every
    rebuild, breaking incremental dev.

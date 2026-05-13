@@ -8,6 +8,7 @@ struct WindowItem: Identifiable, Equatable {
     let bounds: CGRect
     let isFrontmostApp: Bool
     let isMinimized: Bool
+    let canCapturePreview: Bool
     let preview: NSImage?
     let icon: NSImage?
     /// Bundle identifier of the owning application, when available. Used to
@@ -34,6 +35,7 @@ struct WindowItem: Identifiable, Equatable {
             bounds: bounds,
             isFrontmostApp: isFrontmostApp,
             isMinimized: isMinimized,
+            canCapturePreview: canCapturePreview,
             preview: preview,
             icon: icon,
             bundleIdentifier: bundleIdentifier

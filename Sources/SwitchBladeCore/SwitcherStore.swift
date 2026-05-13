@@ -334,7 +334,7 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        let windowIDs = items.filter { !$0.isMinimized }.map(\.windowID)
+        let windowIDs = items.filter { !$0.isMinimized && $0.canCapturePreview }.map(\.windowID)
 
         previewGeneration += 1
         let generation = previewGeneration

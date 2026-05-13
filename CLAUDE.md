@@ -67,7 +67,8 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 
 1. No SCStream — user rejected continuous capture pipeline.
 2. Soft timeout, not hard — comments are honest that SCKit may ignore cancellation.
-3. No `sharingState=0` windows — Teams meetings etc. filtered out.
+3. No `sharingState=0` windows except Microsoft Teams — Teams must remain switchable,
+   other private/DRM/autofill surfaces stay filtered.
 4. Local signing cert — TCC permissions survive rebuilds.
 5. Custom test runner — Xcode not installed, CLT-only toolchain.
 

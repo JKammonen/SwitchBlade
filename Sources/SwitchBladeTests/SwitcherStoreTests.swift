@@ -20,6 +20,7 @@ enum SwitcherStoreTests {
         ("Store/ordering_appGroupedKeepsFrontmostFirst", ordering_appGroupedKeepsFrontmostFirst),
         // preview modes
         ("Store/previewMode_iconsOnlySkipsCaptures", previewMode_iconsOnlySkipsCaptures),
+        ("Store/previewCapture_skipsUncapturableItems", previewCapture_skipsUncapturableItems),
         // handleKeyDown
         ("Store/handleKeyDown_whenNotVisible_false", handleKeyDown_notVisible),
         ("Store/handleKeyDown_tab_forward", handleKeyDown_tabForward),
@@ -231,6 +232,25 @@ enum SwitcherStoreTests {
         try expect(store.isVisible)
         try expectEqual(catalog.captureCallCount, 0)
         try expect(store.items.allSatisfy { $0.preview == nil })
+    }
+
+    @MainActor static func previewCapture_skipsUncapturableItems() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, canCapturePreview: false),
+            makeItem(id: 3)
+        ]
+
+        store.cycle(forward: true)
+        await runPendingMainTasks()
+
+        try expectEqual(catalog.lastCaptureWindowIDs, [1, 3])
     }
 
     // MARK: handleKeyDown

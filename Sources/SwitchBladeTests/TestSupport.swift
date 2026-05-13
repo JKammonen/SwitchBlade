@@ -14,6 +14,7 @@ func makeItem(
     title: String = "Window",
     isFrontmostApp: Bool = false,
     isMinimized: Bool = false,
+    canCapturePreview: Bool = true,
     bounds: CGRect = CGRect(x: 0, y: 0, width: 800, height: 600),
     bundleIdentifier: String? = nil
 ) -> WindowItem {
@@ -25,6 +26,7 @@ func makeItem(
         bounds: bounds,
         isFrontmostApp: isFrontmostApp,
         isMinimized: isMinimized,
+        canCapturePreview: canCapturePreview,
         preview: nil,
         icon: nil,
         bundleIdentifier: bundleIdentifier
