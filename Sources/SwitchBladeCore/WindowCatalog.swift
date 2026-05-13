@@ -70,7 +70,14 @@ actor SCContentCache {
         }
     }
 
-    static func capture(window: SCWindow, maxDim: Int) async throws -> NSImage? {
+    func invalidate(reason: String) {
+        content = nil
+        lastRefreshFailedAt = nil
+        lastSuccessfulRefresh = nil
+        Logger.capture.notice("SCShareableContent cache invalidated: \(reason, privacy: .public)")
+    }
+
+    static func capture(window: SCWindow, maxDim: Int) async throws -> NSImage {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = CGFloat(filter.pointPixelScale)
         let fullW = max(1, Int(window.frame.width * scale))
@@ -84,32 +91,67 @@ actor SCContentCache {
         return NSImage(cgImage: cgImg, size: .zero)
     }
 
-    /// Captures the window or gives up after `timeoutMs`. SCKit's
-    /// `captureImage` can occasionally hang for many seconds after a TCC
-    /// hiccup or display reconfiguration; this prevents the whole capture
-    /// batch from being held hostage by one slow window.
+    enum CaptureAttemptResult: @unchecked Sendable {
+        case success(NSImage)
+        case failed
+        case timedOut
+    }
+
+    /// Captures the window or stops waiting after `timeoutMs`.
     ///
-    /// The timeout cancels our wait, but the underlying SCKit task may still
-    /// be running. We accept that — the resources will be released when the
-    /// process eventually returns or errors.
-    static func captureWithTimeout(window: SCWindow, maxDim: Int, timeoutMs: Int) async -> NSImage? {
+    /// Important: this is a UX timeout, not a hard resource kill. We cancel our
+    /// Swift Task and return `.timedOut` to the caller promptly, but if
+    /// ScreenCaptureKit is blocked inside `captureImage`, that framework work
+    /// may continue until Apple's API returns or notices cancellation.
+    static func captureWithSoftTimeout(window: SCWindow, maxDim: Int, timeoutMs: Int) async -> CaptureAttemptResult {
         nonisolated(unsafe) let capturedWindow = window
-        return await withTaskGroup(of: NSImage?.self) { group in
-            group.addTask {
-                try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim)
+        let captureTask = Task.detached(priority: .userInitiated) { () -> CaptureAttemptResult in
+            do {
+                return .success(try await SCContentCache.capture(window: capturedWindow, maxDim: maxDim))
+            } catch {
+                return .failed
             }
-            group.addTask {
+        }
+
+        return await withCheckedContinuation { continuation in
+            let box = OneShotContinuation(continuation)
+
+            Task {
+                let result = await captureTask.value
+                box.resume(returning: result)
+            }
+
+            Task {
                 try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
-                return nil
+                captureTask.cancel()
+                box.resume(returning: .timedOut)
             }
-            // First non-nil wins — if capture finishes first with an image,
-            // that's our result. If the timeout fires first, we get nil.
-            // We don't await both: cancel the loser to free the task slot.
-            let winner = await group.next() ?? nil
-            group.cancelAll()
-            return winner
         }
     }
+}
+
+private final class OneShotContinuation<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: Value) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+}
+
+private struct WindowCaptureOutcome {
+    let windowID: CGWindowID
+    let image: NSImage?
+    let firstAttempt: SCContentCache.CaptureAttemptResult
+    let secondAttempt: SCContentCache.CaptureAttemptResult?
 }
 
 final class WindowCatalog: WindowSnapshotProviding, Sendable {
@@ -142,6 +184,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// gate prevents this from hammering SCKit during rapid app switches.
     func refreshContentCacheIfStale() async {
         await contentCache.refreshIfStale()
+    }
+
+    func invalidateContentCache(reason: String) async {
+        await contentCache.invalidate(reason: reason)
     }
 
     /// Fast path used on the Cmd+Tab critical path. Skips the AX walk for
@@ -282,8 +328,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
         let captureStart = Date()
 
-        return await withTaskGroup(of: (CGWindowID, NSImage)?.self) { group in
+        return await withTaskGroup(of: WindowCaptureOutcome.self) { group in
             var nextIndex = 0
+            var firstAttemptTimeouts = 0
+            var firstAttemptFailures = 0
+            var secondAttemptTimeouts = 0
+            var secondAttemptFailures = 0
 
             func enqueueNextCapture() -> Bool {
                 guard nextIndex < captureTargets.count else { return false }
@@ -293,26 +343,43 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 group.addTask {
                     // First attempt — usually succeeds, but SCKit's first call
                     // after a few seconds idle can fail silently while the
-                    // capture pipeline warms up. Both attempts are bounded by
-                    // a 300 ms timeout so one slow window can't hold up the
-                    // whole batch.
-                    if let image = await SCContentCache.captureWithTimeout(
+                    // capture pipeline warms up. Both attempts are bounded by a
+                    // 300 ms UX timeout so one slow preview doesn't block the
+                    // caller, though the underlying SCKit work may outlive it.
+                    let first = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow, maxDim: maxDim, timeoutMs: 300
-                    ) {
-                        return (windowID, image)
+                    )
+                    if case .success(let image) = first {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: image,
+                            firstAttempt: first,
+                            secondAttempt: nil
+                        )
                     }
                     Logger.capture.notice(
                         "First capture failed/timed out for windowID=\(windowID, privacy: .public) — retrying"
                     )
-                    if let image = await SCContentCache.captureWithTimeout(
+                    let second = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow, maxDim: maxDim, timeoutMs: 300
-                    ) {
-                        return (windowID, image)
+                    )
+                    if case .success(let image) = second {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: image,
+                            firstAttempt: first,
+                            secondAttempt: second
+                        )
                     }
                     Logger.capture.error(
                         "Both capture attempts failed for windowID=\(windowID, privacy: .public)"
                     )
-                    return nil
+                    return WindowCaptureOutcome(
+                        windowID: windowID,
+                        image: nil,
+                        firstAttempt: first,
+                        secondAttempt: second
+                    )
                 }
 
                 return true
@@ -325,15 +392,35 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
             var result: [CGWindowID: NSImage] = [:]
             for await captureResult in group {
-                if let (windowID, image) = captureResult {
-                    result[windowID] = image
+                switch captureResult.firstAttempt {
+                case .success:
+                    break
+                case .failed:
+                    firstAttemptFailures += 1
+                case .timedOut:
+                    firstAttemptTimeouts += 1
+                }
+
+                if let secondAttempt = captureResult.secondAttempt {
+                    switch secondAttempt {
+                    case .success:
+                        break
+                    case .failed:
+                        secondAttemptFailures += 1
+                    case .timedOut:
+                        secondAttemptTimeouts += 1
+                    }
+                }
+
+                if let image = captureResult.image {
+                    result[captureResult.windowID] = image
                 }
                 _ = enqueueNextCapture()
             }
 
             let ms = Date().timeIntervalSince(captureStart) * 1000
             Logger.capture.info(
-                "Captured \(result.count, privacy: .public)/\(captureTargets.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+                "Captured \(result.count, privacy: .public)/\(captureTargets.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"
             )
             return result
         }

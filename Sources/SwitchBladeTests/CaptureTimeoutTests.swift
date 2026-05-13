@@ -8,13 +8,13 @@ enum CaptureTimeoutTests {
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
         ("ActivationRefresh/updatesMRU_onlyWhenHidden", activation_updatesMRU_onlyWhenHidden),
-        ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle)
+        ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
+        ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation)
     ]
 
-    /// We can't invoke captureWithTimeout against a real SCWindow from tests,
-    /// but we can verify the underlying Task.sleep timing guarantee that
-    /// `captureWithTimeout` relies on for its bound. If sleep is well-behaved,
-    /// the timeout race is well-behaved.
+    /// We can't invoke captureWithSoftTimeout against a real SCWindow from
+    /// tests, but we can verify the Task.sleep timing primitive it uses for
+    /// its UX bound.
     static func timeoutBounded() async throws {
         let start = Date()
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -88,5 +88,20 @@ enum CaptureTimeoutTests {
         try expectEqual(store.items.first?.pid, 100)  // frontmost unchanged
         // After activation pid=300, its window (id=3) should be the recent.
         try expect(store.items.map(\.pid).prefix(2).contains(300))
+    }
+
+    @MainActor static func storeForwardsLifecycleInvalidation() async throws {
+        let (store, catalog, _, _) = makeStore()
+
+        store.invalidateCaptureCache(reason: "test display change")
+
+        for _ in 0 ..< 30 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            if catalog.invalidateContentCacheCallCount > 0 { break }
+        }
+
+        try expectEqual(catalog.invalidateContentCacheCallCount, 1)
+        try expectEqual(catalog.lastInvalidationReason, "test display change")
     }
 }

@@ -72,6 +72,13 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     func refreshContentCacheIfStale() async {
         refreshIfStaleCallCount += 1
     }
+
+    private(set) var invalidateContentCacheCallCount = 0
+    private(set) var lastInvalidationReason: String?
+    func invalidateContentCache(reason: String) async {
+        invalidateContentCacheCallCount += 1
+        lastInvalidationReason = reason
+    }
 }
 
 final class MockWindowActivator: WindowActivating, @unchecked Sendable {

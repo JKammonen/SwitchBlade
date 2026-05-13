@@ -28,6 +28,7 @@ final class SwitcherStore: ObservableObject {
     private let permissionService: PermissionProviding
     private let previewCache: PreviewCacheStore
     private let mruTracker: MRUTracker
+    private let performanceMetrics: SwitcherPerformanceMetrics
 
     private var previewLoadTask: Task<Void, Never>?
     private var previewGeneration = 0
@@ -52,6 +53,7 @@ final class SwitcherStore: ObservableObject {
         userDefaults: UserDefaults = .standard,
         previewCache: PreviewCacheStore = PreviewCacheStore(),
         mruTracker: MRUTracker? = nil,
+        performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
         activationWarmupWindow: TimeInterval = 60
     ) {
         self.catalog = catalog
@@ -60,6 +62,7 @@ final class SwitcherStore: ObservableObject {
         self.permissionState = permissionService.currentState()
         self.previewCache = previewCache
         self.mruTracker = mruTracker ?? MRUTracker(userDefaults: userDefaults)
+        self.performanceMetrics = performanceMetrics
         self.activationWarmupWindow = activationWarmupWindow
 
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -109,6 +112,13 @@ final class SwitcherStore: ObservableObject {
         permissionState = permissionService.currentState()
     }
 
+    func invalidateCaptureCache(reason: String) {
+        let catalogRef = self.catalog
+        Task.detached(priority: .utility) {
+            await catalogRef.invalidateContentCache(reason: reason)
+        }
+    }
+
     func cycle(forward: Bool) {
         // Mark "the user is using the switcher right now" so handleAppActivation
         // knows it's worth warming the SCKit cache on app switches for the next
@@ -135,8 +145,9 @@ final class SwitcherStore: ObservableObject {
 
             let cachedHits = items.filter { $0.preview != nil }.count
             let coldMs = Date().timeIntervalSince(openStart) * 1000
+            let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
             Logger.switcher.info(
-                "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache"
+                "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
             )
             showWithPreviews()
 
@@ -308,8 +319,9 @@ final class SwitcherStore: ObservableObject {
             let firstBatchMs = Date().timeIntervalSince(batchStart) * 1000
             let successRate = windowIDs.isEmpty ? 0
                 : Double(previews.count) / Double(min(initialPreviewCount, windowIDs.count))
+            let batchSummary = self.performanceMetrics.recordFirstPreviewBatch(milliseconds: firstBatchMs)
             Logger.switcher.info(
-                "First preview batch: \(previews.count, privacy: .public)/\(min(initialPreviewCount, windowIDs.count), privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public))"
+                "First preview batch: \(previews.count, privacy: .public)/\(min(initialPreviewCount, windowIDs.count), privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public)); rolling n=\(batchSummary.count, privacy: .public), avg=\(batchSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(batchSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(batchSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(batchSummary.max, format: .fixed(precision: 1), privacy: .public)"
             )
             self.applyPreviews(previews, generation: generation)
 

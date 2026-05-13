@@ -17,6 +17,9 @@ protocol WindowSnapshotProviding: Sendable {
     /// opportunistic warmups (e.g. on NSWorkspace activation) where we don't
     /// want to hammer SCKit on every fast app switch.
     func refreshContentCacheIfStale() async
+    /// Drops cached ScreenCaptureKit content after lifecycle events that can
+    /// make SCWindow references stale (sleep/wake, display reconfiguration).
+    func invalidateContentCache(reason: String) async
 }
 
 /// Window activation / closing dependency. Concrete WindowActivator conforms;

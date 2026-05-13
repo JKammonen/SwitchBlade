@@ -16,6 +16,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: SwitcherPanelController?
     private var hotkeyMonitor: HotkeyMonitor?
     private var menuBarController: MenuBarController?
+    private var lifecycleObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var lastPresentedMissingPermissions: [PermissionKind] = []
     private var isPresentingPermissionAlert = false
 
@@ -88,10 +89,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuBar = MenuBarController()
         menuBar.setup()
         self.menuBarController = menuBar
+
+        installLifecycleObservers()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         hotkeyMonitor?.stop()
+        for (center, observer) in lifecycleObservers {
+            center.removeObserver(observer)
+        }
+        lifecycleObservers.removeAll()
     }
 
     public func applicationDidBecomeActive(_ notification: Notification) {
@@ -144,5 +151,52 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func guidanceText(for state: PermissionState, primaryPermission: PermissionKind) -> String {
         let missingTitles = state.missingPermissions.map(\.title).joined(separator: ", ")
         return L10n.tr(.alertPermissionBody, missingTitles)
+    }
+
+    private func installLifecycleObservers() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        lifecycleObservers.append((
+            workspaceCenter,
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handleCaptureContentInvalidation(reason: "system will sleep")
+                }
+            }
+        ))
+        lifecycleObservers.append((
+            workspaceCenter,
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handleCaptureContentInvalidation(reason: "system did wake")
+                }
+            }
+        ))
+
+        let defaultCenter = NotificationCenter.default
+        lifecycleObservers.append((
+            defaultCenter,
+            defaultCenter.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handleCaptureContentInvalidation(reason: "screen parameters changed")
+                }
+            }
+        ))
+    }
+
+    private func handleCaptureContentInvalidation(reason: String) {
+        Logger.capture.notice("Handling capture lifecycle event: \(reason, privacy: .public)")
+        store.invalidateCaptureCache(reason: reason)
     }
 }
