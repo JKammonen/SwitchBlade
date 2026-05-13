@@ -345,8 +345,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         title: String,
         sharingState: Int
     ) -> Bool {
-        guard sharingState != 0,
-              let application,
+        guard let application,
               application.isFinishedLaunching else {
             return false
         }
@@ -366,6 +365,17 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         if trimmedTitle.isEmpty,
            appName.localizedCaseInsensitiveContains("autofill") {
             return false
+        }
+
+        // sharingState == kCGWindowSharingNone (0) means the app has flagged
+        // this window non-capturable (Teams meetings, password autofill, some
+        // DRM-protected video). We deliberately DON'T filter these out — the
+        // user still wants to Cmd+Tab to them. The preview just stays blank
+        // (placeholder takes over with a large app icon).
+        if sharingState == 0 {
+            Logger.switcher.notice(
+                "Listing non-capturable window: \(appName, privacy: .public) — preview will be blank"
+            )
         }
 
         return true
