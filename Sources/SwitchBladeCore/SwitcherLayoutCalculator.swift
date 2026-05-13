@@ -36,8 +36,10 @@ enum SwitcherLayoutCalculator {
         // Upper bound on columns from screen width.
         let maxColumns = max(1, Int((maxGridWidth + gap) / (tileW + gap)))
 
-        // Shrink to actual item count so a 3-item panel doesn't reserve a 4th slot.
-        let columns = max(1, min(maxColumns, max(1, itemCount)))
+        // Shrink and balance to actual item count so small sets don't reserve
+        // awkward empty slots (e.g. 5 items as 4+1). Prefer 3+2 or 4+4 style
+        // packing until the list is large enough that max-width scanning wins.
+        let columns = balancedColumnCount(itemCount: itemCount, maxColumns: maxColumns)
         let rows = max(1, Int(ceil(Double(max(1, itemCount)) / Double(columns))))
 
         // Per-tile width computed against the wide grid, but applied to the actual
@@ -57,5 +59,27 @@ enum SwitcherLayoutCalculator {
                                 size: CGSize(width: width, height: height))
 
         return Output(panelFrame: panelFrame, columns: columns, rows: rows)
+    }
+
+    static func balancedColumnCount(itemCount: Int, maxColumns: Int) -> Int {
+        let count = max(1, itemCount)
+        let upperBound = max(1, min(maxColumns, count))
+
+        // For large sets, keep the panel dense and wide; users are scanning.
+        guard count <= maxColumns * 2 else {
+            return upperBound
+        }
+
+        return (1...upperBound).min { lhs, rhs in
+            score(columnCount: lhs, itemCount: count) < score(columnCount: rhs, itemCount: count)
+        } ?? upperBound
+    }
+
+    private static func score(columnCount: Int, itemCount: Int) -> Int {
+        let rows = Int(ceil(Double(itemCount) / Double(columnCount)))
+        let emptySlots = rows * columnCount - itemCount
+        let lastRowCount = itemCount % columnCount
+        let lonelyLastRowPenalty = lastRowCount == 1 ? 4 : 0
+        return emptySlots * 10 + lonelyLastRowPenalty + rows * 5
     }
 }

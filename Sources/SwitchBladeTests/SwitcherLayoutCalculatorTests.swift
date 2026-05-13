@@ -5,7 +5,8 @@ enum SwitcherLayoutCalculatorTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("Layout/threeItems_packIntoThreeColumns", threeItems_threeColumns),
-        ("Layout/eightItems_fillsToMaxColumns_singleRow", eightItems_fill),
+        ("Layout/fiveItems_balancesAsThreeByTwo", fiveItems_balanced),
+        ("Layout/eightItems_balancesAsFourByTwo", eightItems_balanced),
         ("Layout/panelCenteredOnScreen", panelCentered),
         ("Layout/threeItemPanel_narrowerThanMaxPanel", threeNarrower),
         ("Layout/heightCapsAt80PercentOfScreen", heightCap),
@@ -24,12 +25,17 @@ enum SwitcherLayoutCalculatorTests {
         try expectEqual(r.rows, 1)
     }
 
-    static func eightItems_fill() throws {
+    static func fiveItems_balanced() throws {
+        let r = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen, tileMinWidth: 300, itemCount: 5, tileAspectRatio: aspect))
+        try expectEqual(r.columns, 3)
+        try expectEqual(r.rows, 2)
+    }
+
+    static func eightItems_balanced() throws {
         let r = SwitcherLayoutCalculator.calculate(.init(
             visibleFrame: screen, tileMinWidth: tileW, itemCount: 8, tileAspectRatio: aspect))
-        // Max-width clamp is 1400; with 220 pt tiles + 10 pt gap, only ~5 columns
-        // fit, so 8 items wrap to a second row.
-        try expectGreaterThanOrEqual(r.columns, 5)
+        try expectEqual(r.columns, 4)
         try expectEqual(r.rows, 2)
         // Sanity: rows × columns must hold all items.
         try expectGreaterThanOrEqual(r.columns * r.rows, 8)

@@ -45,22 +45,33 @@ final class PreviewCacheStore {
         return item
     }
 
-    /// Records fresh previews and prunes anything not in `liveItems`. The prune
-    /// step is what keeps the cache from growing past `capacity` even when an
-    /// app spawns many short-lived windows.
-    func record(_ previews: [CGWindowID: NSImage], liveItems: [WindowItem]) {
+    /// Records fresh previews and prunes anything not in `liveItems`. Returns
+    /// the accepted previews so callers don't immediately paint captures we
+    /// intentionally rejected.
+    ///
+    /// The prune step is what keeps the cache from growing past `capacity`
+    /// even when an app spawns many short-lived windows.
+    @discardableResult
+    func record(_ previews: [CGWindowID: NSImage], liveItems: [WindowItem]) -> [CGWindowID: NSImage] {
         guard !previews.isEmpty else {
             keepOnlyLive(liveItems)
-            return
+            return [:]
         }
         let itemsByID = Dictionary(uniqueKeysWithValues: liveItems.map { ($0.windowID, $0) })
+        let isBlankStorm = Self.isBlankStorm(previews)
+        var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
             guard let item = itemsByID[windowID] else { continue }
+            if shouldRejectTransientBlankCapture(image, for: item, isBlankStorm: isBlankStorm) {
+                continue
+            }
             let cached = CachedPreview(image: image, bounds: item.bounds)
             byID[windowID] = cached
             bySignature[signature(for: item)] = cached
+            accepted[windowID] = image
         }
         keepOnlyLive(liveItems)
+        return accepted
     }
 
     private func keepOnlyLive(_ items: [WindowItem]) {
@@ -70,5 +81,73 @@ final class PreviewCacheStore {
 
     private func signature(for item: WindowItem) -> String {
         "\(item.pid)::\(item.displayTitle)"
+    }
+
+    private func shouldRejectTransientBlankCapture(
+        _ image: NSImage,
+        for item: WindowItem,
+        isBlankStorm: Bool
+    ) -> Bool {
+        guard Self.isMostlyWhite(image) else {
+            return false
+        }
+        return isBlankStorm || isSafariLike(item)
+    }
+
+    private func isSafariLike(_ item: WindowItem) -> Bool {
+        let bundle = (item.bundleIdentifier ?? "").lowercased()
+        let appName = item.appName.lowercased()
+        return bundle == "com.apple.safari"
+            || bundle == "com.apple.safaritechnologypreview"
+            || appName == "safari"
+    }
+
+    static func isMostlyWhite(_ image: NSImage) -> Bool {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return false
+        }
+
+        let width = 16
+        let height = 16
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return false
+        }
+
+        context.interpolationQuality = .low
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var opaqueSamples = 0
+        var whiteSamples = 0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            let alpha = pixels[index + 3]
+            guard alpha > 245 else { continue }
+            opaqueSamples += 1
+            let red = pixels[index]
+            let green = pixels[index + 1]
+            let blue = pixels[index + 2]
+            if red > 246, green > 246, blue > 246 {
+                whiteSamples += 1
+            }
+        }
+
+        guard opaqueSamples > 0 else { return false }
+        return Double(whiteSamples) / Double(opaqueSamples) > 0.97
+    }
+
+    private static func isBlankStorm(_ previews: [CGWindowID: NSImage]) -> Bool {
+        guard previews.count >= 3 else { return false }
+        let whiteCount = previews.values.reduce(0) { count, image in
+            count + (isMostlyWhite(image) ? 1 : 0)
+        }
+        return Double(whiteCount) / Double(previews.count) >= 0.75
     }
 }

@@ -398,9 +398,9 @@ final class SwitcherStore: ObservableObject {
 
     private func applyPreviews(_ previews: [CGWindowID: NSImage], generation: Int) {
         guard isVisible, previewGeneration == generation else { return }
-        previewCache.record(previews, liveItems: items)
+        let acceptedPreviews = previewCache.record(previews, liveItems: items)
         items = items.map { item in
-            previews[item.windowID].map { item.withPreview($0) } ?? item
+            acceptedPreviews[item.windowID].map { item.withPreview($0) } ?? item
         }
     }
 

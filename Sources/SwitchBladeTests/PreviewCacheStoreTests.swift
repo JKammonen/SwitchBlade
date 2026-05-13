@@ -9,7 +9,12 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
         ("PreviewCache/hydrated_fallsBackTo_signature_whenBoundsChange", signatureFallback),
         ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
-        ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate)
+        ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate),
+        ("PreviewCache/mostlyWhiteDetection", mostlyWhiteDetection),
+        ("PreviewCache/safariBlankCapture_isRejectedWithoutExistingPreview", safariBlankCaptureIsRejectedWithoutExistingPreview),
+        ("PreviewCache/safariBlankCapture_doesNotReplaceExistingPreview", safariBlankCaptureDoesNotReplaceExistingPreview),
+        ("PreviewCache/blankStorm_rejectsMostlyWhiteBatch", blankStormRejectsMostlyWhiteBatch),
+        ("PreviewCache/singleWhiteNonSafariCapture_isAccepted", singleWhiteNonSafariCaptureIsAccepted)
     ]
 
     @MainActor static func hydrated_noMatch() throws {
@@ -84,5 +89,77 @@ enum PreviewCacheStoreTests {
         try expectNil(store.hydrated(a).preview)
         try expect(store.hydrated(b).preview != nil)
         try expect(store.hydrated(c).preview != nil)
+    }
+
+    @MainActor static func mostlyWhiteDetection() throws {
+        try expect(PreviewCacheStore.isMostlyWhite(solidImage(color: .white)))
+        try expect(!PreviewCacheStore.isMostlyWhite(solidImage(color: .black)))
+        try expect(!PreviewCacheStore.isMostlyWhite(solidImage(color: .systemBlue)))
+    }
+
+    @MainActor static func safariBlankCaptureDoesNotReplaceExistingPreview() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "Safari", bundleIdentifier: "com.apple.Safari")
+        let good = solidImage(color: .systemBlue)
+        let blank = solidImage(color: .white)
+
+        let firstAccepted = store.record([1: good], liveItems: [item])
+        try expect(firstAccepted[1] === good)
+
+        let secondAccepted = store.record([1: blank], liveItems: [item])
+        try expectNil(secondAccepted[1])
+        try expect(store.hydrated(item).preview === good)
+    }
+
+    @MainActor static func safariBlankCaptureIsRejectedWithoutExistingPreview() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "Safari", bundleIdentifier: "com.apple.Safari")
+        let blank = solidImage(color: .white)
+
+        let accepted = store.record([1: blank], liveItems: [item])
+
+        try expectNil(accepted[1])
+        try expectNil(store.hydrated(item).preview)
+    }
+
+    @MainActor static func blankStormRejectsMostlyWhiteBatch() throws {
+        let store = PreviewCacheStore()
+        let a = makeItem(id: 1, appName: "Notes", bundleIdentifier: "com.apple.Notes")
+        let b = makeItem(id: 2, appName: "Finder", bundleIdentifier: "com.apple.finder")
+        let c = makeItem(id: 3, appName: "Mail", bundleIdentifier: "com.apple.mail")
+
+        let accepted = store.record(
+            [
+                1: solidImage(color: .white),
+                2: solidImage(color: .white),
+                3: solidImage(color: .white)
+            ],
+            liveItems: [a, b, c]
+        )
+
+        try expect(accepted.isEmpty)
+        try expectNil(store.hydrated(a).preview)
+        try expectNil(store.hydrated(b).preview)
+        try expectNil(store.hydrated(c).preview)
+    }
+
+    @MainActor static func singleWhiteNonSafariCaptureIsAccepted() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
+        let blank = solidImage(color: .white)
+
+        let accepted = store.record([1: blank], liveItems: [item])
+
+        try expect(accepted[1] === blank)
+        try expect(store.hydrated(item).preview === blank)
+    }
+
+    private static func solidImage(color: NSColor) -> NSImage {
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        image.lockFocus()
+        color.setFill()
+        NSRect(x: 0, y: 0, width: 16, height: 16).fill()
+        image.unlockFocus()
+        return image
     }
 }
