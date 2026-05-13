@@ -345,7 +345,16 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         title: String,
         sharingState: Int
     ) -> Bool {
-        guard let application,
+        // sharingState == kCGWindowSharingNone (0) means macOS will refuse to
+        // surface the window via ScreenCaptureKit at all — Teams meetings,
+        // password autofill, DRM-protected video, ChatGPT desktop etc. We
+        // skip these on purpose: listing them would only add tiles that can
+        // never show a preview, and an oversized app-icon placeholder reads
+        // as "broken capture" more than as a useful entry. macOS native
+        // Cmd+Tab still reaches them — users with the rare need to switch to
+        // such windows should use that, not SwitchBlade.
+        guard sharingState != 0,
+              let application,
               application.isFinishedLaunching else {
             return false
         }
@@ -365,17 +374,6 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         if trimmedTitle.isEmpty,
            appName.localizedCaseInsensitiveContains("autofill") {
             return false
-        }
-
-        // sharingState == kCGWindowSharingNone (0) means the app has flagged
-        // this window non-capturable (Teams meetings, password autofill, some
-        // DRM-protected video). We deliberately DON'T filter these out — the
-        // user still wants to Cmd+Tab to them. The preview just stays blank
-        // (placeholder takes over with a large app icon).
-        if sharingState == 0 {
-            Logger.switcher.notice(
-                "Listing non-capturable window: \(appName, privacy: .public) — preview will be blank"
-            )
         }
 
         return true
