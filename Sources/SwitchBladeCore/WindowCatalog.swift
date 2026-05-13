@@ -251,8 +251,25 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 nextIndex += 1
                 nonisolated(unsafe) let capturedWindow = window
                 group.addTask {
-                    guard let image = try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim) else { return nil }
-                    return (windowID, image)
+                    // First attempt — usually succeeds, but SCKit's first call
+                    // after a few seconds idle can fail silently while the
+                    // capture pipeline warms up. That's why the user sees the
+                    // first tile (frontmost / freshly-active window, not in
+                    // the preview cache because it had focus before idle)
+                    // blank until they trigger another switcher cycle.
+                    if let image = try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim) {
+                        return (windowID, image)
+                    }
+                    Logger.capture.notice(
+                        "First capture failed for windowID=\(windowID, privacy: .public) — retrying"
+                    )
+                    if let image = try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim) {
+                        return (windowID, image)
+                    }
+                    Logger.capture.error(
+                        "Both capture attempts failed for windowID=\(windowID, privacy: .public)"
+                    )
+                    return nil
                 }
 
                 return true
