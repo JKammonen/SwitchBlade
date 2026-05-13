@@ -3,6 +3,12 @@ import Foundation
 import os.log
 import SwiftUI
 
+/// Observable store backing the SwitcherView. Holds the visible items + the
+/// current selection and coordinates between the catalog (window listing),
+/// activator (window activation/close/quit/hide), and permission service.
+///
+/// Preview caching and MRU bookkeeping live in dedicated helper types
+/// (`PreviewCacheStore`, `MRUTracker`) — this class only orchestrates them.
 @MainActor
 final class SwitcherStore: ObservableObject {
     @Published private(set) var items: [WindowItem] = []
@@ -20,51 +26,45 @@ final class SwitcherStore: ObservableObject {
     private let catalog: WindowSnapshotProviding
     private let activator: WindowActivating
     private let permissionService: PermissionProviding
+    private let previewCache: PreviewCacheStore
+    private let mruTracker: MRUTracker
+
     private var previewLoadTask: Task<Void, Never>?
     private var previewGeneration = 0
-    private var recentWindowIDs: [WindowItem.ID] = []
-    /// Bundle IDs in MRU order. Persists across launches so the first cold
-    /// open after a relaunch isn't a blank slate. Capped at `maxRecentBundles`.
-    private var recentBundleIDs: [String] = []
-    private let maxRecentBundles = 30
-    private let recentBundleIDsKey = "sb_recentBundleIDs"
-    private let userDefaults: UserDefaults
     nonisolated(unsafe) private var activationObserver: Any?
-    private var previewCache: [CGWindowID: CachedPreview] = [:]
-    private var previewCacheOrder: [CGWindowID] = []
-    private var previewCacheBySignature: [String: CachedPreview] = [:]
-    private var previewCacheBySignatureOrder: [String] = []
-    private let maxCachedPreviews = 40
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
-
-    private struct CachedPreview {
-        let image: NSImage
-        let bounds: CGRect
-    }
 
     init(
         catalog: WindowSnapshotProviding,
         activator: WindowActivating,
         permissionService: PermissionProviding,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        previewCache: PreviewCacheStore = PreviewCacheStore(),
+        mruTracker: MRUTracker? = nil
     ) {
         self.catalog = catalog
         self.activator = activator
         self.permissionService = permissionService
         self.permissionState = permissionService.currentState()
-        self.userDefaults = userDefaults
-        self.recentBundleIDs = (userDefaults.array(forKey: recentBundleIDsKey) as? [String]) ?? []
+        self.previewCache = previewCache
+        self.mruTracker = mruTracker ?? MRUTracker(userDefaults: userDefaults)
 
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let self,
-                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  !self.isVisible else { return }
-            self.trackSystemActivation(pid: app.processIdentifier)
+            // Pull the pid out before bridging actors so we don't transfer the
+            // non-Sendable Notification across the isolation boundary. queue:
+            // .main guarantees we're already on the main thread; assumeIsolated
+            // just appeases the compiler.
+            let pid = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
+                .processIdentifier
+            MainActor.assumeIsolated {
+                guard let self, let pid, !self.isVisible else { return }
+                self.mruTracker.trackSystemActivation(pid: pid, in: self.items)
+            }
         }
     }
 
@@ -85,16 +85,20 @@ final class SwitcherStore: ObservableObject {
             isSwitching = true
             previewLoadTask?.cancel()
             let visibleSnapshot = catalog.snapshotVisibleOnly()
-            let orderedItems = orderedItemsForDisplay(from: visibleSnapshot)
+            let orderedItems = mruTracker.orderedForDisplay(from: visibleSnapshot)
             guard !orderedItems.isEmpty else {
                 isSwitching = false
                 Logger.switcher.notice("Cycle aborted: snapshot is empty")
                 return
             }
 
-            items = orderedItems.map(itemWithCachedPreview)
-            selectedID = items[safe: items.count > 1 ? 1 : 0]?.id
-            Logger.switcher.info("Cold-open: \(orderedItems.count, privacy: .public) windows, selected #\(self.selectedID ?? 0, privacy: .public)")
+            items = orderedItems.map(previewCache.hydrated)
+            // Preselect the second item so a tap-Cmd+Tab+release toggles between
+            // the two most-recent windows. With only one item, select that.
+            selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
+            Logger.switcher.info(
+                "Cold-open: \(orderedItems.count, privacy: .public) windows, selected #\(String(describing: self.selectedID), privacy: .public)"
+            )
             showWithPreviews()
 
             // Lazily fetch minimized windows off the main thread and merge them in.
@@ -180,15 +184,11 @@ final class SwitcherStore: ObservableObject {
     private func quitSelectedApp() {
         guard let selected = selectedItem else { return }
         activator.quit(selected)
-        // Drop every tile belonging to the quitting app — they're about to die.
         items.removeAll { $0.pid == selected.pid }
-        recentWindowIDs.removeAll { id in
-            items.first(where: { $0.id == id }) == nil
-        }
+        mruTracker.pruneToLive(items)
         if items.isEmpty {
             cancel()
         } else {
-            selectedID = items.first?.id
             hide()
         }
     }
@@ -207,7 +207,7 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        rememberRecentSelection(item.id)
+        mruTracker.rememberSelection(item.id, in: items)
         hide()
         // Defer past the current RunLoop cycle so panel.orderOut renders before
         // WindowActivator starts synchronous AX IPC to the target app.
@@ -250,14 +250,11 @@ final class SwitcherStore: ObservableObject {
         }
 
         let initialPreviewCount = min(10, windowIDs.count)
-
         let catalog = self.catalog
-        previewLoadTask?.cancel()
 
         hoverEnabled = false
         isVisible = true
         onShow?()
-
         scheduleHoverEnable(generation: generation)
 
         previewLoadTask = Task {
@@ -268,11 +265,9 @@ final class SwitcherStore: ObservableObject {
             )
 
             guard !Task.isCancelled else { return }
-
             self.applyPreviews(previews, generation: generation)
 
             let deferredWindowIDs = windowIDs.filter { previews[$0] == nil }
-
             if !deferredWindowIDs.isEmpty {
                 let allPreviews = await catalog.capturePreviews(
                     for: deferredWindowIDs,
@@ -294,69 +289,10 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func applyPreviews(_ previews: [CGWindowID: NSImage], generation: Int) {
-        guard isVisible, previewGeneration == generation else {
-            return
-        }
-
-        applyPreviewsToItems(previews)
-    }
-
-    private func applyPreviewsToItems(_ previews: [CGWindowID: NSImage]) {
-        cachePreviews(previews)
+        guard isVisible, previewGeneration == generation else { return }
+        previewCache.record(previews, liveItems: items)
         items = items.map { item in
             previews[item.windowID].map { item.withPreview($0) } ?? item
-        }
-    }
-
-    private func itemWithCachedPreview(_ item: WindowItem) -> WindowItem {
-        if let cachedPreview = previewCache[item.windowID],
-           cachedPreview.bounds.integral == item.bounds.integral {
-            return item.withPreview(cachedPreview.image)
-        }
-
-        guard let cachedPreview = previewCacheBySignature[previewSignature(for: item)] else {
-            return item
-        }
-
-        return item.withPreview(cachedPreview.image)
-    }
-
-    private func cachePreviews(_ previews: [CGWindowID: NSImage]) {
-        guard !previews.isEmpty else { return }
-
-        let boundsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.windowID, $0.bounds) })
-        let itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.windowID, $0) })
-        for (windowID, image) in previews {
-            guard let bounds = boundsByID[windowID] else { continue }
-            let cachedPreview = CachedPreview(image: image, bounds: bounds)
-            previewCache[windowID] = cachedPreview
-            previewCacheOrder.removeAll { $0 == windowID }
-            previewCacheOrder.append(windowID)
-
-            if let item = itemsByID[windowID] {
-                let signature = previewSignature(for: item)
-                previewCacheBySignature[signature] = cachedPreview
-                previewCacheBySignatureOrder.removeAll { $0 == signature }
-                previewCacheBySignatureOrder.append(signature)
-            }
-        }
-
-        let liveIDs = Set(items.map(\.windowID))
-        previewCache = previewCache.filter { liveIDs.contains($0.key) }
-        previewCacheOrder.removeAll { !liveIDs.contains($0) }
-
-        let liveSignatures = Set(items.map(previewSignature(for:)))
-        previewCacheBySignature = previewCacheBySignature.filter { liveSignatures.contains($0.key) }
-        previewCacheBySignatureOrder.removeAll { !liveSignatures.contains($0) }
-
-        while previewCache.count > maxCachedPreviews, !previewCacheOrder.isEmpty {
-            let oldest = previewCacheOrder.removeFirst()
-            previewCache.removeValue(forKey: oldest)
-        }
-
-        while previewCacheBySignature.count > maxCachedPreviews, !previewCacheBySignatureOrder.isEmpty {
-            let oldest = previewCacheBySignatureOrder.removeFirst()
-            previewCacheBySignature.removeValue(forKey: oldest)
         }
     }
 
@@ -365,7 +301,7 @@ final class SwitcherStore: ObservableObject {
         let existingIDs = Set(items.map(\.id))
         let newItems = minimized
             .filter { !existingIDs.contains($0.id) }
-            .map(itemWithCachedPreview)
+            .map(previewCache.hydrated)
         guard !newItems.isEmpty else { return }
         items = items + newItems
     }
@@ -378,86 +314,10 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func previewSignature(for item: WindowItem) -> String {
-        "\(item.pid)::\(item.displayTitle)"
-    }
-
-    private func orderedItemsForDisplay(from snapshot: [WindowItem]) -> [WindowItem] {
-        guard !snapshot.isEmpty else { return [] }
-
-        // Use isFrontmostApp (from NSWorkspace) rather than snapshot.first (z-order).
-        // CGWindowList z-order may lag briefly after activation, causing the wrong
-        // app to appear as frontmost on a quick toggle press.
-        let currentFrontmost = snapshot.first(where: { $0.isFrontmostApp }) ?? snapshot[0]
-
-        let liveIDs = Set(snapshot.map(\.id))
-        recentWindowIDs.removeAll { !liveIDs.contains($0) }
-
-        let itemsByID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.id, $0) })
-        var orderedItems = [currentFrontmost]
-        var seenIDs: Set<WindowItem.ID> = [currentFrontmost.id]
-
-        for windowID in recentWindowIDs {
-            guard seenIDs.insert(windowID).inserted,
-                  let item = itemsByID[windowID] else {
-                continue
-            }
-
-            orderedItems.append(item)
-        }
-
-        // After the in-memory recents are exhausted, fall back to the persisted
-        // bundle-ID order. This kicks in on the first cycle after a fresh launch
-        // when `recentWindowIDs` is empty but `recentBundleIDs` was restored
-        // from UserDefaults.
-        if !recentBundleIDs.isEmpty {
-            let snapshotByBundle = Dictionary(grouping: snapshot, by: { $0.bundleIdentifier })
-            for bundleID in recentBundleIDs {
-                guard let group = snapshotByBundle[bundleID] else { continue }
-                for item in group where seenIDs.insert(item.id).inserted {
-                    orderedItems.append(item)
-                }
-            }
-        }
-
-        for item in snapshot where seenIDs.insert(item.id).inserted {
-            orderedItems.append(item)
-        }
-
-        return orderedItems
-    }
-
-    private func rememberRecentSelection(_ selectedID: WindowItem.ID) {
-        recentWindowIDs = [selectedID] + items.map(\.id).filter { $0 != selectedID }
-        // Also update persisted bundle-ID MRU so the next cold launch can seed
-        // a sensible order before the user has switched anything.
-        if let item = items.first(where: { $0.id == selectedID }),
-           let bundleID = item.bundleIdentifier, !bundleID.isEmpty {
-            recentBundleIDs.removeAll { $0 == bundleID }
-            recentBundleIDs.insert(bundleID, at: 0)
-            if recentBundleIDs.count > maxRecentBundles {
-                recentBundleIDs.removeLast(recentBundleIDs.count - maxRecentBundles)
-            }
-            userDefaults.set(recentBundleIDs, forKey: recentBundleIDsKey)
-        }
-    }
-
-    private func trackSystemActivation(pid: pid_t) {
-        // Move all windows of the newly activated app to the front of recentWindowIDs
-        // so the order reflects real system MRU, not just SwitchBlade-initiated switches.
-        let activated = recentWindowIDs.filter { id in
-            items.first(where: { $0.id == id })?.pid == pid
-        }
-        let rest = recentWindowIDs.filter { id in
-            items.first(where: { $0.id == id })?.pid != pid
-        }
-        recentWindowIDs = activated + rest
-    }
-
     private func removeItem(withID id: WindowItem.ID) {
         let removedIndex = items.firstIndex(where: { $0.id == id })
         items.removeAll { $0.id == id }
-        recentWindowIDs.removeAll { $0 == id }
+        mruTracker.pruneToLive(items)
 
         guard !items.isEmpty else {
             cancel()
@@ -478,11 +338,5 @@ final class SwitcherStore: ObservableObject {
         let currentIndex = items.firstIndex(where: { $0.id == selectedID }) ?? 0
         let nextIndex = (currentIndex + delta + items.count) % items.count
         selectedID = items[nextIndex].id
-    }
-}
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
     }
 }

@@ -6,7 +6,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public override init() { super.init() }
 
     private let permissionService = PermissionService()
-    private lazy var windowCatalog = WindowCatalog(permissionService: permissionService)
+    private let windowCatalog = WindowCatalog()
     private let windowActivator = WindowActivator()
     private lazy var store = SwitcherStore(
         catalog: windowCatalog,
@@ -98,12 +98,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // Only refresh state display — do NOT re-request permissions here,
         // that causes repeated OS prompts whenever the app comes to front.
         store.refreshPermissionState()
-        hotkeyMonitor?.start()
-    }
-
-    private func refreshPermissionsAndHotkeyCapture() {
-        store.refreshPermissionState()
-        presentPermissionGuidanceIfNeeded()
         hotkeyMonitor?.start()
     }
 

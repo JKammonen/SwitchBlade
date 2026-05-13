@@ -20,16 +20,11 @@ public enum AppLanguage: String, CaseIterable, Sendable {
 /// Thread-safe, actor-agnostic storage of the user's "restrict to current
 /// Space" toggle. WindowCatalog (Sendable, non-MainActor) reads this in its
 /// hot path; SwitchBladeSettings mirrors the value on every change.
-public final class WindowFilterState: @unchecked Sendable {
-    public static let shared = WindowFilterState()
-    private let lock = NSLock()
-    private var _restrictToCurrentSpace = true
-
-    private init() {}
-
-    public var restrictToCurrentSpace: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return _restrictToCurrentSpace }
-        set { lock.lock(); _restrictToCurrentSpace = newValue; lock.unlock() }
+public enum WindowFilterState {
+    private static let storage = LockedValue<Bool>(true)
+    public static var restrictToCurrentSpace: Bool {
+        get { storage.value }
+        set { storage.value = newValue }
     }
 }
 
@@ -38,23 +33,18 @@ public final class WindowFilterState: @unchecked Sendable {
 /// computed properties like `PermissionState.message`).
 ///
 /// Mirrored from `SwitchBladeSettings.language` on every change.
-public final class LocalizationState: @unchecked Sendable {
-    public static let shared = LocalizationState()
+public enum LocalizationState {
+    private static let storage = LockedValue<AppLanguage>(.system)
 
-    private let lock = NSLock()
-    private var _selection: AppLanguage = .system
-
-    private init() {}
-
-    public var selection: AppLanguage {
-        get { lock.lock(); defer { lock.unlock() }; return _selection }
-        set { lock.lock(); _selection = newValue; lock.unlock() }
+    public static var selection: AppLanguage {
+        get { storage.value }
+        set { storage.value = newValue }
     }
 
     /// Resolves `.system` to a concrete language based on the OS preferred
     /// languages. Falls back to English when the user's preference is neither
     /// Finnish nor English.
-    public var effectiveLanguage: AppLanguage {
+    public static var effectiveLanguage: AppLanguage {
         switch selection {
         case .english: return .english
         case .finnish: return .finnish
@@ -136,7 +126,7 @@ public enum L10n {
     }
 
     public static func tr(_ key: Key) -> String {
-        let lang = LocalizationState.shared.effectiveLanguage
+        let lang = LocalizationState.effectiveLanguage
         return table(for: lang)[key] ?? englishTable[key] ?? key.rawValue
     }
 

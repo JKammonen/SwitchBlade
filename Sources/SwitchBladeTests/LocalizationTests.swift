@@ -12,7 +12,7 @@ enum LocalizationTests {
     ]
 
     @MainActor static func everyKeyHasEnglish() throws {
-        LocalizationState.shared.selection = .english
+        LocalizationState.selection = .english
         for key in L10n.Key.allCases {
             let value = L10n.tr(key)
             try expect(!value.isEmpty, "English missing for \(key)")
@@ -21,7 +21,7 @@ enum LocalizationTests {
     }
 
     @MainActor static func everyKeyHasFinnish() throws {
-        LocalizationState.shared.selection = .finnish
+        LocalizationState.selection = .finnish
         for key in L10n.Key.allCases {
             let value = L10n.tr(key)
             try expect(!value.isEmpty, "Finnish missing for \(key)")
@@ -30,9 +30,9 @@ enum LocalizationTests {
     }
 
     @MainActor static func setLanguageSwitches() throws {
-        LocalizationState.shared.selection = .english
+        LocalizationState.selection = .english
         let en = L10n.tr(.alertOpenSettings)
-        LocalizationState.shared.selection = .finnish
+        LocalizationState.selection = .finnish
         let fi = L10n.tr(.alertOpenSettings)
         try expectNotEqual(en, fi)
         try expectEqual(en, "Open Settings")
@@ -40,8 +40,8 @@ enum LocalizationTests {
     }
 
     @MainActor static func systemFallback() throws {
-        LocalizationState.shared.selection = .system
-        let effective = LocalizationState.shared.effectiveLanguage
+        LocalizationState.selection = .system
+        let effective = LocalizationState.effectiveLanguage
         // System resolves to either Finnish or English — never the .system sentinel.
         try expect(effective == .finnish || effective == .english,
                    "effectiveLanguage must be a concrete language, got \(effective)")
@@ -54,7 +54,7 @@ enum LocalizationTests {
     }
 
     @MainActor static func trWithArg() throws {
-        LocalizationState.shared.selection = .english
+        LocalizationState.selection = .english
         let result = L10n.tr(.alertPermissionTitle, "Accessibility")
         try expectEqual(result, "SwitchBlade needs permission: Accessibility")
     }

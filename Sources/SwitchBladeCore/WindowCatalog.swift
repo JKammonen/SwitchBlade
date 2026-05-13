@@ -4,9 +4,15 @@ import CoreGraphics
 import os.log
 @preconcurrency import ScreenCaptureKit
 
-// Cache for SCShareableContent. It is warmed once and refreshed on demand, not
-// polled continuously, because ScreenCaptureKit may surface macOS permission
-// dialogs when touched repeatedly in an unsettled TCC state.
+// Cache for SCShareableContent. Three refresh paths:
+//   1. Launch warmup via `startBackgroundRefresh()` (4 s post-launch, only
+//      after Screen Recording has been granted).
+//   2. End-of-cycle refresh via `refreshContentCache()` so the next Cmd+Tab
+//      starts fresh.
+//   3. Hot-path refresh via `refreshIfStale()` inside `capturePreviews` when
+//      the cache is older than `staleThreshold` seconds.
+// Never polled — ScreenCaptureKit can surface a macOS permission dialog when
+// touched repeatedly in an unsettled TCC state.
 actor SCContentCache {
     private(set) var content: SCShareableContent?
     private(set) var lastRefreshFailedAt: Date?
@@ -82,12 +88,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         "com.apple.Safari.PasswordBreachAgent"
     ]
 
-    private let permissionService: PermissionService
     private let contentCache = SCContentCache()
 
-    init(permissionService: PermissionService) {
-        self.permissionService = permissionService
-    }
+    init() {}
 
     /// Warms SCShareableContent cache. Safe to call only when SR permission is
     /// confirmed — never call at launch before TCC has settled.
@@ -130,7 +133,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // .optionOnScreenOnly when restricting to current Space — macOS only
         // returns windows it considers on-screen, which excludes other Spaces.
         // .optionAll lets windows from other Spaces through.
-        let restrictToCurrentSpace = WindowFilterState.shared.restrictToCurrentSpace
+        let restrictToCurrentSpace = WindowFilterState.restrictToCurrentSpace
         let listOptions: CGWindowListOption = restrictToCurrentSpace
             ? [.optionOnScreenOnly, .excludeDesktopElements]
             : [.optionAll, .excludeDesktopElements]
@@ -162,7 +165,6 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
                 guard isOnScreen else { return nil }
             }
-            visibleWindowIDs.insert(windowID)
             visibleWindowIDs.insert(windowID)
 
             let alpha = entry[kCGWindowAlpha as String] as? Double ?? 1

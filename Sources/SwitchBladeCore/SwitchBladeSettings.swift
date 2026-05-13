@@ -174,7 +174,7 @@ final class SwitchBladeSettings: ObservableObject {
     @Published var language: AppLanguage {
         didSet {
             ud.set(language.rawValue, forKey: "sb_language")
-            LocalizationState.shared.selection = language
+            LocalizationState.selection = language
         }
     }
 
@@ -184,7 +184,7 @@ final class SwitchBladeSettings: ObservableObject {
     @Published var restrictToCurrentSpace: Bool {
         didSet {
             ud.set(restrictToCurrentSpace, forKey: "sb_restrictToCurrentSpace")
-            WindowFilterState.shared.restrictToCurrentSpace = restrictToCurrentSpace
+            WindowFilterState.restrictToCurrentSpace = restrictToCurrentSpace
         }
     }
 
@@ -215,8 +215,8 @@ final class SwitchBladeSettings: ObservableObject {
         restrictToCurrentSpace = ud.object(forKey: "sb_restrictToCurrentSpace") as? Bool ?? true
         // Mirror to the global LocalizationState immediately so first read on
         // launch is correct (didSet doesn't fire from this init).
-        LocalizationState.shared.selection = language
-        WindowFilterState.shared.restrictToCurrentSpace = restrictToCurrentSpace
+        LocalizationState.selection = language
+        WindowFilterState.restrictToCurrentSpace = restrictToCurrentSpace
     }
 
     /// Convenience SwiftUI Color for the badge bar background.

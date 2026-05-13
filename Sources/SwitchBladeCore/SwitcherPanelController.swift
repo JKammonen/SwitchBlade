@@ -16,11 +16,12 @@ final class SwitcherPanelController {
     private let cardMarginY = SwitcherLayoutCalculator.cardMarginY
     private let cardCornerRadius: CGFloat = 20
 
-    // Click-outside dismissal. Set by the owner (AppDelegate) so the store can
-    // cancel without this class needing a direct reference to it.
-    var onClickOutside: (() -> Void)?
-    private var globalClickMonitor: Any?
-    private var localClickMonitor: Any?
+    /// Set by the owner (AppDelegate) so the store can cancel without this class
+    /// needing a direct store reference.
+    var onClickOutside: (() -> Void)? {
+        didSet { clickMonitor.onClickOutside = onClickOutside }
+    }
+    private let clickMonitor: ClickOutsideMonitor
 
     init(store: SwitcherStore) {
         panel = SwitcherPanel(
@@ -50,6 +51,20 @@ final class SwitcherPanelController {
         hostingView.layer?.mask = cardMaskLayer
         panel.contentView = hostingView
 
+        // Card frame provider closes over `panel` and the margin constants so
+        // ClickOutsideMonitor can ask for an up-to-date rect after resize.
+        let cardMarginX = self.cardMarginX
+        let cardMarginY = self.cardMarginY
+        let panelRef = panel
+        clickMonitor = ClickOutsideMonitor(panel: panel) {
+            CGRect(
+                x: cardMarginX,
+                y: cardMarginY,
+                width: panelRef.frame.width - cardMarginX * 2,
+                height: panelRef.frame.height - cardMarginY * 2
+            )
+        }
+
         // Force SwiftUI to build the initial view tree off-screen so the first
         // user-visible show isn't paying the ~30–100ms first-render cost.
         hostingView.layoutSubtreeIfNeeded()
@@ -60,63 +75,13 @@ final class SwitcherPanelController {
         panel.alphaValue = 1
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        installClickMonitors()
+        clickMonitor.start()
     }
 
     func hide() {
-        removeClickMonitors()
+        clickMonitor.stop()
         panel.alphaValue = 0
         panel.orderOut(nil)
-    }
-
-    // MARK: - Click outside
-
-    private func installClickMonitors() {
-        guard globalClickMonitor == nil else { return }
-        // Global: clicks anywhere outside our app — switching apps, clicking
-        // the desktop, etc. NSEvent mouse-event monitors don't require an
-        // Accessibility grant (only keyboard events do).
-        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
-            self?.onClickOutside?()
-        }
-        // Local: clicks inside our panel window — dismiss only when the click
-        // lands in the transparent margin around the card. Inside the card the
-        // event passes through to the tile gesture recognizers.
-        localClickMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            guard let self else { return event }
-            if self.isClickInsideCard(event) { return event }
-            self.onClickOutside?()
-            return nil
-        }
-    }
-
-    private func removeClickMonitors() {
-        if let globalClickMonitor {
-            NSEvent.removeMonitor(globalClickMonitor)
-            self.globalClickMonitor = nil
-        }
-        if let localClickMonitor {
-            NSEvent.removeMonitor(localClickMonitor)
-            self.localClickMonitor = nil
-        }
-    }
-
-    /// True when `event.locationInWindow` falls inside the rounded-card region.
-    /// Used to distinguish click-on-tile from click-on-padding.
-    private func isClickInsideCard(_ event: NSEvent) -> Bool {
-        guard event.window === panel else { return false }
-        let point = event.locationInWindow
-        let cardRect = CGRect(
-            x: cardMarginX,
-            y: cardMarginY,
-            width: panel.frame.width - cardMarginX * 2,
-            height: panel.frame.height - cardMarginY * 2
-        )
-        return cardRect.contains(point)
     }
 
     private func sizeAndCenter(itemCount: Int) {

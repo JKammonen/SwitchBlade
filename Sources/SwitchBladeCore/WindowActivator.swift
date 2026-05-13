@@ -2,11 +2,9 @@ import AppKit
 import ApplicationServices
 import os.log
 
-final class WindowActivator: WindowActivating, @unchecked Sendable {
+final class WindowActivator: WindowActivating, Sendable {
     func activate(_ item: WindowItem) {
-        Logger.activator.info(
-            "Activating pid=\(item.pid, privacy: .public) title=\(item.title, privacy: .private)"
-        )
+        log(action: "activate", item: item)
         NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
         // raiseMatchingWindow must run on the main thread: kAXRaiseAction internally
         // calls makeKeyAndOrderFront: which is AppKit-main-thread-only. Running it
@@ -17,21 +15,30 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     func close(_ item: WindowItem) {
+        log(action: "close", item: item)
         // Only close the window via AX — never terminate the app process.
         _ = closeMatchingWindow(item)
     }
 
     func quit(_ item: WindowItem) {
-        Logger.activator.info("Quitting pid=\(item.pid, privacy: .public)")
+        log(action: "quit", item: item)
         // Never quit SwitchBlade itself.
         guard item.pid != getpid() else { return }
         NSRunningApplication(processIdentifier: item.pid)?.terminate()
     }
 
     func hide(_ item: WindowItem) {
-        Logger.activator.info("Hiding pid=\(item.pid, privacy: .public)")
+        log(action: "hide", item: item)
         guard item.pid != getpid() else { return }
         NSRunningApplication(processIdentifier: item.pid)?.hide()
+    }
+
+    /// One log helper for all four actions so the format stays consistent and
+    /// we never accidentally log a pid without a title.
+    private func log(action: String, item: WindowItem) {
+        Logger.activator.info(
+            "\(action, privacy: .public) pid=\(item.pid, privacy: .public) title=\(item.title, privacy: .private)"
+        )
     }
 
     private func raiseMatchingWindow(_ item: WindowItem) {
@@ -104,7 +111,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return item.title.isEmpty
         }
 
-        return framesAreClose(frame, item.bounds)
+        return Self.framesAreClose(frame, item.bounds)
     }
 
     private func axString(_ attribute: String, on element: AXUIElement) -> String? {
@@ -140,8 +147,9 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return CGRect(origin: point, size: size)
     }
 
-    private func framesAreClose(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-        let tolerance: CGFloat = 12
+    /// Internal so tests can verify the tolerance logic without going through
+    /// a real AX walk.
+    static func framesAreClose(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 12) -> Bool {
         return abs(lhs.origin.x - rhs.origin.x) < tolerance
             && abs(lhs.origin.y - rhs.origin.y) < tolerance
             && abs(lhs.width - rhs.width) < tolerance

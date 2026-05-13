@@ -21,11 +21,6 @@ struct SwitcherView: View {
         return [GridItem(.adaptive(minimum: w, maximum: w * 1.35), spacing: 10)]
     }
 
-    // Upper bound for the content block height.
-    private var maxContentHeight: CGFloat {
-        (NSScreen.main?.visibleFrame.height ?? 900) * 0.60
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             ScrollView(showsIndicators: false) {
