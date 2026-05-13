@@ -98,13 +98,15 @@ func makeStore(
     catalog: MockWindowCatalog = MockWindowCatalog(),
     activator: MockWindowActivator = MockWindowActivator(),
     permissions: MockPermissionService = MockPermissionService(),
-    userDefaults: UserDefaults = makeIsolatedUserDefaults()
+    userDefaults: UserDefaults = makeIsolatedUserDefaults(),
+    activationWarmupWindow: TimeInterval = 60
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
     let store = SwitcherStore(
         catalog: catalog,
         activator: activator,
         permissionService: permissions,
-        userDefaults: userDefaults
+        userDefaults: userDefaults,
+        activationWarmupWindow: activationWarmupWindow
     )
     return (store, catalog, activator, permissions)
 }

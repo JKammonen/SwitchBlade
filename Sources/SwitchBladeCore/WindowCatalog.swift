@@ -258,11 +258,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // Single preflight syscall instead of currentState() which does three.
         guard CGPreflightScreenCaptureAccess() else { return [:] }
 
-        // Refresh on the hot path when the cache is empty or older than ~10 s.
-        // Stale SCShareableContent → stale SCWindow refs → SCScreenshotManager
-        // re-resolves each window on first capture, which is what makes the
-        // first preview slow after idle. 10 s is short enough to dodge that and
-        // long enough to skip the fetch on rapid repeat Cmd+Tabs.
+        // Refresh on the hot path when the cache is empty or older than the
+        // SCContentCache.staleThreshold (5 s). Stale SCShareableContent →
+        // stale SCWindow refs → SCScreenshotManager re-resolves each window
+        // on first capture, which is what makes the first preview slow after
+        // idle. 5 s is short enough to dodge that and long enough to skip the
+        // fetch on rapid repeat Cmd+Tabs.
         await contentCache.refreshIfStale()
         guard let content = await contentCache.content else {
             Logger.capture.error("capturePreviews: no SCShareableContent available")

@@ -35,13 +35,24 @@ final class SwitcherStore: ObservableObject {
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
 
+    /// Timestamp of the most recent Cmd+Tab cycle. Used by handleAppActivation
+    /// to decide whether the user is actively switcher-using and therefore
+    /// worth keeping the SCKit cache warm for. Initialised so the first launch
+    /// gets a warmup grace window after `applicationDidFinishLaunching`.
+    private var lastSwitcherUse: Date = Date()
+    /// Don't warm SCKit for app activations more than this long after the user
+    /// last touched the switcher. Keeps the cost truly zero for idle users.
+    /// Injectable so tests can shorten the window without sleeping for a minute.
+    private let activationWarmupWindow: TimeInterval
+
     init(
         catalog: WindowSnapshotProviding,
         activator: WindowActivating,
         permissionService: PermissionProviding,
         userDefaults: UserDefaults = .standard,
         previewCache: PreviewCacheStore = PreviewCacheStore(),
-        mruTracker: MRUTracker? = nil
+        mruTracker: MRUTracker? = nil,
+        activationWarmupWindow: TimeInterval = 60
     ) {
         self.catalog = catalog
         self.activator = activator
@@ -49,6 +60,7 @@ final class SwitcherStore: ObservableObject {
         self.permissionState = permissionService.currentState()
         self.previewCache = previewCache
         self.mruTracker = mruTracker ?? MRUTracker(userDefaults: userDefaults)
+        self.activationWarmupWindow = activationWarmupWindow
 
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -75,10 +87,12 @@ final class SwitcherStore: ObservableObject {
         if !isVisible {
             mruTracker.trackSystemActivation(pid: pid, in: items)
         }
-        // Opportunistic SCKit cache warmup. The catalog's IfStale check
-        // self-throttles so rapid app switches don't spam SCKit. Net effect:
-        // whenever the user is doing anything at all, the next Cmd+Tab has a
-        // fresh cache and captures don't pay the cold-start cost.
+        // Opportunistic SCKit cache warmup — gated on recent-use so we don't
+        // burn cycles for users who haven't touched the switcher in a while.
+        // The cache's IfStale check is a second throttle layer (no SCKit call
+        // when cache is fresh), but this outer gate ensures we don't even
+        // hit the actor for idle users.
+        guard Date().timeIntervalSince(lastSwitcherUse) < activationWarmupWindow else { return }
         let catalogRef = self.catalog
         Task.detached(priority: .utility) {
             await catalogRef.refreshContentCacheIfStale()
@@ -96,9 +110,14 @@ final class SwitcherStore: ObservableObject {
     }
 
     func cycle(forward: Bool) {
+        // Mark "the user is using the switcher right now" so handleAppActivation
+        // knows it's worth warming the SCKit cache on app switches for the next
+        // ~minute. Idle users (haven't pressed Cmd+Tab in a while) skip the warmup.
+        lastSwitcherUse = Date()
         permissionState = permissionService.currentState()
 
         if !isVisible {
+            let openStart = Date()
             isSwitching = true
             previewLoadTask?.cancel()
             let visibleSnapshot = catalog.snapshotVisibleOnly()
@@ -113,8 +132,11 @@ final class SwitcherStore: ObservableObject {
             // Preselect the second item so a tap-Cmd+Tab+release toggles between
             // the two most-recent windows. With only one item, select that.
             selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
+
+            let cachedHits = items.filter { $0.preview != nil }.count
+            let coldMs = Date().timeIntervalSince(openStart) * 1000
             Logger.switcher.info(
-                "Cold-open: \(orderedItems.count, privacy: .public) windows, selected #\(String(describing: self.selectedID), privacy: .public)"
+                "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache"
             )
             showWithPreviews()
 
@@ -275,6 +297,7 @@ final class SwitcherStore: ObservableObject {
         scheduleHoverEnable(generation: generation)
 
         previewLoadTask = Task {
+            let batchStart = Date()
             let previews = await catalog.capturePreviews(
                 for: windowIDs,
                 maxCount: initialPreviewCount,
@@ -282,6 +305,12 @@ final class SwitcherStore: ObservableObject {
             )
 
             guard !Task.isCancelled else { return }
+            let firstBatchMs = Date().timeIntervalSince(batchStart) * 1000
+            let successRate = windowIDs.isEmpty ? 0
+                : Double(previews.count) / Double(min(initialPreviewCount, windowIDs.count))
+            Logger.switcher.info(
+                "First preview batch: \(previews.count, privacy: .public)/\(min(initialPreviewCount, windowIDs.count), privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public))"
+            )
             self.applyPreviews(previews, generation: generation)
 
             let deferredWindowIDs = windowIDs.filter { previews[$0] == nil }

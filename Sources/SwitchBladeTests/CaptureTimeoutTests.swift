@@ -7,7 +7,8 @@ enum CaptureTimeoutTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
-        ("ActivationRefresh/updatesMRU_onlyWhenHidden", activation_updatesMRU_onlyWhenHidden)
+        ("ActivationRefresh/updatesMRU_onlyWhenHidden", activation_updatesMRU_onlyWhenHidden),
+        ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle)
     ]
 
     /// We can't invoke captureWithTimeout against a real SCWindow from tests,
@@ -41,6 +42,29 @@ enum CaptureTimeoutTests {
         }
 
         try expectGreaterThan(catalog.refreshIfStaleCallCount, baseline)
+    }
+
+    /// If the user hasn't used Cmd+Tab in `activationWarmupWindow`, app
+    /// activations stop triggering the SCKit warmup. Cost is genuinely zero
+    /// for idle users — handleAppActivation just records MRU and returns.
+    @MainActor static func activation_skipsRefreshWhenIdle() async throws {
+        // 50 ms warmup window — long enough to let the constructor-set
+        // `lastSwitcherUse = Date()` count as "recent", short enough to expire
+        // before the test's wait.
+        let (store, catalog, _, _) = makeStore(activationWarmupWindow: 0.05)
+        try? await Task.sleep(nanoseconds: 80_000_000) // 80 ms — outside the window
+
+        let baseline = catalog.refreshIfStaleCallCount
+        store.handleAppActivation(pid: 1234)
+
+        // Drain enough time for any (unwanted) detached refresh to land.
+        for _ in 0 ..< 20 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try expectEqual(catalog.refreshIfStaleCallCount, baseline,
+                        "warmup gate should have blocked the refresh")
     }
 
     /// Activation while the switcher is hidden updates the MRU. While visible,
