@@ -22,31 +22,45 @@ struct SwitcherView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView(showsIndicators: false) {
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(store.items) { item in
-                        WindowTile(
-                            item: item,
-                            isSelected: store.selectedID == item.id,
-                            settings: settings,
-                            onSelect: { store.choose(item) },
-                            onHover: { store.hover(item) },
-                            onClose: { store.close(item) }
-                        )
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                ScrollView(showsIndicators: false) {
+                    LazyVGrid(columns: columns, spacing: 10) {
+                        ForEach(store.items) { item in
+                            WindowTile(
+                                item: item,
+                                isSelected: store.selectedID == item.id,
+                                settings: settings,
+                                onSelect: { store.choose(item) },
+                                onHover: { store.hover(item) },
+                                onClose: { store.close(item) }
+                            )
+                        }
                     }
+                    .padding(14)
+                    .padding(.vertical, 6)
                 }
-                .padding(14)
-                .padding(.vertical, 6)
+
+                if let message = store.permissionState.message {
+                    Text(message)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.6))
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
+                }
             }
 
-            if let message = store.permissionState.message {
-                Text(message)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.6))
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 10)
+            Button(action: store.openSettings) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 24, height: 24)
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.white.opacity(0.72))
+            .background(Circle().fill(Color.black.opacity(0.28)))
+            .help("Settings")
+            .padding(.top, 16)
+            .padding(.trailing, 24)
         }
         // Panel is sized to exactly fit the content + cardMargin padding outside.
         // No fixedSize or maxHeight tricks needed — NSPanel height is authoritative.
@@ -149,6 +163,10 @@ private struct WindowTile: View {
     }
 
     private var selectionAnimation: Animation {
+        if settings.reducedMotion {
+            return .linear(duration: 0.01)
+        }
+
         switch settings.selectionEffect {
         case .pump:
             return .easeInOut(duration: 0.62)
@@ -195,6 +213,7 @@ private struct WindowTile: View {
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fill)
                         .frame(width: geo.size.width, height: geo.size.height)
+                        .blur(radius: settings.previewMode == .blurredPreviews ? 10 : 0)
                         .clipped()
                 } else {
                     placeholderFill
@@ -275,11 +294,11 @@ private struct WindowTile: View {
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .onHover { isHovered = $0; if $0 { onHover() } }
         .onTapGesture(perform: onSelect)
-        .animation(.spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
+        .animation(settings.reducedMotion ? nil : .spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
         .task(id: "\(item.id)-\(isSelected)-\(settings.selectionEffect.rawValue)") {
             selectionPulse = false
 
-            guard isSelected else { return }
+            guard isSelected, !settings.reducedMotion else { return }
 
             while !Task.isCancelled {
                 withAnimation(selectionAnimation) {
@@ -388,4 +407,3 @@ private struct WindowTile: View {
         }
     }
 }
-

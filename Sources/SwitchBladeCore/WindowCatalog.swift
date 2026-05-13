@@ -39,7 +39,9 @@ actor SCContentCache {
             lastRefreshFailedAt = nil
             lastSuccessfulRefresh = Date()
             let ms = Date().timeIntervalSince(start) * 1000
-            Logger.capture.info("SCShareableContent refresh ok in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
+            if PerformanceLoggingState.mode == .debug {
+                Logger.capture.info("SCShareableContent refresh ok in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
+            }
         } catch {
             lastRefreshFailedAt = Date()
             Logger.capture.error("SCShareableContent refresh failed: \(error.localizedDescription, privacy: .public)")
@@ -218,8 +220,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // .optionOnScreenOnly when restricting to current Space — macOS only
         // returns windows it considers on-screen, which excludes other Spaces.
         // .optionAll lets windows from other Spaces through.
-        let restrictToCurrentSpace = WindowFilterState.restrictToCurrentSpace
-        let listOptions: CGWindowListOption = restrictToCurrentSpace
+        let windowScope = WindowFilterState.scope
+        let listOptions: CGWindowListOption = windowScope == .currentSpace
             ? [.optionOnScreenOnly, .excludeDesktopElements]
             : [.optionAll, .excludeDesktopElements]
         guard let rawList = CGWindowListCopyWindowInfo(listOptions, kCGNullWindowID) as? [[String: Any]] else {
@@ -246,9 +248,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             // entry. The list option above already filters, but the explicit
             // check protects against macOS occasionally returning stale rows.
             // When not restricting, accept windows regardless of isOnScreen.
-            if restrictToCurrentSpace {
+            if windowScope == .currentSpace {
                 let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
                 guard isOnScreen else { return nil }
+            }
+            if windowScope == .currentApp, ownerPID != frontmostPID {
+                return nil
             }
             visibleWindowIDs.insert(windowID)
 
@@ -419,9 +424,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             }
 
             let ms = Date().timeIntervalSince(captureStart) * 1000
-            Logger.capture.info(
-                "Captured \(result.count, privacy: .public)/\(captureTargets.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"
-            )
+            if PerformanceLoggingState.mode == .debug {
+                Logger.capture.info(
+                    "Captured \(result.count, privacy: .public)/\(captureTargets.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"
+                )
+            }
             return result
         }
     }
@@ -457,6 +464,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             return false
         }
 
+        if isHiddenByUser(appName: appName, bundleIdentifier: application.bundleIdentifier) {
+            return false
+        }
+
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedTitle.isEmpty,
            appName.localizedCaseInsensitiveContains("autofill") {
@@ -469,6 +480,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private func minimizedItems(excluding visibleWindowIDs: Set<CGWindowID>, frontmostPID: pid_t?) -> [WindowItem] {
         NSWorkspace.shared.runningApplications.flatMap { application -> [WindowItem] in
             guard shouldIncludeApplication(application) else { return [] }
+            if WindowFilterState.scope == .currentApp,
+               application.processIdentifier != frontmostPID {
+                return []
+            }
 
             let appElement = AXUIElementCreateApplication(application.processIdentifier)
             guard let windows = axWindows(for: appElement) else { return [] }
@@ -513,7 +528,24 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             return false
         }
 
+        if isHiddenByUser(
+            appName: application.localizedName ?? application.bundleIdentifier ?? "",
+            bundleIdentifier: application.bundleIdentifier
+        ) {
+            return false
+        }
+
         return true
+    }
+
+    private func isHiddenByUser(appName: String, bundleIdentifier: String?) -> Bool {
+        let tokens = HiddenAppFilterState.normalizedTokens
+        guard !tokens.isEmpty else { return false }
+        let app = appName.lowercased()
+        let bundle = (bundleIdentifier ?? "").lowercased()
+        return tokens.contains { token in
+            app.contains(token) || bundle.contains(token)
+        }
     }
 
     private func axWindows(for appElement: AXUIElement) -> [AXUIElement]? {

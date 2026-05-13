@@ -18,6 +18,7 @@ final class SwitcherStore: ObservableObject {
 
     var onShow: (() -> Void)?
     var onHide: (() -> Void)?
+    var onOpenSettings: (() -> Void)?
 
     /// True from the moment the first Cmd+Tab fires until the panel is hidden.
     /// Used so Command-release is detected even when the async show is still in flight.
@@ -131,14 +132,14 @@ final class SwitcherStore: ObservableObject {
             isSwitching = true
             previewLoadTask?.cancel()
             let visibleSnapshot = catalog.snapshotVisibleOnly()
-            let orderedItems = mruTracker.orderedForDisplay(from: visibleSnapshot)
+            let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
             guard !orderedItems.isEmpty else {
                 isSwitching = false
                 Logger.switcher.notice("Cycle aborted: snapshot is empty")
                 return
             }
 
-            items = orderedItems.map(previewCache.hydrated)
+            items = hydratedForDisplay(orderedItems)
             // Preselect the second item so a tap-Cmd+Tab+release toggles between
             // the two most-recent windows. With only one item, select that.
             selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
@@ -146,9 +147,11 @@ final class SwitcherStore: ObservableObject {
             let cachedHits = items.filter { $0.preview != nil }.count
             let coldMs = Date().timeIntervalSince(openStart) * 1000
             let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
-            Logger.switcher.info(
-                "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
-            )
+            if PerformanceLoggingState.mode != .off {
+                Logger.switcher.info(
+                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                )
+            }
             showWithPreviews()
 
             // Lazily fetch minimized windows off the main thread and merge them in.
@@ -192,6 +195,9 @@ final class SwitcherStore: ObservableObject {
             return true
         case Int(kVK_ANSI_H) where event.modifierFlags.contains(.command):
             hideSelectedApp()
+            return true
+        case Int(kVK_ANSI_Comma) where event.modifierFlags.contains(.command):
+            openSettings()
             return true
         case Int(kVK_Return), Int(kVK_Space):
             commitSelection()
@@ -271,8 +277,41 @@ final class SwitcherStore: ObservableObject {
         hide()
     }
 
+    func openSettings() {
+        hide()
+        onOpenSettings?()
+    }
+
     private var selectedItem: WindowItem? {
         items.first(where: { $0.id == selectedID })
+    }
+
+    private func hydratedForDisplay(_ sourceItems: [WindowItem]) -> [WindowItem] {
+        guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
+            return sourceItems
+        }
+        return sourceItems.map(previewCache.hydrated)
+    }
+
+    private func orderItems(_ sourceItems: [WindowItem]) -> [WindowItem] {
+        guard let first = sourceItems.first else { return [] }
+        let rest = Array(sourceItems.dropFirst())
+
+        switch SwitchBladeSettings.shared.sortOrder {
+        case .recentlyUsed:
+            return sourceItems
+        case .appGrouped:
+            return [first] + rest.sorted {
+                if $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedSame {
+                    return $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending
+                }
+                return $0.appName.localizedCaseInsensitiveCompare($1.appName) == .orderedAscending
+            }
+        case .alphabetical:
+            return [first] + rest.sorted {
+                $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending
+            }
+        }
     }
 
     private func hide() {
@@ -286,6 +325,15 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func showWithPreviews() {
+        guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
+            previewGeneration += 1
+            hoverEnabled = false
+            isVisible = true
+            onShow?()
+            scheduleHoverEnable(generation: previewGeneration)
+            return
+        }
+
         let windowIDs = items.filter { !$0.isMinimized }.map(\.windowID)
 
         previewGeneration += 1
@@ -320,9 +368,11 @@ final class SwitcherStore: ObservableObject {
             let successRate = windowIDs.isEmpty ? 0
                 : Double(previews.count) / Double(min(initialPreviewCount, windowIDs.count))
             let batchSummary = self.performanceMetrics.recordFirstPreviewBatch(milliseconds: firstBatchMs)
-            Logger.switcher.info(
-                "First preview batch: \(previews.count, privacy: .public)/\(min(initialPreviewCount, windowIDs.count), privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public)); rolling n=\(batchSummary.count, privacy: .public), avg=\(batchSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(batchSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(batchSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(batchSummary.max, format: .fixed(precision: 1), privacy: .public)"
-            )
+            if PerformanceLoggingState.mode != .off {
+                Logger.switcher.info(
+                    "First preview batch: \(previews.count, privacy: .public)/\(min(initialPreviewCount, windowIDs.count), privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public)); rolling n=\(batchSummary.count, privacy: .public), avg=\(batchSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(batchSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(batchSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(batchSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                )
+            }
             self.applyPreviews(previews, generation: generation)
 
             let deferredWindowIDs = windowIDs.filter { previews[$0] == nil }
@@ -359,7 +409,9 @@ final class SwitcherStore: ObservableObject {
         let existingIDs = Set(items.map(\.id))
         let newItems = minimized
             .filter { !existingIDs.contains($0.id) }
-            .map(previewCache.hydrated)
+            .map { item in
+                SwitchBladeSettings.shared.previewMode == .iconsOnly ? item : previewCache.hydrated(item)
+            }
         guard !newItems.isEmpty else { return }
         items = items + newItems
     }

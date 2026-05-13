@@ -1,12 +1,35 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
 final class MenuBarController: NSObject, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindowController: NSWindowController?
+    private var cancellables: Set<AnyCancellable> = []
 
     func setup() {
+        applyMenuBarVisibility(SwitchBladeSettings.shared.showMenuBarIcon)
+        SwitchBladeSettings.shared.$showMenuBarIcon
+            .removeDuplicates()
+            .sink { [weak self] isVisible in
+                self?.applyMenuBarVisibility(isVisible)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyMenuBarVisibility(_ isVisible: Bool) {
+        if isVisible {
+            if statusItem == nil {
+                installStatusItem()
+            }
+        } else if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+            self.statusItem = nil
+        }
+    }
+
+    private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = makeMenuBarIcon()
         item.menu = makeMenu()
@@ -72,7 +95,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         return menu
     }
 
-    @objc private func openSettings() {
+    @objc func openSettings() {
         if settingsWindowController == nil {
             let view = SettingsView(settings: SwitchBladeSettings.shared)
             let host = NSHostingController(rootView: view)

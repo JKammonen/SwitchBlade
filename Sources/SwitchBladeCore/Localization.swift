@@ -17,12 +17,100 @@ public enum AppLanguage: String, CaseIterable, Sendable {
     }
 }
 
-/// Thread-safe, actor-agnostic storage of the user's "restrict to current
-/// Space" toggle. WindowCatalog (Sendable, non-MainActor) reads this in its
-/// hot path; SwitchBladeSettings mirrors the value on every change.
+public enum SBWindowScope: String, CaseIterable, Identifiable, Sendable {
+    case currentSpace = "currentSpace"
+    case allSpaces = "allSpaces"
+    case currentApp = "currentApp"
+
+    public var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .currentSpace: return L10n.tr(.windowScopeCurrentSpace)
+        case .allSpaces:    return L10n.tr(.windowScopeAllSpaces)
+        case .currentApp:   return L10n.tr(.windowScopeCurrentApp)
+        }
+    }
+}
+
+public enum SBPreviewMode: String, CaseIterable, Identifiable, Sendable {
+    case livePreviews = "livePreviews"
+    case blurredPreviews = "blurredPreviews"
+    case iconsOnly = "iconsOnly"
+
+    public var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .livePreviews:    return L10n.tr(.previewModeLive)
+        case .blurredPreviews: return L10n.tr(.previewModeBlurred)
+        case .iconsOnly:       return L10n.tr(.previewModeIconsOnly)
+        }
+    }
+}
+
+public enum SBSortOrder: String, CaseIterable, Identifiable, Sendable {
+    case recentlyUsed = "recentlyUsed"
+    case appGrouped = "appGrouped"
+    case alphabetical = "alphabetical"
+
+    public var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .recentlyUsed:  return L10n.tr(.sortRecentlyUsed)
+        case .appGrouped:   return L10n.tr(.sortAppGrouped)
+        case .alphabetical: return L10n.tr(.sortAlphabetical)
+        }
+    }
+}
+
+public enum SBPerformanceLogging: String, CaseIterable, Identifiable, Sendable {
+    case off = "off"
+    case basic = "basic"
+    case debug = "debug"
+
+    public var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off:   return L10n.tr(.loggingOff)
+        case .basic: return L10n.tr(.loggingBasic)
+        case .debug: return L10n.tr(.loggingDebug)
+        }
+    }
+}
+
+/// Thread-safe, actor-agnostic storage of the user's window scope. WindowCatalog
+/// (Sendable, non-MainActor) reads this in its hot path; SwitchBladeSettings
+/// mirrors the value on every change.
 public enum WindowFilterState {
-    private static let storage = LockedValue<Bool>(true)
+    private static let storage = LockedValue<SBWindowScope>(.currentSpace)
+
+    public static var scope: SBWindowScope {
+        get { storage.value }
+        set { storage.value = newValue }
+    }
+
     public static var restrictToCurrentSpace: Bool {
+        get { storage.value == .currentSpace }
+        set { storage.value = newValue ? .currentSpace : .allSpaces }
+    }
+}
+
+public enum HiddenAppFilterState {
+    private static let storage = LockedValue<Set<String>>([])
+
+    public static var normalizedTokens: Set<String> {
+        get { storage.value }
+        set { storage.value = newValue }
+    }
+}
+
+public enum PerformanceLoggingState {
+    private static let storage = LockedValue<SBPerformanceLogging>(.basic)
+
+    public static var mode: SBPerformanceLogging {
         get { storage.value }
         set { storage.value = newValue }
     }
@@ -63,13 +151,23 @@ public enum L10n {
         case settingsLanguage
         case settingsBehavior
         case settingsHotkey
+        case settingsPrivacy
+        case settingsAdvanced
         case settingsBackground
         case settingsBadgeBar
         case settingsSelection
         case settingsPreviewSize
 
         // Behavior
-        case fieldRestrictToCurrentSpace
+        case fieldLaunchAtLogin
+        case fieldShowMenuBarIcon
+        case fieldWindowScope
+        case fieldPreviewMode
+        case fieldSortOrder
+        case fieldHiddenApps
+        case fieldReducedMotion
+        case fieldPerformanceLogging
+        case fieldResetAppearance
 
         // SettingsView — fields
         case fieldLanguage
@@ -113,6 +211,26 @@ public enum L10n {
         case keyBacktick
         case keySpace
 
+        // Window scopes
+        case windowScopeCurrentSpace
+        case windowScopeAllSpaces
+        case windowScopeCurrentApp
+
+        // Preview modes
+        case previewModeLive
+        case previewModeBlurred
+        case previewModeIconsOnly
+
+        // Sort modes
+        case sortRecentlyUsed
+        case sortAppGrouped
+        case sortAlphabetical
+
+        // Performance logging
+        case loggingOff
+        case loggingBasic
+        case loggingDebug
+
         // Selection effects
         case selectionPump
         case selectionBreathe
@@ -150,7 +268,17 @@ public enum L10n {
     nonisolated(unsafe) private static let englishTable: [Key: String] = [
         .settingsLanguage:                "Language",
         .settingsBehavior:                "Behavior",
-        .fieldRestrictToCurrentSpace:     "Only current Space",
+        .settingsPrivacy:                 "Privacy",
+        .settingsAdvanced:                "Advanced",
+        .fieldLaunchAtLogin:              "Launch at login",
+        .fieldShowMenuBarIcon:            "Menu bar icon",
+        .fieldWindowScope:                "Window scope",
+        .fieldPreviewMode:                "Preview mode",
+        .fieldSortOrder:                  "Sort order",
+        .fieldHiddenApps:                 "Hidden apps",
+        .fieldReducedMotion:              "Reduced motion",
+        .fieldPerformanceLogging:         "Performance logging",
+        .fieldResetAppearance:            "Reset appearance",
         .settingsHotkey:                  "Hotkey",
         .settingsBackground:              "Background",
         .settingsBadgeBar:                "Badge bar",
@@ -190,6 +318,22 @@ public enum L10n {
         .keyBacktick:                     "Backtick (`)",
         .keySpace:                        "Space",
 
+        .windowScopeCurrentSpace:         "Current Space",
+        .windowScopeAllSpaces:            "All Spaces",
+        .windowScopeCurrentApp:           "Current app",
+
+        .previewModeLive:                 "Live previews",
+        .previewModeBlurred:              "Blur previews",
+        .previewModeIconsOnly:            "Icons only",
+
+        .sortRecentlyUsed:                "Recently used",
+        .sortAppGrouped:                  "Group by app",
+        .sortAlphabetical:                "Alphabetical",
+
+        .loggingOff:                      "Off",
+        .loggingBasic:                    "Basic",
+        .loggingDebug:                    "Debug",
+
         .selectionPump:                   "Pump",
         .selectionBreathe:                "Breathe",
         .selectionBounce:                 "Bounce",
@@ -203,7 +347,17 @@ public enum L10n {
     nonisolated(unsafe) private static let finnishTable: [Key: String] = [
         .settingsLanguage:                "Kieli",
         .settingsBehavior:                "Toiminta",
-        .fieldRestrictToCurrentSpace:     "Vain nykyinen Space",
+        .settingsPrivacy:                 "Yksityisyys",
+        .settingsAdvanced:                "Lisäasetukset",
+        .fieldLaunchAtLogin:              "Avaa kirjautuessa",
+        .fieldShowMenuBarIcon:            "Valikkorivin kuvake",
+        .fieldWindowScope:                "Ikkunoiden rajaus",
+        .fieldPreviewMode:                "Esikatselutila",
+        .fieldSortOrder:                  "Järjestys",
+        .fieldHiddenApps:                 "Piilotetut sovellukset",
+        .fieldReducedMotion:              "Vähennä liikettä",
+        .fieldPerformanceLogging:         "Suorituskykylokit",
+        .fieldResetAppearance:            "Palauta ulkoasu",
         .settingsHotkey:                  "Pikanäppäin",
         .settingsBackground:              "Tausta",
         .settingsBadgeBar:                "Otsikkopalkki",
@@ -242,6 +396,22 @@ public enum L10n {
         .keyTab:                          "Tab",
         .keyBacktick:                     "Aksenttipiste (`)",
         .keySpace:                        "Välilyönti",
+
+        .windowScopeCurrentSpace:         "Nykyinen Space",
+        .windowScopeAllSpaces:            "Kaikki Spacet",
+        .windowScopeCurrentApp:           "Nykyinen sovellus",
+
+        .previewModeLive:                 "Elävät esikatselut",
+        .previewModeBlurred:              "Sumenna esikatselut",
+        .previewModeIconsOnly:            "Vain ikonit",
+
+        .sortRecentlyUsed:                "Viimeksi käytetyt",
+        .sortAppGrouped:                  "Ryhmittele sovelluksittain",
+        .sortAlphabetical:                "Aakkosjärjestys",
+
+        .loggingOff:                      "Pois",
+        .loggingBasic:                    "Perus",
+        .loggingDebug:                    "Debug",
 
         .selectionPump:                   "Pumppu",
         .selectionBreathe:                "Hengitys",

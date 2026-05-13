@@ -10,6 +10,7 @@ func runAll() async -> Int {
         ("WindowItem",              WindowItemTests.all),
         ("PermissionState",         PermissionStateTests.all),
         ("Localization",            LocalizationTests.all),
+        ("SwitchBladeSettings",     SwitchBladeSettingsTests.all),
         ("SwitcherLayoutCalculator", SwitcherLayoutCalculatorTests.all),
         ("LockedValue",             LockedValueTests.all),
         ("LRUDictionary",           LRUDictionaryTests.all),

@@ -44,122 +44,192 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            group(title: L10n.tr(.settingsLanguage)) {
-                row(L10n.tr(.fieldLanguage)) {
-                    Picker("", selection: $settings.language) {
-                        ForEach(AppLanguage.allCases, id: \.self) { lang in
-                            Text(lang.displayName).tag(lang)
+        ScrollView(showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 0) {
+                group(title: L10n.tr(.settingsLanguage)) {
+                    row(L10n.tr(.fieldLanguage)) {
+                        Picker("", selection: $settings.language) {
+                            ForEach(AppLanguage.allCases, id: \.self) { lang in
+                                Text(lang.displayName).tag(lang)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+
+                group(title: L10n.tr(.settingsBehavior)) {
+                    row(L10n.tr(.fieldLaunchAtLogin)) {
+                        Toggle("", isOn: $settings.launchAtLogin)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    divider()
+                    row(L10n.tr(.fieldShowMenuBarIcon)) {
+                        Toggle("", isOn: $settings.showMenuBarIcon)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    divider()
+                    row(L10n.tr(.fieldWindowScope)) {
+                        Picker("", selection: $settings.windowScope) {
+                            ForEach(SBWindowScope.allCases) { scope in
+                                Text(scope.title).tag(scope)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldSortOrder)) {
+                        Picker("", selection: $settings.sortOrder) {
+                            ForEach(SBSortOrder.allCases) { sort in
+                                Text(sort.title).tag(sort)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldReducedMotion)) {
+                        Toggle("", isOn: $settings.reducedMotion)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                }
+
+                group(title: L10n.tr(.settingsPrivacy)) {
+                    row(L10n.tr(.fieldPreviewMode)) {
+                        Picker("", selection: $settings.previewMode) {
+                            ForEach(SBPreviewMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldHiddenApps)) {
+                        TextField("", text: $settings.hiddenAppsText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 190)
+                    }
+                }
+
+                group(title: L10n.tr(.settingsHotkey)) {
+                    row(L10n.tr(.fieldModifier)) {
+                        Picker("", selection: $settings.modifier) {
+                            ForEach(SBModifier.allCases) { m in Text(m.title).tag(m) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldTriggerKey)) {
+                        Picker("", selection: $settings.triggerKey) {
+                            ForEach(SBTriggerKey.allCases) { k in Text(k.title).tag(k) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    Text(L10n.tr(.fieldActiveCombo, "\(settings.modifier.title) + \(settings.triggerKey.title)"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+
+                group(title: L10n.tr(.settingsBackground)) {
+                    row(L10n.tr(.fieldColor)) {
+                        ColorPicker("", selection: bgColorBinding, supportsOpacity: false)
+                            .labelsHidden()
+                            .fixedSize()
+                    }
+                    divider()
+                    sliderRow(L10n.tr(.fieldOpacity), value: $settings.backgroundOpacity, in: 0.0...1.0, unit: "%", scale: 100)
+                }
+
+                group(title: L10n.tr(.settingsBadgeBar)) {
+                    row(L10n.tr(.fieldPosition)) {
+                        Picker("", selection: $settings.badgePosition) {
+                            ForEach(SBBadgePosition.allCases) { p in Text(p.title).tag(p) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldAppIconColor)) {
+                        Toggle("", isOn: $settings.badgeUseAppColor)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    divider()
+                    row(L10n.tr(.fieldColor)) {
+                        ColorPicker("", selection: badgeColorBinding, supportsOpacity: false)
+                            .labelsHidden()
+                            .fixedSize()
+                            .disabled(settings.badgeUseAppColor)
+                            .opacity(settings.badgeUseAppColor ? 0.4 : 1)
+                    }
+                    divider()
+                    sliderRow(L10n.tr(.fieldOpacity), value: $settings.badgeOpacity, in: 0.0...1.0, unit: "%", scale: 100)
+                    divider()
+                    sliderRow(L10n.tr(.fieldIconSize), value: $settings.badgeIconSize, in: 12...32, unit: "pt", scale: 1)
+                    divider()
+                    sliderRow(L10n.tr(.fieldTextSize), value: $settings.badgeFontSize, in: 9...16, unit: "pt", scale: 1)
+                    divider()
+                    sliderRow(L10n.tr(.fieldVerticalPadding), value: $settings.badgeVerticalPadding, in: 2...14, unit: "pt", scale: 1)
+                }
+
+                group(title: L10n.tr(.settingsSelection)) {
+                    row(L10n.tr(.fieldAnimation)) {
+                        Picker("", selection: $settings.selectionEffect) {
+                            ForEach(SBSelectionEffect.allCases) { effect in
+                                Text(effect.title).tag(effect)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldHighlightColor)) {
+                        ColorPicker("", selection: highlightColorBinding, supportsOpacity: false)
+                            .labelsHidden()
+                            .fixedSize()
+                    }
+                    divider()
+                    sliderRow(L10n.tr(.fieldStrength), value: $settings.highlightStrength, in: 0.2...1.0, unit: "%", scale: 100)
+                    divider()
+                    sliderRow(L10n.tr(.fieldOpacity), value: $settings.highlightOpacity, in: 0.15...1.0, unit: "%", scale: 100)
+                }
+
+                group(title: L10n.tr(.settingsPreviewSize)) {
+                    sliderRow(L10n.tr(.fieldMinWidth), value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
+                }
+
+                group(title: L10n.tr(.settingsAdvanced)) {
+                    row(L10n.tr(.fieldPerformanceLogging)) {
+                        Picker("", selection: $settings.performanceLogging) {
+                            ForEach(SBPerformanceLogging.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    divider()
+                    row(L10n.tr(.fieldResetAppearance)) {
+                        Button(L10n.tr(.fieldResetAppearance)) {
+                            settings.resetAppearanceDefaults()
                         }
                     }
-                    .labelsHidden()
-                    .fixedSize()
                 }
             }
-
-            group(title: L10n.tr(.settingsBehavior)) {
-                row(L10n.tr(.fieldRestrictToCurrentSpace)) {
-                    Toggle("", isOn: $settings.restrictToCurrentSpace)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
-            }
-
-            group(title: L10n.tr(.settingsHotkey)) {
-                row(L10n.tr(.fieldModifier)) {
-                    Picker("", selection: $settings.modifier) {
-                        ForEach(SBModifier.allCases) { m in Text(m.title).tag(m) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                divider()
-                row(L10n.tr(.fieldTriggerKey)) {
-                    Picker("", selection: $settings.triggerKey) {
-                        ForEach(SBTriggerKey.allCases) { k in Text(k.title).tag(k) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                divider()
-                Text(L10n.tr(.fieldActiveCombo, "\(settings.modifier.title) + \(settings.triggerKey.title)"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-            }
-
-            group(title: L10n.tr(.settingsBackground)) {
-                row(L10n.tr(.fieldColor)) {
-                    ColorPicker("", selection: bgColorBinding, supportsOpacity: false)
-                        .labelsHidden()
-                        .fixedSize()
-                }
-                divider()
-                sliderRow(L10n.tr(.fieldOpacity), value: $settings.backgroundOpacity, in: 0.0...1.0, unit: "%", scale: 100)
-            }
-
-            group(title: L10n.tr(.settingsBadgeBar)) {
-                row(L10n.tr(.fieldPosition)) {
-                    Picker("", selection: $settings.badgePosition) {
-                        ForEach(SBBadgePosition.allCases) { p in Text(p.title).tag(p) }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                divider()
-                row(L10n.tr(.fieldAppIconColor)) {
-                    Toggle("", isOn: $settings.badgeUseAppColor)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
-                divider()
-                row(L10n.tr(.fieldColor)) {
-                    ColorPicker("", selection: badgeColorBinding, supportsOpacity: false)
-                        .labelsHidden()
-                        .fixedSize()
-                        .disabled(settings.badgeUseAppColor)
-                        .opacity(settings.badgeUseAppColor ? 0.4 : 1)
-                }
-                divider()
-                sliderRow(L10n.tr(.fieldOpacity), value: $settings.badgeOpacity, in: 0.0...1.0, unit: "%", scale: 100)
-                divider()
-                sliderRow(L10n.tr(.fieldIconSize), value: $settings.badgeIconSize, in: 12...32, unit: "pt", scale: 1)
-                divider()
-                sliderRow(L10n.tr(.fieldTextSize), value: $settings.badgeFontSize, in: 9...16, unit: "pt", scale: 1)
-                divider()
-                sliderRow(L10n.tr(.fieldVerticalPadding), value: $settings.badgeVerticalPadding, in: 2...14, unit: "pt", scale: 1)
-            }
-
-            group(title: L10n.tr(.settingsSelection)) {
-                row(L10n.tr(.fieldAnimation)) {
-                    Picker("", selection: $settings.selectionEffect) {
-                        ForEach(SBSelectionEffect.allCases) { effect in
-                            Text(effect.title).tag(effect)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                divider()
-                row(L10n.tr(.fieldHighlightColor)) {
-                    ColorPicker("", selection: highlightColorBinding, supportsOpacity: false)
-                        .labelsHidden()
-                        .fixedSize()
-                }
-                divider()
-                sliderRow(L10n.tr(.fieldStrength), value: $settings.highlightStrength, in: 0.2...1.0, unit: "%", scale: 100)
-                divider()
-                sliderRow(L10n.tr(.fieldOpacity), value: $settings.highlightOpacity, in: 0.15...1.0, unit: "%", scale: 100)
-            }
-
-            group(title: L10n.tr(.settingsPreviewSize)) {
-                sliderRow(L10n.tr(.fieldMinWidth), value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
-            }
+            .padding(16)
         }
-        .padding(16)
         .frame(width: 380)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxHeight: 720)
     }
 
     // MARK: - helpers
@@ -212,4 +282,3 @@ struct SettingsView: View {
         Divider().padding(.leading, 12)
     }
 }
-

@@ -102,7 +102,6 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 ## Known Gaps
 
 - No type-to-filter
-- No "current app windows only" mode (⌘+`)
 - No pin / drag-reorder
 - No multi-display per-screen window filter
 - No Apple Developer ID + notarization (Gatekeeper warns on other Macs)
@@ -117,7 +116,7 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `scripts/setup-local-codesign.sh` output. Should not happen with current setup.
 - **Blank previews after idle** → first-batch capture cold-starts. Has retry + soft
   timeout. Check rolling p95/p99 in cold-open log.
-- **Window from another Space shows / doesn't** → Settings → Behavior → Only current
-  Space.
+- **Window scope feels wrong** → Settings → Behavior → Window scope. Choices are
+  current Space, all Spaces, and current app.
 - **Permission dialog reappears** → never add `CGRequest*` calls. Use `CGPreflight*` +
   NSAlert that links to System Settings.

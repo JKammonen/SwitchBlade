@@ -16,6 +16,10 @@ enum SwitcherStoreTests {
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
+        ("Store/ordering_alphabeticalKeepsFrontmostFirst", ordering_alphabeticalKeepsFrontmostFirst),
+        ("Store/ordering_appGroupedKeepsFrontmostFirst", ordering_appGroupedKeepsFrontmostFirst),
+        // preview modes
+        ("Store/previewMode_iconsOnlySkipsCaptures", previewMode_iconsOnlySkipsCaptures),
         // handleKeyDown
         ("Store/handleKeyDown_whenNotVisible_false", handleKeyDown_notVisible),
         ("Store/handleKeyDown_tab_forward", handleKeyDown_tabForward),
@@ -28,6 +32,7 @@ enum SwitcherStoreTests {
         ("Store/handleKeyDown_end_selectsLast", handleKeyDown_end),
         ("Store/handleKeyDown_cmdQ_quitsSelectedApp", handleKeyDown_cmdQ),
         ("Store/handleKeyDown_cmdH_hidesSelectedApp", handleKeyDown_cmdH),
+        ("Store/handleKeyDown_cmdComma_opensSettings", handleKeyDown_cmdComma),
         ("Store/quit_removesAllWindowsOfThatPid", quit_removesAllPidWindows),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
@@ -165,6 +170,67 @@ enum SwitcherStoreTests {
         ]
         store.cycle(forward: true)
         try expectEqual(store.items.map(\.id), [1, 3, 2])
+    }
+
+    @MainActor static func ordering_alphabeticalKeepsFrontmostFirst() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldSortOrder = settings.sortOrder
+        settings.sortOrder = .alphabetical
+        defer { settings.sortOrder = oldSortOrder }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, appName: "Front", title: "Zulu", isFrontmostApp: true),
+            makeItem(id: 2, appName: "Beta", title: "Charlie"),
+            makeItem(id: 3, appName: "Alpha", title: "Bravo"),
+            makeItem(id: 4, appName: "Gamma", title: "Alpha")
+        ]
+
+        store.cycle(forward: true)
+
+        try expectEqual(store.items.map(\.id), [1, 4, 3, 2])
+    }
+
+    @MainActor static func ordering_appGroupedKeepsFrontmostFirst() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldSortOrder = settings.sortOrder
+        settings.sortOrder = .appGrouped
+        defer { settings.sortOrder = oldSortOrder }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, appName: "Front", title: "Zulu", isFrontmostApp: true),
+            makeItem(id: 2, appName: "Beta", title: "Window B"),
+            makeItem(id: 3, appName: "Alpha", title: "Window C"),
+            makeItem(id: 4, appName: "Alpha", title: "Window A")
+        ]
+
+        store.cycle(forward: true)
+
+        try expectEqual(store.items.map(\.id), [1, 4, 3, 2])
+    }
+
+    // MARK: preview modes
+
+    @MainActor static func previewMode_iconsOnlySkipsCaptures() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .iconsOnly
+        defer { settings.previewMode = oldPreviewMode }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+
+        store.cycle(forward: true)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(catalog.captureCallCount, 0)
+        try expect(store.items.allSatisfy { $0.preview == nil })
     }
 
     // MARK: handleKeyDown
@@ -310,6 +376,23 @@ enum SwitcherStoreTests {
         try expect(handled)
         try expectEqual(activator.hiddenItems.map(\.id), [2])
         try expect(!store.isVisible)
+    }
+
+    @MainActor static func handleKeyDown_cmdComma() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        var openSettingsCalls = 0
+        store.onOpenSettings = { openSettingsCalls += 1 }
+        store.cycle(forward: true)
+
+        let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Comma, modifiers: .command))
+
+        try expect(handled)
+        try expect(!store.isVisible)
+        try expectEqual(openSettingsCalls, 1)
     }
 
     @MainActor static func quit_removesAllPidWindows() async throws {

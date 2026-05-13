@@ -88,6 +88,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menuBar = MenuBarController()
         menuBar.setup()
+        store.onOpenSettings = { [weak menuBar] in
+            menuBar?.openSettings()
+        }
         self.menuBarController = menuBar
 
         installLifecycleObservers()
