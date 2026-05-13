@@ -13,6 +13,10 @@ protocol WindowSnapshotProviding: Sendable {
         maxConcurrentCaptures: Int
     ) async -> [CGWindowID: NSImage]
     func refreshContentCache() async
+    /// Cheaper variant — no-op when the cache is still fresh. Use for
+    /// opportunistic warmups (e.g. on NSWorkspace activation) where we don't
+    /// want to hammer SCKit on every fast app switch.
+    func refreshContentCacheIfStale() async
 }
 
 /// Window activation / closing dependency. Concrete WindowActivator conforms;

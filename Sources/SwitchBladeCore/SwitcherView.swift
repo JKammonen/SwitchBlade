@@ -347,22 +347,43 @@ private struct WindowTile: View {
         return Color(red: r / count * factor, green: g / count * factor, blue: b / count * factor)
     }
 
+    /// Placeholder shown when no preview image is available. The app icon is
+    /// rendered both as a soft tinted backdrop (so the tile takes on the app's
+    /// color and doesn't read as "broken") and as a large foreground glyph.
+    /// Sized via GeometryReader so the icon scales with the tile, which keeps
+    /// the visual proportions consistent regardless of tileMinWidth.
     private var placeholderFill: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.16, green: 0.20, blue: 0.30),
-                    Color(red: 0.08, green: 0.10, blue: 0.16)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            if let icon = item.icon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(width: 44, height: 44)
-                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .opacity(0.7)
+        GeometryReader { geo in
+            let iconSide = min(geo.size.width, geo.size.height) * 0.42
+            ZStack {
+                // Soft gradient base so even icon-less items still look intentional.
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.18, green: 0.22, blue: 0.32),
+                        Color(red: 0.08, green: 0.10, blue: 0.16)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                // Tinted backdrop derived from the app icon — bleeds the icon
+                // color into the background so the tile feels "this app's tile",
+                // not a generic placeholder.
+                if let icon = item.icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFill()
+                        .opacity(0.18)
+                        .blur(radius: 24)
+                        .clipped()
+                }
+                if let icon = item.icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: iconSide, height: iconSide)
+                        .clipShape(RoundedRectangle(cornerRadius: iconSide * 0.22, style: .continuous))
+                        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 2)
+                }
             }
         }
     }

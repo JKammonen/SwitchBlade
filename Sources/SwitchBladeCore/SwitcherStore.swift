@@ -62,9 +62,26 @@ final class SwitcherStore: ObservableObject {
             let pid = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
                 .processIdentifier
             MainActor.assumeIsolated {
-                guard let self, let pid, !self.isVisible else { return }
-                self.mruTracker.trackSystemActivation(pid: pid, in: self.items)
+                guard let self, let pid else { return }
+                self.handleAppActivation(pid: pid)
             }
+        }
+    }
+
+    /// Internal entry point for the NSWorkspace activation observer, also
+    /// callable directly from tests so the notification queue / RunLoop
+    /// plumbing doesn't have to be exercised under XCTest.
+    func handleAppActivation(pid: pid_t) {
+        if !isVisible {
+            mruTracker.trackSystemActivation(pid: pid, in: items)
+        }
+        // Opportunistic SCKit cache warmup. The catalog's IfStale check
+        // self-throttles so rapid app switches don't spam SCKit. Net effect:
+        // whenever the user is doing anything at all, the next Cmd+Tab has a
+        // fresh cache and captures don't pay the cold-start cost.
+        let catalogRef = self.catalog
+        Task.detached(priority: .utility) {
+            await catalogRef.refreshContentCacheIfStale()
         }
     }
 

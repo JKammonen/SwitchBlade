@@ -21,7 +21,11 @@ actor SCContentCache {
     /// Stale cache leads to slow first captures after idle: the cached SCWindow
     /// refs lose their warm capture-pipeline link, and SCScreenshotManager has
     /// to re-resolve each one. Below this age the cache is reused as-is.
-    static let staleThreshold: TimeInterval = 10
+    ///
+    /// 5 s is tight enough that "a few seconds of idle" still gets a fresh
+    /// fetch; SwitcherStore also triggers opportunistic refreshes on every
+    /// NSWorkspace app activation, so this threshold is mostly the safety net.
+    static let staleThreshold: TimeInterval = 5
 
     func refreshIfAllowed() async {
         // Guard: SCKit can trigger an OS permission dialog without Screen Recording access.
@@ -79,6 +83,33 @@ actor SCContentCache {
         let cgImg = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
         return NSImage(cgImage: cgImg, size: .zero)
     }
+
+    /// Captures the window or gives up after `timeoutMs`. SCKit's
+    /// `captureImage` can occasionally hang for many seconds after a TCC
+    /// hiccup or display reconfiguration; this prevents the whole capture
+    /// batch from being held hostage by one slow window.
+    ///
+    /// The timeout cancels our wait, but the underlying SCKit task may still
+    /// be running. We accept that — the resources will be released when the
+    /// process eventually returns or errors.
+    static func captureWithTimeout(window: SCWindow, maxDim: Int, timeoutMs: Int) async -> NSImage? {
+        nonisolated(unsafe) let capturedWindow = window
+        return await withTaskGroup(of: NSImage?.self) { group in
+            group.addTask {
+                try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+                return nil
+            }
+            // First non-nil wins — if capture finishes first with an image,
+            // that's our result. If the timeout fires first, we get nil.
+            // We don't await both: cancel the loser to free the task slot.
+            let winner = await group.next() ?? nil
+            group.cancelAll()
+            return winner
+        }
+    }
 }
 
 final class WindowCatalog: WindowSnapshotProviding, Sendable {
@@ -103,6 +134,14 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// Re-warms the cache after a capture session so the next Cmd+Tab is fast.
     func refreshContentCache() async {
         await contentCache.refreshIfAllowed()
+    }
+
+    /// Like `refreshContentCache` but no-op when the cache is still fresh.
+    /// Called from SwitcherStore on every NSWorkspace app activation so the
+    /// cache stays warm while the user is doing anything at all. The staleness
+    /// gate prevents this from hammering SCKit during rapid app switches.
+    func refreshContentCacheIfStale() async {
+        await contentCache.refreshIfStale()
     }
 
     /// Fast path used on the Cmd+Tab critical path. Skips the AX walk for
@@ -253,17 +292,20 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 group.addTask {
                     // First attempt — usually succeeds, but SCKit's first call
                     // after a few seconds idle can fail silently while the
-                    // capture pipeline warms up. That's why the user sees the
-                    // first tile (frontmost / freshly-active window, not in
-                    // the preview cache because it had focus before idle)
-                    // blank until they trigger another switcher cycle.
-                    if let image = try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim) {
+                    // capture pipeline warms up. Both attempts are bounded by
+                    // a 300 ms timeout so one slow window can't hold up the
+                    // whole batch.
+                    if let image = await SCContentCache.captureWithTimeout(
+                        window: capturedWindow, maxDim: maxDim, timeoutMs: 300
+                    ) {
                         return (windowID, image)
                     }
                     Logger.capture.notice(
-                        "First capture failed for windowID=\(windowID, privacy: .public) — retrying"
+                        "First capture failed/timed out for windowID=\(windowID, privacy: .public) — retrying"
                     )
-                    if let image = try? await SCContentCache.capture(window: capturedWindow, maxDim: maxDim) {
+                    if let image = await SCContentCache.captureWithTimeout(
+                        window: capturedWindow, maxDim: maxDim, timeoutMs: 300
+                    ) {
                         return (windowID, image)
                     }
                     Logger.capture.error(

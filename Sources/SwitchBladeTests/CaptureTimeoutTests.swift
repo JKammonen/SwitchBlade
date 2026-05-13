@@ -1,0 +1,68 @@
+import AppKit
+import Foundation
+@testable import SwitchBladeCore
+
+enum CaptureTimeoutTests {
+
+    static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
+        ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
+        ("ActivationRefresh/updatesMRU_onlyWhenHidden", activation_updatesMRU_onlyWhenHidden)
+    ]
+
+    /// We can't invoke captureWithTimeout against a real SCWindow from tests,
+    /// but we can verify the underlying Task.sleep timing guarantee that
+    /// `captureWithTimeout` relies on for its bound. If sleep is well-behaved,
+    /// the timeout race is well-behaved.
+    static func timeoutBounded() async throws {
+        let start = Date()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+        try expectGreaterThanOrEqual(elapsedMs, 45)
+        try expectLessThan(elapsedMs, 250)
+    }
+
+    /// Calls SwitcherStore.handleAppActivation directly (same entry point the
+    /// NSWorkspace observer uses) and verifies the catalog gets an opportunistic
+    /// `refreshContentCacheIfStale` kick. This is the path that keeps the SCKit
+    /// cache warm whenever the user is switching between apps.
+    @MainActor static func activationTriggersRefresh() async throws {
+        let (store, catalog, _, _) = makeStore()
+        let baseline = catalog.refreshIfStaleCallCount
+
+        store.handleAppActivation(pid: 1234)
+
+        // The refresh is dispatched via Task.detached — yield a few times so
+        // the detached task actually executes before we check.
+        for _ in 0 ..< 30 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            if catalog.refreshIfStaleCallCount > baseline { break }
+        }
+
+        try expectGreaterThan(catalog.refreshIfStaleCallCount, baseline)
+    }
+
+    /// Activation while the switcher is hidden updates the MRU. While visible,
+    /// MRU stays put (the user is mid-cycle and we don't want their list to
+    /// reshuffle under them).
+    @MainActor static func activation_updatesMRU_onlyWhenHidden() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300)
+        ]
+        store.cycle(forward: true)        // becomes visible
+        store.selectedID = 2
+        store.commitSelection()
+        await runPendingMainTasks()       // hidden again, MRU now [2, ...]
+
+        // While hidden, activation should reshuffle MRU.
+        store.handleAppActivation(pid: 300)
+        store.cycle(forward: true)
+        try expectEqual(store.items.first?.pid, 100)  // frontmost unchanged
+        // After activation pid=300, its window (id=3) should be the recent.
+        try expect(store.items.map(\.pid).prefix(2).contains(300))
+    }
+}

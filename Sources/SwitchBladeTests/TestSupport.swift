@@ -67,6 +67,11 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     func refreshContentCache() async {
         refreshCallCount += 1
     }
+
+    private(set) var refreshIfStaleCallCount = 0
+    func refreshContentCacheIfStale() async {
+        refreshIfStaleCallCount += 1
+    }
 }
 
 final class MockWindowActivator: WindowActivating, @unchecked Sendable {

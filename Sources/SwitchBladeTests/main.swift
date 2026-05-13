@@ -17,7 +17,8 @@ func runAll() async -> Int {
         ("MRUTracker",              MRUTrackerTests.all),
         ("WindowActivator",         WindowActivatorTests.all),
         ("SwitcherStore",           SwitcherStoreTests.all),
-        ("MRUPersistence",          MRUPersistenceTests.all)
+        ("MRUPersistence",          MRUPersistenceTests.all),
+        ("CaptureTimeout",          CaptureTimeoutTests.all)
     ]
 
     var passed = 0
