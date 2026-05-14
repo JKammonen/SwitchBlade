@@ -300,22 +300,16 @@ private struct WindowTile: View {
 
             guard isSelected, !settings.reducedMotion else { return }
 
-            while !Task.isCancelled {
-                withAnimation(selectionAnimation) {
-                    selectionPulse = true
-                }
-
-                try? await Task.sleep(nanoseconds: selectionPulseDurationNanoseconds)
-                if Task.isCancelled { break }
-
-                withAnimation(selectionAnimation) {
-                    selectionPulse = false
-                }
-
-                try? await Task.sleep(nanoseconds: selectionPulseDurationNanoseconds)
+            withAnimation(selectionAnimation) {
+                selectionPulse = true
             }
 
-            selectionPulse = false
+            try? await Task.sleep(nanoseconds: selectionPulseDurationNanoseconds)
+            guard !Task.isCancelled else { return }
+
+            withAnimation(selectionAnimation) {
+                selectionPulse = false
+            }
         }
         .task(id: settings.badgeUseAppColor ? Int(item.pid) : 0) {
             guard settings.badgeUseAppColor, let icon = item.icon else {
