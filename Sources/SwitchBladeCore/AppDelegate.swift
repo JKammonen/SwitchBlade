@@ -32,17 +32,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             "Permissions on launch: ax=\(state.hasAccessibility, privacy: .public), sr=\(state.hasScreenRecording, privacy: .public)"
         )
 
-        // Warm SC cache after a short delay so TCC has settled from the
-        // accessibility prompt above. Only fires when SR is already granted.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self else { return }
-            guard self.permissionService.currentState().hasScreenRecording else {
-                Logger.capture.notice("Skipping SCKit warmup — Screen Recording not granted")
-                return
-            }
+        if state.hasScreenRecording {
             Logger.capture.info("Starting SCKit cache warmup")
-            self.windowCatalog.startBackgroundRefresh()
+            windowCatalog.startBackgroundRefresh()
+        } else {
+            // Re-check after a short delay so TCC has settled from launch
+            // prompts, without holding back already-authorized users.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard let self else { return }
+                guard self.permissionService.currentState().hasScreenRecording else {
+                    Logger.capture.notice("Skipping SCKit warmup — Screen Recording not granted")
+                    return
+                }
+                Logger.capture.info("Starting delayed SCKit cache warmup")
+                self.windowCatalog.startBackgroundRefresh()
+            }
         }
 
         let panelController = SwitcherPanelController(store: store)

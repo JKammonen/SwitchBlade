@@ -327,6 +327,7 @@ private struct WindowTile: View {
             .scaleEffect(isSelected ? selectionVisualState.scale : 1.0)
             .offset(y: isSelected ? selectionVisualState.yOffset : 0)
             .rotationEffect(isSelected ? selectionVisualState.rotation : .degrees(0))
+            .zIndex(isSelected ? 1 : 0)
         }
         // aspectRatio on the outer GeometryReader placeholder drives the height.
         .aspectRatio(SwitcherLayout.tileAspectRatio, contentMode: .fit)
