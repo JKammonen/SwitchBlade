@@ -12,6 +12,29 @@ actor DominantColorCache {
     func set(_ color: Color, for pid: pid_t) { cache[pid] = color }
 }
 
+enum PreviewScalingPolicy {
+    static let containedPreviewInset: CGFloat = 12
+    static let minimumVisibleFractionForFill: CGFloat = 0.78
+
+    /// Small windows like Calculator look wrong when forced to fill the whole
+    /// tile: the preview gets enlarged and cropped as if it were a large
+    /// document window. Keep previews contained when the source window is
+    /// already smaller than the available tile canvas, or when forcing fill
+    /// would crop too much due to an aspect-ratio mismatch.
+    static func shouldContainPreview(windowBounds: CGRect, tileSize: CGSize) -> Bool {
+        let availableWidth = max(1, tileSize.width - containedPreviewInset * 2)
+        let availableHeight = max(1, tileSize.height - containedPreviewInset * 2)
+        if windowBounds.width <= availableWidth && windowBounds.height <= availableHeight {
+            return true
+        }
+
+        let windowAspectRatio = max(windowBounds.width, 1) / max(windowBounds.height, 1)
+        let tileAspectRatio = max(tileSize.width, 1) / max(tileSize.height, 1)
+        let visibleFractionWhenFilled = min(windowAspectRatio, tileAspectRatio) / max(windowAspectRatio, tileAspectRatio)
+        return visibleFractionWhenFilled < minimumVisibleFractionForFill
+    }
+}
+
 struct SwitcherView: View {
     @ObservedObject var store: SwitcherStore
     @ObservedObject private var settings = SwitchBladeSettings.shared
@@ -206,18 +229,31 @@ private struct WindowTile: View {
         // GeometryReader gives us an explicit width so aspectRatio is applied
         // outside, and the image fills the known frame exactly — no collapse.
         GeometryReader { geo in
+            let containsPreview = PreviewScalingPolicy.shouldContainPreview(
+                windowBounds: item.bounds,
+                tileSize: geo.size
+            )
+
             ZStack(alignment: settings.badgePosition == .top ? .top : .bottom) {
+                placeholderFill
+                    .frame(width: geo.size.width, height: geo.size.height)
+
                 if let preview = item.preview {
                     Image(nsImage: preview)
                         .resizable()
                         .interpolation(.high)
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: containsPreview ? .fit : .fill)
+                        .frame(
+                            width: containsPreview
+                                ? max(1, geo.size.width - PreviewScalingPolicy.containedPreviewInset * 2)
+                                : geo.size.width,
+                            height: containsPreview
+                                ? max(1, geo.size.height - PreviewScalingPolicy.containedPreviewInset * 2)
+                                : geo.size.height
+                        )
                         .frame(width: geo.size.width, height: geo.size.height)
                         .blur(radius: settings.previewMode == .blurredPreviews ? 10 : 0)
                         .clipped()
-                } else {
-                    placeholderFill
-                        .frame(width: geo.size.width, height: geo.size.height)
                 }
 
                 // Badge bar

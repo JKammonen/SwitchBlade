@@ -21,7 +21,8 @@ func runAll() async -> Int {
         ("SwitcherStore",           SwitcherStoreTests.all),
         ("MRUPersistence",          MRUPersistenceTests.all),
         ("PerformanceMetrics",      PerformanceMetricsTests.all),
-        ("CaptureTimeout",          CaptureTimeoutTests.all)
+        ("CaptureTimeout",          CaptureTimeoutTests.all),
+        ("PreviewScalingPolicy",    PreviewScalingPolicyTests.all)
     ]
 
     var passed = 0
