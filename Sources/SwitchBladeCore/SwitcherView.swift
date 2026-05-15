@@ -235,10 +235,10 @@ private struct WindowTile: View {
             )
 
             ZStack(alignment: settings.badgePosition == .top ? .top : .bottom) {
-                placeholderFill
-                    .frame(width: geo.size.width, height: geo.size.height)
-
                 if let preview = item.preview {
+                    previewBackdrop
+                        .frame(width: geo.size.width, height: geo.size.height)
+
                     Image(nsImage: preview)
                         .resizable()
                         .interpolation(.high)
@@ -254,6 +254,9 @@ private struct WindowTile: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .blur(radius: settings.previewMode == .blurredPreviews ? 10 : 0)
                         .clipped()
+                } else {
+                    placeholderFill
+                        .frame(width: geo.size.width, height: geo.size.height)
                 }
 
                 // Badge bar
@@ -401,19 +404,23 @@ private struct WindowTile: View {
     /// color and doesn't read as "broken") and as a large foreground glyph.
     /// Sized via GeometryReader so the icon scales with the tile, which keeps
     /// the visual proportions consistent regardless of tileMinWidth.
+    private var previewBackdrop: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.13, green: 0.14, blue: 0.18),
+                Color(red: 0.07, green: 0.08, blue: 0.11)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
     private var placeholderFill: some View {
         GeometryReader { geo in
             let iconSide = min(geo.size.width, geo.size.height) * 0.42
             ZStack {
                 // Soft gradient base so even icon-less items still look intentional.
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.18, green: 0.22, blue: 0.32),
-                        Color(red: 0.08, green: 0.10, blue: 0.16)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+                previewBackdrop
                 // Tinted backdrop derived from the app icon — bleeds the icon
                 // color into the background so the tile feels "this app's tile",
                 // not a generic placeholder.
