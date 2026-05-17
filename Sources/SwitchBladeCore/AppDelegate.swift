@@ -19,6 +19,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lifecycleObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var lastPresentedMissingPermissions: [PermissionKind] = []
     private var isPresentingPermissionAlert = false
+    /// Last observed Screen Recording grant. Used to detect the
+    /// not-granted → granted transition mid-session so we can warm the SCKit
+    /// cache on the same activation instead of waiting for the next Cmd+Tab
+    /// (which would otherwise cold-start, possibly inheriting a 60 s
+    /// failure cooldown if the launch-time refresh failed).
+    private var lastKnownHadScreenRecording = false
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.app.info("SwitchBlade launching (pid: \(getpid(), privacy: .public))")
@@ -35,6 +41,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.hasScreenRecording {
             Logger.capture.info("Starting SCKit cache warmup")
             windowCatalog.startBackgroundRefresh()
+            lastKnownHadScreenRecording = true
         } else {
             // Re-check after a short delay so TCC has settled from launch
             // prompts, without holding back already-authorized users.
@@ -47,6 +54,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 Logger.capture.info("Starting delayed SCKit cache warmup")
                 self.windowCatalog.startBackgroundRefresh()
+                self.lastKnownHadScreenRecording = true
             }
         }
 
@@ -117,6 +125,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationDidBecomeActive(_ notification: Notification) {
         // Only refresh state display — do NOT re-request permissions here,
         // that causes repeated OS prompts whenever the app comes to front.
+        let state = permissionService.currentState()
+        if state.hasScreenRecording && !lastKnownHadScreenRecording {
+            // Screen Recording was just granted mid-session. Warm SCKit now so
+            // the next Cmd+Tab is hot. `startBackgroundRefresh` calls
+            // `refreshIfAllowed`, which bypasses the 60 s failure cooldown —
+            // any earlier-failed refresh (e.g. denied at launch) is healed too.
+            Logger.capture.info("Screen Recording newly granted — warming SCKit cache")
+            windowCatalog.startBackgroundRefresh()
+        }
+        lastKnownHadScreenRecording = state.hasScreenRecording
         store.refreshPermissionState()
         hotkeyMonitor?.start()
     }
