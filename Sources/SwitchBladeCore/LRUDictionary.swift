@@ -1,8 +1,10 @@
 import Foundation
 
 /// Capacity-bounded dictionary that evicts the least-recently-inserted /
-/// least-recently-updated key when full. Insertion and update are O(1)
-/// amortised; the underlying `keysInOrder` array is mutated only on changes.
+/// least-recently-updated key when full. Read is O(1); insert/update/remove
+/// is O(n) because `keysInOrder` is a plain array scanned linearly to keep
+/// recency order. Acceptable while capacity stays small (currently 40) —
+/// rewrite as a doubly-linked-list + dict if capacity grows materially.
 ///
 /// Not thread-safe. Callers are expected to provide isolation themselves —
 /// the only consumer right now is `PreviewCacheStore` on @MainActor.
