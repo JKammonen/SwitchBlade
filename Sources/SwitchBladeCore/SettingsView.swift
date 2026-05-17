@@ -144,6 +144,14 @@ struct SettingsView: View {
                             .labelsHidden()
                             .toggleStyle(.switch)
                     }
+                    divider()
+                    row(L10n.tr(.fieldDoubleModifier)) {
+                        Picker("", selection: $settings.doubleModifier) {
+                            ForEach(SBModifier.allCases) { m in Text(m.title).tag(m) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
                 }
 
                 group(title: L10n.tr(.settingsBackground)) {

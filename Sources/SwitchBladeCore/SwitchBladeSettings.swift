@@ -164,6 +164,9 @@ final class SwitchBladeSettings: ObservableObject {
         // from "double Option" to "double configured modifier".
         didSet { ud.set(doubleModifierSwitchEnabled, forKey: "sb_doubleOptionSwitchEnabled") }
     }
+    @Published var doubleModifier: SBModifier {
+        didSet { ud.set(doubleModifier.rawValue, forKey: "sb_doubleModifier") }
+    }
 
     @Published var launchAtLogin: Bool {
         didSet {
@@ -257,6 +260,7 @@ final class SwitchBladeSettings: ObservableObject {
         modifier   = SBModifier(rawValue:   ud.string(forKey: "sb_modifier")   ?? "") ?? .command
         triggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
         doubleModifierSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? true
+        doubleModifier = SBModifier(rawValue: ud.string(forKey: "sb_doubleModifier") ?? "") ?? .command
         launchAtLogin = ud.object(forKey: "sb_launchAtLogin") as? Bool
             ?? (LaunchAtLoginController.currentStatusIsEnabled())
         showMenuBarIcon = ud.object(forKey: "sb_showMenuBarIcon") as? Bool ?? true

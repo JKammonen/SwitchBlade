@@ -202,6 +202,7 @@ public enum L10n {
         case fieldTriggerKey
         case fieldActiveCombo
         case fieldDoubleModifierSwitch
+        case fieldDoubleModifier
         case fieldColor
         case fieldOpacity
         case fieldPosition
@@ -323,6 +324,7 @@ public enum L10n {
         .fieldTriggerKey:                 "Trigger key",
         .fieldActiveCombo:                "Active: %@",
         .fieldDoubleModifierSwitch:       "Double modifier switches back",
+        .fieldDoubleModifier:             "Double modifier",
         .fieldColor:                      "Color",
         .fieldOpacity:                    "Opacity",
         .fieldPosition:                   "Position",
@@ -408,6 +410,7 @@ public enum L10n {
         .fieldTriggerKey:                 "Laukaisin",
         .fieldActiveCombo:                "Aktiivinen: %@",
         .fieldDoubleModifierSwitch:       "Modifier-tuplapainallus takaisin",
+        .fieldDoubleModifier:             "Tuplapainalluksen näppäin",
         .fieldColor:                      "Väri",
         .fieldOpacity:                    "Läpinäkyvyys",
         .fieldPosition:                   "Sijainti",

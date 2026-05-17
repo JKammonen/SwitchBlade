@@ -129,16 +129,20 @@ final class HotkeyMonitor {
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        // Read configured hotkey from settings; event tap runs on main RunLoop so assumeIsolated is safe.
-        let (configuredKey, configuredMod) = MainActor.assumeIsolated {
-            (SwitchBladeSettings.shared.triggerKey.keyCode, SwitchBladeSettings.shared.modifier.cgFlag)
+        // Read configured hotkeys from settings; event tap runs on main RunLoop so assumeIsolated is safe.
+        let (configuredKey, hotkeyModifier, doubleTapModifier) = MainActor.assumeIsolated {
+            (
+                SwitchBladeSettings.shared.triggerKey.keyCode,
+                SwitchBladeSettings.shared.modifier.cgFlag,
+                SwitchBladeSettings.shared.doubleModifier.cgFlag
+            )
         }
-        if event.flags.contains(configuredMod) {
-            // The modifier was used with another key, so it was not a standalone double-tap.
+        if event.flags.contains(doubleTapModifier) {
+            // The double-tap modifier was used with another key, so it was not a standalone double-tap.
             lastTapModifierPressTimestamp = nil
         }
-        let flags = event.flags.intersection([configuredMod, .maskShift])
-        guard keyCode == Int64(configuredKey), flags.contains(configuredMod) else {
+        let flags = event.flags.intersection([hotkeyModifier, .maskShift])
+        guard keyCode == Int64(configuredKey), flags.contains(hotkeyModifier) else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -185,9 +189,14 @@ final class HotkeyMonitor {
         shouldHandleConfiguredRelease: Bool
     ) {
         let flags = rawFlags.intersection(.deviceIndependentFlagsMask)
-        let configuredMod = MainActor.assumeIsolated { SwitchBladeSettings.shared.modifier.nsFlag }
-        let isConfiguredModifierDown = flags.contains(configuredMod)
-        let companionFlags = flags.subtracting(configuredMod)
+        let (hotkeyModifier, doubleTapModifier) = MainActor.assumeIsolated {
+            (
+                SwitchBladeSettings.shared.modifier.nsFlag,
+                SwitchBladeSettings.shared.doubleModifier.nsFlag
+            )
+        }
+        let isConfiguredModifierDown = flags.contains(doubleTapModifier)
+        let companionFlags = flags.subtracting(doubleTapModifier)
         let isBareModifierPress = isConfiguredModifierDown && companionFlags.isEmpty
 
         if isConfiguredModifierDown && !isTapModifierPressed {
@@ -205,7 +214,7 @@ final class HotkeyMonitor {
         }
 
         // Use the configured modifier so release detection matches the active hotkey.
-        if !flags.contains(configuredMod) {
+        if !flags.contains(hotkeyModifier) {
             onCommandReleased?()
         }
     }
