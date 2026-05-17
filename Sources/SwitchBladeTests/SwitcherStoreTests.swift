@@ -68,6 +68,7 @@ enum SwitcherStoreTests {
         store.onShow = { onShowCalls += 1 }
 
         store.cycle(forward: true)
+        await runPendingMainTasks()
 
         try expect(store.isVisible)
         try expectEqual(store.items.count, 3)

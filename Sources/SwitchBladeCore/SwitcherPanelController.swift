@@ -73,6 +73,15 @@ final class SwitcherPanelController {
 
     func show(itemCount: Int) {
         sizeAndCenter(itemCount: itemCount)
+        // Ensure SwiftUI has laid out and painted the current store state before
+        // the transparent panel becomes visible; otherwise AppKit can briefly
+        // show stale backing-store pixels from the previous frame.
+        hostingView.needsLayout = true
+        hostingView.layoutSubtreeIfNeeded()
+        hostingView.needsDisplay = true
+        hostingView.displayIfNeeded()
+        panel.contentView?.displayIfNeeded()
+        panel.disableScreenUpdatesUntilFlush()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         panel.alphaValue = 1

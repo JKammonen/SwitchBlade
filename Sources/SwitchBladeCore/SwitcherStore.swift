@@ -416,9 +416,10 @@ final class SwitcherStore: ObservableObject {
     private func showWithPreviews() {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
             previewGeneration += 1
+            let generation = previewGeneration
             hoverEnabled = false
             isVisible = true
-            onShow?()
+            schedulePanelShow(generation: generation)
             scheduleHoverEnable(generation: previewGeneration)
             return
         }
@@ -431,7 +432,7 @@ final class SwitcherStore: ObservableObject {
         guard !windowIDs.isEmpty else {
             hoverEnabled = false
             isVisible = true
-            onShow?()
+            schedulePanelShow(generation: generation)
             scheduleHoverEnable(generation: generation)
             return
         }
@@ -450,37 +451,22 @@ final class SwitcherStore: ObservableObject {
 
         hoverEnabled = false
         isVisible = true
-        onShow?()
+        schedulePanelShow(generation: generation)
         scheduleHoverEnable(generation: generation)
 
         previewLoadTask = Task {
             let batchStart = Date()
             var previews: [CGWindowID: NSImage] = [:]
-            await withTaskGroup(of: [CGWindowID: NSImage].self) { group in
-                if !priorityWindowIDs.isEmpty {
-                    group.addTask { [catalog, priorityWindowIDs] in
-                        await catalog.capturePreviews(
-                            for: priorityWindowIDs,
-                            maxCount: nil,
-                            maxConcurrentCaptures: min(2, priorityWindowIDs.count)
-                        )
-                    }
-                }
-                if !remainingInitialWindowIDs.isEmpty {
-                    group.addTask { [catalog, remainingInitialWindowIDs] in
-                        await catalog.capturePreviews(
-                            for: remainingInitialWindowIDs,
-                            maxCount: nil,
-                            maxConcurrentCaptures: 4
-                        )
-                    }
-                }
-
-                for await batchPreviews in group {
-                    guard !Task.isCancelled else { continue }
-                    previews.merge(batchPreviews) { _, fresh in fresh }
-                    self.applyPreviews(batchPreviews, generation: generation)
-                }
+            let firstBatchWindowIDs = priorityWindowIDs + remainingInitialWindowIDs
+            if !firstBatchWindowIDs.isEmpty {
+                let batchPreviews = await catalog.capturePreviews(
+                    for: firstBatchWindowIDs,
+                    maxCount: nil,
+                    maxConcurrentCaptures: min(4, firstBatchWindowIDs.count)
+                )
+                guard !Task.isCancelled else { return }
+                previews.merge(batchPreviews) { _, fresh in fresh }
+                self.applyPreviews(batchPreviews, generation: generation)
             }
 
             guard !Task.isCancelled else { return }
@@ -540,6 +526,14 @@ final class SwitcherStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 200_000_000)
             guard let self, self.previewGeneration == generation else { return }
             self.hoverEnabled = true
+        }
+    }
+
+    private func schedulePanelShow(generation: Int) {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, self.isVisible, self.previewGeneration == generation else { return }
+            self.onShow?()
         }
     }
 
