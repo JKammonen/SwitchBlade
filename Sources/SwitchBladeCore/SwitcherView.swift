@@ -56,6 +56,7 @@ struct SwitcherView: View {
                                 settings: settings,
                                 onSelect: { store.choose(item) },
                                 onHover: { store.hover(item) },
+                                onSnap: { edge in store.snap(item, to: edge) },
                                 onClose: { store.close(item) }
                             )
                         }
@@ -107,6 +108,7 @@ private struct WindowTile: View {
     let settings: SwitchBladeSettings
     let onSelect: () -> Void
     let onHover: () -> Void
+    let onSnap: (WindowSnapEdge) -> Void
     let onClose: () -> Void
 
     @State private var isHovered = false
@@ -302,6 +304,17 @@ private struct WindowTile: View {
                     VStack {
                         HStack {
                             Spacer()
+                            Menu {
+                                snapMenuItems
+                            } label: {
+                                Image(systemName: "rectangle.split.2x1")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .frame(width: 20, height: 20)
+                                    .background(Color.black.opacity(0.5), in: Circle())
+                            }
+                            .menuStyle(.borderlessButton)
+                            .help(L10n.tr(.actionSnapWindow))
                             Button(action: onClose) {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 9, weight: .bold))
@@ -334,6 +347,9 @@ private struct WindowTile: View {
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .onHover { isHovered = $0; if $0 { onHover() } }
         .onTapGesture(perform: onSelect)
+        .contextMenu {
+            snapMenuItems
+        }
         .animation(settings.reducedMotion ? nil : .spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
         .task(id: "\(item.id)-\(isSelected)-\(settings.selectionEffect.rawValue)") {
             selectionPulse = false
@@ -441,6 +457,17 @@ private struct WindowTile: View {
                         .clipShape(RoundedRectangle(cornerRadius: iconSide * 0.22, style: .continuous))
                         .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 2)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var snapMenuItems: some View {
+        ForEach(WindowSnapEdge.allCases) { edge in
+            Button {
+                onSnap(edge)
+            } label: {
+                Label(edge.title, systemImage: edge.symbolName)
             }
         }
     }

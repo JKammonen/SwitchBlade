@@ -138,6 +138,12 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
+                    divider()
+                    row(L10n.tr(.fieldDoubleOptionSwitch)) {
+                        Toggle("", isOn: $settings.doubleOptionSwitchEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
                 }
 
                 group(title: L10n.tr(.settingsBackground)) {

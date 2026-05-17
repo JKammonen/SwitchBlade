@@ -34,7 +34,13 @@ enum SwitcherStoreTests {
         ("Store/handleKeyDown_cmdQ_quitsSelectedApp", handleKeyDown_cmdQ),
         ("Store/handleKeyDown_cmdH_hidesSelectedApp", handleKeyDown_cmdH),
         ("Store/handleKeyDown_cmdComma_opensSettings", handleKeyDown_cmdComma),
+        ("Store/handleKeyDown_optionArrow_snapsSelectedWindow", handleKeyDown_optionArrowSnaps),
         ("Store/quit_removesAllWindowsOfThatPid", quit_removesAllPidWindows),
+        ("Store/switchToPreviousApplication_activatesPreviousPid", switchToPreviousApplication_activatesPreviousPid),
+        ("Store/switchToPreviousApplication_disabledSetting_skipsActivation", switchToPreviousApplication_disabledSetting),
+        ("Store/switchToPreviousApplication_infersPreviousPidWhenUntracked", switchToPreviousApplication_infersPreviousPid),
+        ("Store/switchToPreviousApplication_repeatedCallsCanBounceBetweenTwoApps", switchToPreviousApplication_bouncesBetweenTwoApps),
+        ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
         ("Store/commitSelection_withNoSelection_hides", commit_noSelection),
@@ -417,6 +423,23 @@ enum SwitcherStoreTests {
         try expectEqual(openSettingsCalls, 1)
     }
 
+    @MainActor static func handleKeyDown_optionArrowSnaps() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        store.cycle(forward: true)
+
+        let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_LeftArrow, modifiers: .option))
+
+        try expect(handled)
+        try expect(!store.isVisible)
+        await runPendingMainTasks()
+        try expectEqual(activator.snapCalls, [.init(id: 2, edge: .left)])
+    }
+
     @MainActor static func quit_removesAllPidWindows() async throws {
         let (store, catalog, activator, _) = makeStore()
         // Two windows of the same app (pid 200) + one of another app (pid 300)
@@ -434,6 +457,85 @@ enum SwitcherStoreTests {
         // Both pid-200 windows are gone; other apps remain in the list state.
         try expectEqual(activator.quitItems.map(\.pid), [200])
         try expect(!store.items.contains(where: { $0.pid == 200 }))
+    }
+
+    @MainActor static func switchToPreviousApplication_activatesPreviousPid() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleOptionSwitchEnabled
+        settings.doubleOptionSwitchEnabled = true
+        defer { settings.doubleOptionSwitchEnabled = oldValue }
+
+        let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
+        store.handleAppActivation(pid: 202)
+
+        store.switchToPreviousApplication()
+
+        try expectEqual(activator.activatedApplicationPIDs, [101])
+    }
+
+    @MainActor static func switchToPreviousApplication_disabledSetting() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleOptionSwitchEnabled
+        settings.doubleOptionSwitchEnabled = false
+        defer { settings.doubleOptionSwitchEnabled = oldValue }
+
+        let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
+        store.handleAppActivation(pid: 202)
+
+        store.switchToPreviousApplication()
+
+        try expect(activator.activatedApplicationPIDs.isEmpty)
+    }
+
+    @MainActor static func switchToPreviousApplication_infersPreviousPid() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleOptionSwitchEnabled
+        settings.doubleOptionSwitchEnabled = true
+        defer { settings.doubleOptionSwitchEnabled = oldValue }
+
+        let catalog = MockWindowCatalog()
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 202, isFrontmostApp: true),
+            makeItem(id: 2, pid: 101)
+        ]
+        let (store, _, activator, _) = makeStore(catalog: catalog, initialFrontmostAppPID: 202, switchBladePID: 999)
+
+        store.switchToPreviousApplication()
+
+        try expectEqual(activator.activatedApplicationPIDs, [101])
+        try expectEqual(catalog.visibleSnapshotCount, 1)
+    }
+
+    @MainActor static func switchToPreviousApplication_bouncesBetweenTwoApps() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleOptionSwitchEnabled
+        settings.doubleOptionSwitchEnabled = true
+        defer { settings.doubleOptionSwitchEnabled = oldValue }
+
+        let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
+        store.handleAppActivation(pid: 202)
+
+        store.switchToPreviousApplication()
+        store.handleAppActivation(pid: 101)
+        store.switchToPreviousApplication()
+
+        try expectEqual(activator.activatedApplicationPIDs, [101, 202])
+    }
+
+    @MainActor static func snap_itemRoutesToActivator() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        store.cycle(forward: true)
+
+        store.snap(makeItem(id: 3), to: .bottom)
+
+        try expect(!store.isVisible)
+        await runPendingMainTasks()
+        try expectEqual(activator.snapCalls, [.init(id: 3, edge: .bottom)])
     }
 
     // MARK: commit / cancel

@@ -30,12 +30,15 @@ final class SwitcherStore: ObservableObject {
     private let previewCache: PreviewCacheStore
     private let mruTracker: MRUTracker
     private let performanceMetrics: SwitcherPerformanceMetrics
+    private let switchBladePID: pid_t
 
     private var previewLoadTask: Task<Void, Never>?
     private var previewGeneration = 0
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
+    private var currentAppPID: pid_t?
+    private var previousAppPID: pid_t?
 
     /// Timestamp of the most recent Cmd+Tab cycle. Used by handleAppActivation
     /// to decide whether the user is actively switcher-using and therefore
@@ -55,7 +58,9 @@ final class SwitcherStore: ObservableObject {
         previewCache: PreviewCacheStore = PreviewCacheStore(),
         mruTracker: MRUTracker? = nil,
         performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
-        activationWarmupWindow: TimeInterval = 60
+        activationWarmupWindow: TimeInterval = 60,
+        initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+        switchBladePID: pid_t = getpid()
     ) {
         self.catalog = catalog
         self.activator = activator
@@ -65,6 +70,8 @@ final class SwitcherStore: ObservableObject {
         self.mruTracker = mruTracker ?? MRUTracker(userDefaults: userDefaults)
         self.performanceMetrics = performanceMetrics
         self.activationWarmupWindow = activationWarmupWindow
+        self.currentAppPID = initialFrontmostAppPID
+        self.switchBladePID = switchBladePID
 
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -88,7 +95,11 @@ final class SwitcherStore: ObservableObject {
     /// callable directly from tests so the notification queue / RunLoop
     /// plumbing doesn't have to be exercised under XCTest.
     func handleAppActivation(pid: pid_t) {
-        if !isVisible {
+        if pid != switchBladePID, !isVisible, !isSwitching {
+            if currentAppPID != pid {
+                previousAppPID = currentAppPID
+                currentAppPID = pid
+            }
             mruTracker.trackSystemActivation(pid: pid, in: items)
         }
         // Opportunistic SCKit cache warmup — gated on recent-use so we don't
@@ -175,6 +186,18 @@ final class SwitcherStore: ObservableObject {
         }
 
         switch Int(event.keyCode) {
+        case Int(kVK_RightArrow) where event.modifierFlags.contains(.option):
+            snapSelected(to: .right)
+            return true
+        case Int(kVK_LeftArrow) where event.modifierFlags.contains(.option):
+            snapSelected(to: .left)
+            return true
+        case Int(kVK_UpArrow) where event.modifierFlags.contains(.option):
+            snapSelected(to: .top)
+            return true
+        case Int(kVK_DownArrow) where event.modifierFlags.contains(.option):
+            snapSelected(to: .bottom)
+            return true
         case Int(kVK_Tab):
             moveSelection(event.modifierFlags.contains(.shift) ? -1 : 1)
             return true
@@ -230,6 +253,13 @@ final class SwitcherStore: ObservableObject {
         commitSelection()
     }
 
+    func snap(_ item: WindowItem, to edge: WindowSnapEdge) {
+        selectedID = item.id
+        performSelectionAction(for: item) { activator, selectedItem in
+            _ = activator.snap(selectedItem, to: edge)
+        }
+    }
+
     func close(_ item: WindowItem) {
         activator.close(item)
         removeItem(withID: item.id)
@@ -263,13 +293,8 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        mruTracker.rememberSelection(item.id, in: items)
-        hide()
-        // Defer past the current RunLoop cycle so panel.orderOut renders before
-        // WindowActivator starts synchronous AX IPC to the target app.
-        let activator = self.activator
-        Task { @MainActor in
-            activator.activate(item)
+        performSelectionAction(for: item) { activator, selectedItem in
+            activator.activate(selectedItem)
         }
     }
 
@@ -282,8 +307,72 @@ final class SwitcherStore: ObservableObject {
         onOpenSettings?()
     }
 
+    func switchToPreviousApplication() {
+        guard SwitchBladeSettings.shared.doubleOptionSwitchEnabled else {
+            Logger.switcher.info("Double Option switch ignored: setting disabled")
+            return
+        }
+        guard !isVisible, !isSwitching else {
+            Logger.switcher.info("Double Option switch ignored: switcher is visible or opening")
+            return
+        }
+
+        let effectiveCurrentPID = currentAppPID
+        guard let targetPID = previousApplicationPID(currentPID: effectiveCurrentPID) else {
+            Logger.switcher.info(
+                "Double Option switch ignored: no previous app current=\(effectiveCurrentPID ?? -1, privacy: .public) previous=\(self.previousAppPID ?? -1, privacy: .public)"
+            )
+            return
+        }
+
+        lastSwitcherUse = Date()
+        if let effectiveCurrentPID, effectiveCurrentPID != switchBladePID {
+            previousAppPID = effectiveCurrentPID
+        }
+        currentAppPID = targetPID
+        Logger.switcher.info(
+            "Double Option switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
+        )
+        activator.activateApplication(pid: targetPID)
+    }
+
+    private func previousApplicationPID(currentPID: pid_t?) -> pid_t? {
+        if let previousAppPID,
+           previousAppPID != switchBladePID,
+           previousAppPID != currentPID {
+            return previousAppPID
+        }
+
+        return catalog.snapshotVisibleOnly().first { item in
+            item.pid != switchBladePID && item.pid != currentPID
+        }?.pid
+    }
+
+    private func snapSelected(to edge: WindowSnapEdge) {
+        guard let item = selectedItem else {
+            cancel()
+            return
+        }
+
+        snap(item, to: edge)
+    }
+
     private var selectedItem: WindowItem? {
         items.first(where: { $0.id == selectedID })
+    }
+
+    private func performSelectionAction(
+        for item: WindowItem,
+        action: @escaping (WindowActivating, WindowItem) -> Void
+    ) {
+        mruTracker.rememberSelection(item.id, in: items)
+        hide()
+        // Defer past the current RunLoop cycle so panel.orderOut renders before
+        // WindowActivator starts synchronous AX IPC to the target app.
+        let activator = self.activator
+        Task { @MainActor in
+            action(activator, item)
+        }
     }
 
     private func hydratedForDisplay(_ sourceItems: [WindowItem]) -> [WindowItem] {

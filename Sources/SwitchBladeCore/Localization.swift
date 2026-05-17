@@ -81,6 +81,33 @@ public enum SBPerformanceLogging: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+public enum WindowSnapEdge: String, CaseIterable, Identifiable, Sendable {
+    case left
+    case right
+    case top
+    case bottom
+
+    public var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .left:   return L10n.tr(.actionSnapLeft)
+        case .right:  return L10n.tr(.actionSnapRight)
+        case .top:    return L10n.tr(.actionSnapTop)
+        case .bottom: return L10n.tr(.actionSnapBottom)
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .left:   return "arrow.left"
+        case .right:  return "arrow.right"
+        case .top:    return "arrow.up"
+        case .bottom: return "arrow.down"
+        }
+    }
+}
+
 /// Thread-safe, actor-agnostic storage of the user's window scope. WindowCatalog
 /// (Sendable, non-MainActor) reads this in its hot path; SwitchBladeSettings
 /// mirrors the value on every change.
@@ -174,6 +201,7 @@ public enum L10n {
         case fieldModifier
         case fieldTriggerKey
         case fieldActiveCombo
+        case fieldDoubleOptionSwitch
         case fieldColor
         case fieldOpacity
         case fieldPosition
@@ -185,6 +213,11 @@ public enum L10n {
         case fieldHighlightColor
         case fieldStrength
         case fieldMinWidth
+        case actionSnapWindow
+        case actionSnapLeft
+        case actionSnapRight
+        case actionSnapTop
+        case actionSnapBottom
 
         // Permission messages
         case permissionMessageAccessibility
@@ -289,6 +322,7 @@ public enum L10n {
         .fieldModifier:                   "Modifier",
         .fieldTriggerKey:                 "Trigger key",
         .fieldActiveCombo:                "Active: %@",
+        .fieldDoubleOptionSwitch:         "Double Option switches back",
         .fieldColor:                      "Color",
         .fieldOpacity:                    "Opacity",
         .fieldPosition:                   "Position",
@@ -300,6 +334,11 @@ public enum L10n {
         .fieldHighlightColor:             "Highlight color",
         .fieldStrength:                   "Strength",
         .fieldMinWidth:                   "Min width",
+        .actionSnapWindow:                "Snap window",
+        .actionSnapLeft:                  "Left",
+        .actionSnapRight:                 "Right",
+        .actionSnapTop:                   "Up",
+        .actionSnapBottom:                "Down",
 
         .permissionMessageAccessibility:  "Enable Accessibility for exact window focus.",
         .permissionMessageScreenRecording:"Enable Screen Recording for live window previews.",
@@ -368,6 +407,7 @@ public enum L10n {
         .fieldModifier:                   "Muunnosnäppäin",
         .fieldTriggerKey:                 "Laukaisin",
         .fieldActiveCombo:                "Aktiivinen: %@",
+        .fieldDoubleOptionSwitch:         "Alt-tuplapainallus takaisin",
         .fieldColor:                      "Väri",
         .fieldOpacity:                    "Läpinäkyvyys",
         .fieldPosition:                   "Sijainti",
@@ -379,6 +419,11 @@ public enum L10n {
         .fieldHighlightColor:             "Korostusväri",
         .fieldStrength:                   "Voimakkuus",
         .fieldMinWidth:                   "Vähimmäisleveys",
+        .actionSnapWindow:                "Puolita ikkuna",
+        .actionSnapLeft:                  "Vasen",
+        .actionSnapRight:                 "Oikea",
+        .actionSnapTop:                   "Ylös",
+        .actionSnapBottom:                "Alas",
 
         .permissionMessageAccessibility:  "Salli Accessibility tarkkaa ikkunafokusta varten.",
         .permissionMessageScreenRecording:"Salli Screen Recording elävien esikatselujen näyttämiseksi.",

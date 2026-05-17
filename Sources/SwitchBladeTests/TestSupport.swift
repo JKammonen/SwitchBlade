@@ -109,12 +109,24 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
 }
 
 final class MockWindowActivator: WindowActivating, @unchecked Sendable {
+    struct SnapCall: Equatable {
+        let id: CGWindowID
+        let edge: WindowSnapEdge
+    }
+
     private(set) var activatedItems: [WindowItem] = []
+    private(set) var activatedApplicationPIDs: [pid_t] = []
+    private(set) var snapCalls: [SnapCall] = []
     private(set) var closedItems: [WindowItem] = []
     private(set) var quitItems: [WindowItem] = []
     private(set) var hiddenItems: [WindowItem] = []
 
     func activate(_ item: WindowItem) { activatedItems.append(item) }
+    func activateApplication(pid: pid_t) { activatedApplicationPIDs.append(pid) }
+    func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
+        snapCalls.append(SnapCall(id: item.id, edge: edge))
+        return true
+    }
     func close(_ item: WindowItem)    { closedItems.append(item) }
     func quit(_ item: WindowItem)     { quitItems.append(item) }
     func hide(_ item: WindowItem)     { hiddenItems.append(item) }
@@ -133,14 +145,18 @@ func makeStore(
     activator: MockWindowActivator = MockWindowActivator(),
     permissions: MockPermissionService = MockPermissionService(),
     userDefaults: UserDefaults = makeIsolatedUserDefaults(),
-    activationWarmupWindow: TimeInterval = 60
+    activationWarmupWindow: TimeInterval = 60,
+    initialFrontmostAppPID: pid_t? = nil,
+    switchBladePID: pid_t = getpid()
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
     let store = SwitcherStore(
         catalog: catalog,
         activator: activator,
         permissionService: permissions,
         userDefaults: userDefaults,
-        activationWarmupWindow: activationWarmupWindow
+        activationWarmupWindow: activationWarmupWindow,
+        initialFrontmostAppPID: initialFrontmostAppPID,
+        switchBladePID: switchBladePID
     )
     return (store, catalog, activator, permissions)
 }

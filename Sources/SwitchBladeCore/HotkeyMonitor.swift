@@ -11,6 +11,7 @@ final class HotkeyMonitor {
 
     var onHotkey: ((Direction) -> Void)?
     var onCommandReleased: (() -> Void)?
+    var onOptionDoubleTap: (() -> Void)?
     var shouldTrackModifierRelease: (() -> Bool)?
     var onLocalKeyDown: ((NSEvent) -> Bool)?
 
@@ -20,6 +21,10 @@ final class HotkeyMonitor {
     private var globalFlagsMonitor: Any?
     private var localKeyMonitor: Any?
     private var didInstallEventMonitors = false
+    private var isOptionPressed = false
+    private var lastOptionPressTimestamp: TimeInterval?
+
+    private static let optionDoubleTapThreshold: TimeInterval = 0.35
 
     func start() {
         installEventTap()
@@ -110,11 +115,26 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
+        if type == .flagsChanged {
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            handleModifierFlagsChanged(
+                flags: nsModifierFlags(from: event.flags),
+                timestamp: Date.timeIntervalSinceReferenceDate,
+                changedKeyCode: keyCode,
+                shouldHandleConfiguredRelease: false
+            )
+            return Unmanaged.passUnretained(event)
+        }
+
         guard type == .keyDown else {
             return Unmanaged.passUnretained(event)
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if event.flags.contains(.maskAlternate) {
+            // Option combined with another key is not a standalone tap.
+            lastOptionPressTimestamp = nil
+        }
         // Read configured hotkey from settings; event tap runs on main RunLoop so assumeIsolated is safe.
         let (configuredKey, configuredMod) = MainActor.assumeIsolated {
             (SwitchBladeSettings.shared.triggerKey.keyCode, SwitchBladeSettings.shared.modifier.cgFlag)
@@ -154,15 +174,82 @@ final class HotkeyMonitor {
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
+        handleModifierFlagsChanged(
+            flags: event.modifierFlags,
+            timestamp: Date.timeIntervalSinceReferenceDate,
+            changedKeyCode: Int64(event.keyCode),
+            shouldHandleConfiguredRelease: true
+        )
+    }
+
+    private func handleModifierFlagsChanged(
+        flags rawFlags: NSEvent.ModifierFlags,
+        timestamp: TimeInterval,
+        changedKeyCode: Int64,
+        shouldHandleConfiguredRelease: Bool
+    ) {
+        let flags = rawFlags.intersection(.deviceIndependentFlagsMask)
+        let isOptionDown = flags.contains(.option)
+        let isOptionKeyEvent = changedKeyCode == Int64(kVK_Option) || changedKeyCode == Int64(kVK_RightOption)
+        let disallowedOptionCompanions: NSEvent.ModifierFlags = [.command, .shift, .capsLock, .function]
+        let isBareOptionPress = isOptionKeyEvent
+            && isOptionDown
+            && flags.intersection(disallowedOptionCompanions).isEmpty
+
+        if isOptionKeyEvent && isOptionDown && !isOptionPressed {
+            handleOptionPress(timestamp: timestamp, isBareOptionPress: isBareOptionPress)
+        } else if isOptionKeyEvent && !isOptionDown {
+            isOptionPressed = false
+        }
+
+        guard shouldHandleConfiguredRelease else {
+            return
+        }
+
         guard shouldTrackModifierRelease?() == true else {
             return
         }
 
         // Use the configured modifier so release detection matches the active hotkey.
         let configuredMod = MainActor.assumeIsolated { SwitchBladeSettings.shared.modifier.nsFlag }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if !flags.contains(configuredMod) {
             onCommandReleased?()
         }
+    }
+
+    private func handleOptionPress(timestamp: TimeInterval, isBareOptionPress: Bool) {
+        isOptionPressed = true
+
+        guard isBareOptionPress else {
+            lastOptionPressTimestamp = nil
+            return
+        }
+
+        let isEnabled = MainActor.assumeIsolated { SwitchBladeSettings.shared.doubleOptionSwitchEnabled }
+        guard isEnabled else {
+            lastOptionPressTimestamp = nil
+            return
+        }
+
+        if let lastOptionPressTimestamp,
+           timestamp - lastOptionPressTimestamp <= Self.optionDoubleTapThreshold {
+            self.lastOptionPressTimestamp = nil
+            Logger.hotkey.info("Double Option tap detected")
+            onOptionDoubleTap?()
+            return
+        }
+
+        lastOptionPressTimestamp = timestamp
+    }
+
+    private func nsModifierFlags(from cgFlags: CGEventFlags) -> NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if cgFlags.contains(.maskAlternate) { flags.insert(.option) }
+        if cgFlags.contains(.maskCommand) { flags.insert(.command) }
+        if cgFlags.contains(.maskControl) { flags.insert(.control) }
+        if cgFlags.contains(.maskShift) { flags.insert(.shift) }
+        if cgFlags.contains(.maskAlphaShift) { flags.insert(.capsLock) }
+        if cgFlags.contains(.maskSecondaryFn) { flags.insert(.function) }
+        return flags
     }
 }

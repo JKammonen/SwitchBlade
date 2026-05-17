@@ -26,6 +26,8 @@ protocol WindowSnapshotProviding: Sendable {
 /// tests verify that selection and close paths call the right method.
 protocol WindowActivating: Sendable {
     func activate(_ item: WindowItem)
+    func activateApplication(pid: pid_t)
+    func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool
     func close(_ item: WindowItem)
     /// Sends NSRunningApplication.terminate(). The whole app quits, not just
     /// the selected window.
