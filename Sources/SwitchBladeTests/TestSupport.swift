@@ -40,19 +40,34 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     var minimizedItems: [WindowItem] = []
     var previewsToReturn: [CGWindowID: NSImage] = [:]
 
-    private(set) var visibleSnapshotCount = 0
-    private(set) var minimizedSnapshotCount = 0
-    private(set) var captureCallCount = 0
-    private(set) var lastCaptureWindowIDs: [CGWindowID] = []
-    private(set) var refreshCallCount = 0
+    private let lock = NSLock()
+    private var _visibleSnapshotCount = 0
+    private var _minimizedSnapshotCount = 0
+    private var _captureCallCount = 0
+    private var _lastCaptureWindowIDs: [CGWindowID] = []
+    private var _captureWindowIDCalls: [[CGWindowID]] = []
+    private var _refreshCallCount = 0
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    var visibleSnapshotCount: Int { withLock { _visibleSnapshotCount } }
+    var minimizedSnapshotCount: Int { withLock { _minimizedSnapshotCount } }
+    var captureCallCount: Int { withLock { _captureCallCount } }
+    var lastCaptureWindowIDs: [CGWindowID] { withLock { _lastCaptureWindowIDs } }
+    var captureWindowIDCalls: [[CGWindowID]] { withLock { _captureWindowIDCalls } }
+    var refreshCallCount: Int { withLock { _refreshCallCount } }
 
     func snapshotVisibleOnly() -> [WindowItem] {
-        visibleSnapshotCount += 1
+        withLock { _visibleSnapshotCount += 1 }
         return visibleItems
     }
 
     func snapshotMinimized() async -> [WindowItem] {
-        minimizedSnapshotCount += 1
+        withLock { _minimizedSnapshotCount += 1 }
         return minimizedItems
     }
 
@@ -61,25 +76,35 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
         maxCount: Int?,
         maxConcurrentCaptures: Int
     ) async -> [CGWindowID: NSImage] {
-        captureCallCount += 1
-        lastCaptureWindowIDs = windowIDs
-        return previewsToReturn
+        let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
+        withLock {
+            _captureCallCount += 1
+            _lastCaptureWindowIDs = requestedIDs
+            _captureWindowIDCalls.append(requestedIDs)
+        }
+        let requestedSet = Set(requestedIDs)
+        return previewsToReturn.filter { requestedSet.contains($0.key) }
     }
 
     func refreshContentCache() async {
-        refreshCallCount += 1
+        withLock { _refreshCallCount += 1 }
     }
 
-    private(set) var refreshIfStaleCallCount = 0
+    private var _refreshIfStaleCallCount = 0
+    var refreshIfStaleCallCount: Int { withLock { _refreshIfStaleCallCount } }
     func refreshContentCacheIfStale() async {
-        refreshIfStaleCallCount += 1
+        withLock { _refreshIfStaleCallCount += 1 }
     }
 
-    private(set) var invalidateContentCacheCallCount = 0
-    private(set) var lastInvalidationReason: String?
+    private var _invalidateContentCacheCallCount = 0
+    private var _lastInvalidationReason: String?
+    var invalidateContentCacheCallCount: Int { withLock { _invalidateContentCacheCallCount } }
+    var lastInvalidationReason: String? { withLock { _lastInvalidationReason } }
     func invalidateContentCache(reason: String) async {
-        invalidateContentCacheCallCount += 1
-        lastInvalidationReason = reason
+        withLock {
+            _invalidateContentCacheCallCount += 1
+            _lastInvalidationReason = reason
+        }
     }
 }
 

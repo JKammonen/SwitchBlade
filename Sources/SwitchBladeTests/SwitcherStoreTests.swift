@@ -250,7 +250,9 @@ enum SwitcherStoreTests {
         store.cycle(forward: true)
         await runPendingMainTasks()
 
-        try expectEqual(catalog.lastCaptureWindowIDs, [1, 3])
+        let capturedIDs = catalog.captureWindowIDCalls.flatMap { $0 }
+        try expectEqual(Set(capturedIDs), Set<CGWindowID>([1, 3]))
+        try expect(!capturedIDs.contains(2), "uncapturable item should not be requested")
     }
 
     // MARK: handleKeyDown

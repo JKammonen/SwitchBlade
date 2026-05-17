@@ -5,8 +5,8 @@ import os.log
 @preconcurrency import ScreenCaptureKit
 
 // Cache for SCShareableContent. Three refresh paths:
-//   1. Launch warmup via `startBackgroundRefresh()` (4 s post-launch, only
-//      after Screen Recording has been granted).
+//   1. Launch warmup via `startBackgroundRefresh()` once Screen Recording has
+//      been granted.
 //   2. End-of-cycle refresh via `refreshContentCache()` so the next Cmd+Tab
 //      starts fresh.
 //   3. Hot-path refresh via `refreshIfStale()` inside `capturePreviews` when
@@ -61,15 +61,25 @@ actor SCContentCache {
         return Date().timeIntervalSince(lastSuccessfulRefresh) > Self.staleThreshold
     }
 
-    /// Refreshes inline when the cache is missing or stale, respecting the
-    /// failure cooldown. Doesn't return SCShareableContent (non-Sendable across
-    /// actor boundaries in Swift 6) — caller reads `.content` separately, which
-    /// is permitted via the `@preconcurrency` import.
+    /// Refreshes inline only when there is no cached content to use, respecting
+    /// the failure cooldown. Stale-but-present content is still useful on the
+    /// Cmd+Tab hot path; callers can refresh it in the background.
+    func refreshIfMissing() async {
+        if content == nil {
+            guard shouldRetryAfterFailure() else { return }
+            await refreshIfAllowed()
+        }
+    }
+
     func refreshIfStale() async {
         if content == nil || isStale() {
             guard shouldRetryAfterFailure() else { return }
             await refreshIfAllowed()
         }
+    }
+
+    func shouldRefreshStaleContentInBackground() -> Bool {
+        content != nil && isStale() && shouldRetryAfterFailure()
     }
 
     func invalidate(reason: String) {
@@ -330,16 +340,18 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // Single preflight syscall instead of currentState() which does three.
         guard CGPreflightScreenCaptureAccess() else { return [:] }
 
-        // Refresh on the hot path when the cache is empty or older than the
-        // SCContentCache.staleThreshold (5 s). Stale SCShareableContent →
-        // stale SCWindow refs → SCScreenshotManager re-resolves each window
-        // on first capture, which is what makes the first preview slow after
-        // idle. 5 s is short enough to dodge that and long enough to skip the
-        // fetch on rapid repeat Cmd+Tabs.
-        await contentCache.refreshIfStale()
+        // Missing content must block; stale-but-present content is used
+        // immediately and refreshed in the background so Cmd+Tab doesn't pay
+        // an inline SCShareableContent.current call after short idle gaps.
+        await contentCache.refreshIfMissing()
         guard let content = await contentCache.content else {
             Logger.capture.error("capturePreviews: no SCShareableContent available")
             return [:]
+        }
+        if await contentCache.shouldRefreshStaleContentInBackground() {
+            Task.detached(priority: .utility) { [contentCache] in
+                await contentCache.refreshIfAllowed()
+            }
         }
         let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
         let maxDim = 320

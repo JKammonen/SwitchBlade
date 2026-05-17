@@ -347,7 +347,16 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        let initialPreviewCount = min(10, windowIDs.count)
+        let initialWindowIDs = Array(windowIDs.prefix(10))
+        var priorityWindowIDs: [CGWindowID] = []
+        if let selectedID, initialWindowIDs.contains(selectedID) {
+            priorityWindowIDs.append(selectedID)
+        }
+        if let frontmostID = initialWindowIDs.first,
+           !priorityWindowIDs.contains(frontmostID) {
+            priorityWindowIDs.append(frontmostID)
+        }
+        let remainingInitialWindowIDs = initialWindowIDs.filter { !priorityWindowIDs.contains($0) }
         let catalog = self.catalog
 
         hoverEnabled = false
@@ -357,23 +366,44 @@ final class SwitcherStore: ObservableObject {
 
         previewLoadTask = Task {
             let batchStart = Date()
-            let previews = await catalog.capturePreviews(
-                for: windowIDs,
-                maxCount: initialPreviewCount,
-                maxConcurrentCaptures: 6
-            )
+            var previews: [CGWindowID: NSImage] = [:]
+            await withTaskGroup(of: [CGWindowID: NSImage].self) { group in
+                if !priorityWindowIDs.isEmpty {
+                    group.addTask { [catalog, priorityWindowIDs] in
+                        await catalog.capturePreviews(
+                            for: priorityWindowIDs,
+                            maxCount: nil,
+                            maxConcurrentCaptures: min(2, priorityWindowIDs.count)
+                        )
+                    }
+                }
+                if !remainingInitialWindowIDs.isEmpty {
+                    group.addTask { [catalog, remainingInitialWindowIDs] in
+                        await catalog.capturePreviews(
+                            for: remainingInitialWindowIDs,
+                            maxCount: nil,
+                            maxConcurrentCaptures: 4
+                        )
+                    }
+                }
+
+                for await batchPreviews in group {
+                    guard !Task.isCancelled else { continue }
+                    previews.merge(batchPreviews) { _, fresh in fresh }
+                    self.applyPreviews(batchPreviews, generation: generation)
+                }
+            }
 
             guard !Task.isCancelled else { return }
             let firstBatchMs = Date().timeIntervalSince(batchStart) * 1000
             let successRate = windowIDs.isEmpty ? 0
-                : Double(previews.count) / Double(min(initialPreviewCount, windowIDs.count))
+                : Double(previews.count) / Double(initialWindowIDs.count)
             let batchSummary = self.performanceMetrics.recordFirstPreviewBatch(milliseconds: firstBatchMs)
             if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
-                    "First preview batch: \(previews.count, privacy: .public)/\(min(initialPreviewCount, windowIDs.count), privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public)); rolling n=\(batchSummary.count, privacy: .public), avg=\(batchSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(batchSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(batchSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(batchSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                    "First preview batch: \(previews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public)); rolling n=\(batchSummary.count, privacy: .public), avg=\(batchSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(batchSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(batchSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(batchSummary.max, format: .fixed(precision: 1), privacy: .public)"
                 )
             }
-            self.applyPreviews(previews, generation: generation)
 
             let deferredWindowIDs = windowIDs.filter { previews[$0] == nil }
             if !deferredWindowIDs.isEmpty {
