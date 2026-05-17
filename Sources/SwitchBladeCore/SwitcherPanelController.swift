@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -72,7 +73,12 @@ final class SwitcherPanelController {
 
     func show(itemCount: Int) {
         sizeAndCenter(itemCount: itemCount)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         panel.alphaValue = 1
+        hostingView.layer?.opacity = 1
+        cardMaskLayer.opacity = 1
+        CATransaction.commit()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         clickMonitor.start()
@@ -80,8 +86,14 @@ final class SwitcherPanelController {
 
     func hide() {
         clickMonitor.stop()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         panel.alphaValue = 0
+        hostingView.layer?.opacity = 0
+        cardMaskLayer.opacity = 0
+        CATransaction.commit()
         panel.orderOut(nil)
+        CATransaction.flush()
     }
 
     private func sizeAndCenter(itemCount: Int) {
