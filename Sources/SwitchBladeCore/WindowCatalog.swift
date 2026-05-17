@@ -516,29 +516,44 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     }
 
     private func minimizedItems(excluding visibleWindowIDs: Set<CGWindowID>, frontmostPID: pid_t?) -> [WindowItem] {
-        NSWorkspace.shared.runningApplications.flatMap { application -> [WindowItem] in
-            guard shouldIncludeApplication(application) else { return [] }
+        // Soft bound on AX IPC. Per Apple's AXUIElement header, a timeout set
+        // on a specific element only governs calls to *that* element — it does
+        // not propagate to children — so we set it on the app element (for
+        // axWindows) and again on each window element (for axBool/axString/
+        // axFrame). Already-in-flight AX calls keep running until the
+        // framework returns; this only bounds new IPC, same as the
+        // capture soft-timeout pattern.
+        let axTimeoutSeconds: Float = 0.25
+        var result: [WindowItem] = []
+        for application in NSWorkspace.shared.runningApplications {
+            // Bypass the rest of the sweep if the merge consumer already lost
+            // interest (panel hidden, generation bumped). Won't unstick an
+            // already-blocked AX call; only stops *new* per-app iterations.
+            if Task.isCancelled { break }
+            guard shouldIncludeApplication(application) else { continue }
             if WindowFilterState.scope == .currentApp,
                application.processIdentifier != frontmostPID {
-                return []
+                continue
             }
 
             let appElement = AXUIElementCreateApplication(application.processIdentifier)
-            guard let windows = axWindows(for: appElement) else { return [] }
+            _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
+            guard let windows = axWindows(for: appElement) else { continue }
 
             let appName = application.localizedName ?? application.bundleIdentifier ?? "Application"
-            return windows.enumerated().compactMap { index, window in
-                guard axBool(kAXMinimizedAttribute, on: window) == true else { return nil }
+            for (index, window) in windows.enumerated() {
+                _ = AXUIElementSetMessagingTimeout(window, axTimeoutSeconds)
+                guard axBool(kAXMinimizedAttribute, on: window) == true else { continue }
 
                 let title = axString(kAXTitleAttribute, on: window) ?? ""
                 if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return nil
+                    continue
                 }
 
                 let syntheticID = syntheticWindowID(pid: application.processIdentifier, index: index, title: title)
-                guard !visibleWindowIDs.contains(syntheticID) else { return nil }
+                guard !visibleWindowIDs.contains(syntheticID) else { continue }
 
-                return WindowItem(
+                result.append(WindowItem(
                     windowID: syntheticID,
                     pid: application.processIdentifier,
                     appName: appName,
@@ -550,9 +565,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     preview: nil,
                     icon: application.icon,
                     bundleIdentifier: application.bundleIdentifier
-                )
+                ))
             }
         }
+        return result
     }
 
     private func shouldIncludeApplication(_ application: NSRunningApplication) -> Bool {
