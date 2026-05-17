@@ -461,9 +461,9 @@ enum SwitcherStoreTests {
 
     @MainActor static func switchToPreviousApplication_activatesPreviousPid() async throws {
         let settings = SwitchBladeSettings.shared
-        let oldValue = settings.doubleOptionSwitchEnabled
-        settings.doubleOptionSwitchEnabled = true
-        defer { settings.doubleOptionSwitchEnabled = oldValue }
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
 
         let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
         store.handleAppActivation(pid: 202)
@@ -475,9 +475,9 @@ enum SwitcherStoreTests {
 
     @MainActor static func switchToPreviousApplication_disabledSetting() async throws {
         let settings = SwitchBladeSettings.shared
-        let oldValue = settings.doubleOptionSwitchEnabled
-        settings.doubleOptionSwitchEnabled = false
-        defer { settings.doubleOptionSwitchEnabled = oldValue }
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = false
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
 
         let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
         store.handleAppActivation(pid: 202)
@@ -489,9 +489,9 @@ enum SwitcherStoreTests {
 
     @MainActor static func switchToPreviousApplication_infersPreviousPid() async throws {
         let settings = SwitchBladeSettings.shared
-        let oldValue = settings.doubleOptionSwitchEnabled
-        settings.doubleOptionSwitchEnabled = true
-        defer { settings.doubleOptionSwitchEnabled = oldValue }
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
 
         let catalog = MockWindowCatalog()
         catalog.visibleItems = [
@@ -508,9 +508,9 @@ enum SwitcherStoreTests {
 
     @MainActor static func switchToPreviousApplication_bouncesBetweenTwoApps() async throws {
         let settings = SwitchBladeSettings.shared
-        let oldValue = settings.doubleOptionSwitchEnabled
-        settings.doubleOptionSwitchEnabled = true
-        defer { settings.doubleOptionSwitchEnabled = oldValue }
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
 
         let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
         store.handleAppActivation(pid: 202)

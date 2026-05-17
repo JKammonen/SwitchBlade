@@ -308,19 +308,19 @@ final class SwitcherStore: ObservableObject {
     }
 
     func switchToPreviousApplication() {
-        guard SwitchBladeSettings.shared.doubleOptionSwitchEnabled else {
-            Logger.switcher.info("Double Option switch ignored: setting disabled")
+        guard SwitchBladeSettings.shared.doubleModifierSwitchEnabled else {
+            Logger.switcher.info("Double modifier switch ignored: setting disabled")
             return
         }
         guard !isVisible, !isSwitching else {
-            Logger.switcher.info("Double Option switch ignored: switcher is visible or opening")
+            Logger.switcher.info("Double modifier switch ignored: switcher is visible or opening")
             return
         }
 
         let effectiveCurrentPID = currentAppPID
         guard let targetPID = previousApplicationPID(currentPID: effectiveCurrentPID) else {
             Logger.switcher.info(
-                "Double Option switch ignored: no previous app current=\(effectiveCurrentPID ?? -1, privacy: .public) previous=\(self.previousAppPID ?? -1, privacy: .public)"
+                "Double modifier switch ignored: no previous app current=\(effectiveCurrentPID ?? -1, privacy: .public) previous=\(self.previousAppPID ?? -1, privacy: .public)"
             )
             return
         }
@@ -331,7 +331,7 @@ final class SwitcherStore: ObservableObject {
         }
         currentAppPID = targetPID
         Logger.switcher.info(
-            "Double Option switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
+            "Double modifier switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
         )
         activator.activateApplication(pid: targetPID)
     }

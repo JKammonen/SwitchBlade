@@ -139,8 +139,8 @@ struct SettingsView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                     divider()
-                    row(L10n.tr(.fieldDoubleOptionSwitch)) {
-                        Toggle("", isOn: $settings.doubleOptionSwitchEnabled)
+                    row(L10n.tr(.fieldDoubleModifierSwitch)) {
+                        Toggle("", isOn: $settings.doubleModifierSwitchEnabled)
                             .labelsHidden()
                             .toggleStyle(.switch)
                     }

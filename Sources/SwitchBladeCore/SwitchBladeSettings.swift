@@ -159,8 +159,10 @@ final class SwitchBladeSettings: ObservableObject {
     @Published var triggerKey: SBTriggerKey {
         didSet { ud.set(triggerKey.rawValue, forKey: "sb_triggerKey") }
     }
-    @Published var doubleOptionSwitchEnabled: Bool {
-        didSet { ud.set(doubleOptionSwitchEnabled, forKey: "sb_doubleOptionSwitchEnabled") }
+    @Published var doubleModifierSwitchEnabled: Bool {
+        // Keep the legacy key name so existing user preferences survive the rename
+        // from "double Option" to "double configured modifier".
+        didSet { ud.set(doubleModifierSwitchEnabled, forKey: "sb_doubleOptionSwitchEnabled") }
     }
 
     @Published var launchAtLogin: Bool {
@@ -254,7 +256,7 @@ final class SwitchBladeSettings: ObservableObject {
         tileMinWidth      = ud.object(forKey: "sb_tileMinWidth")   as? Double ?? 220.0
         modifier   = SBModifier(rawValue:   ud.string(forKey: "sb_modifier")   ?? "") ?? .command
         triggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
-        doubleOptionSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? true
+        doubleModifierSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? true
         launchAtLogin = ud.object(forKey: "sb_launchAtLogin") as? Bool
             ?? (LaunchAtLoginController.currentStatusIsEnabled())
         showMenuBarIcon = ud.object(forKey: "sb_showMenuBarIcon") as? Bool ?? true
