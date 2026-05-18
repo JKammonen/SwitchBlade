@@ -146,6 +146,7 @@ func makeStore(
     permissions: MockPermissionService = MockPermissionService(),
     userDefaults: UserDefaults = makeIsolatedUserDefaults(),
     activationWarmupWindow: TimeInterval = 60,
+    cachedOpenItemsMaxAge: TimeInterval = 30,
     initialFrontmostAppPID: pid_t? = nil,
     switchBladePID: pid_t = getpid()
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
@@ -155,6 +156,7 @@ func makeStore(
         permissionService: permissions,
         userDefaults: userDefaults,
         activationWarmupWindow: activationWarmupWindow,
+        cachedOpenItemsMaxAge: cachedOpenItemsMaxAge,
         initialFrontmostAppPID: initialFrontmostAppPID,
         switchBladePID: switchBladePID
     )

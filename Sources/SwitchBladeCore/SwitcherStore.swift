@@ -40,6 +40,7 @@ final class SwitcherStore: ObservableObject {
     private var commitWhenOpenCompletes = false
     private var pendingOpenRequestedAt: Date?
     private var cachedOpenItems: [WindowItem] = []
+    private var cachedOpenItemsUpdatedAt: Date?
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
@@ -55,6 +56,7 @@ final class SwitcherStore: ObservableObject {
     /// last touched the switcher. Keeps the cost truly zero for idle users.
     /// Injectable so tests can shorten the window without sleeping for a minute.
     private let activationWarmupWindow: TimeInterval
+    private let cachedOpenItemsMaxAge: TimeInterval
 
     init(
         catalog: WindowSnapshotProviding,
@@ -65,6 +67,7 @@ final class SwitcherStore: ObservableObject {
         mruTracker: MRUTracker? = nil,
         performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
         activationWarmupWindow: TimeInterval = 60,
+        cachedOpenItemsMaxAge: TimeInterval = 30,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
     ) {
@@ -76,6 +79,7 @@ final class SwitcherStore: ObservableObject {
         self.mruTracker = mruTracker ?? MRUTracker(userDefaults: userDefaults)
         self.performanceMetrics = performanceMetrics
         self.activationWarmupWindow = activationWarmupWindow
+        self.cachedOpenItemsMaxAge = cachedOpenItemsMaxAge
         self.currentAppPID = initialFrontmostAppPID
         self.switchBladePID = switchBladePID
 
@@ -142,7 +146,7 @@ final class SwitcherStore: ObservableObject {
         let visibleSnapshot = await snapshotVisibleOnlyOffMain()
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
-        cachedOpenItems = orderedItems
+        updateCachedOpenItems(orderedItems)
         let windowIDs = orderedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
             .map(\.windowID)
@@ -222,14 +226,13 @@ final class SwitcherStore: ObservableObject {
         pendingOpenRequestedAt = Date()
         isSwitching = true
 
-        if !cachedOpenItems.isEmpty {
+        if !cachedOpenItems.isEmpty, isCachedOpenItemsFresh() {
             let openStart = Date()
-            let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
             pendingOpenRequestedAt = nil
             openFromOrderedItems(
                 cachedOpenItems,
                 openStart: openStart,
-                queueMs: queueMs,
+                queueMs: nil,
                 permissionMs: 0,
                 snapshotMs: 0,
                 orderMs: 0,
@@ -241,6 +244,7 @@ final class SwitcherStore: ObservableObject {
             }
             return
         }
+        discardStaleCachedOpenItems()
 
         Task { @MainActor [weak self] in
             self?.cycle(forward: forward)
@@ -495,7 +499,7 @@ final class SwitcherStore: ObservableObject {
     private func openFromOrderedItems(
         _ orderedItems: [WindowItem],
         openStart: Date,
-        queueMs: Double,
+        queueMs: Double?,
         permissionMs: Double,
         snapshotMs: Double,
         orderMs: Double,
@@ -508,7 +512,7 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        cachedOpenItems = orderedItems
+        updateCachedOpenItems(orderedItems)
         let hydrateStart = Date()
         items = hydratedForDisplay(orderedItems)
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
@@ -520,9 +524,15 @@ final class SwitcherStore: ObservableObject {
         let coldMs = Date().timeIntervalSince(openStart) * 1000
         let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
         if PerformanceLoggingState.mode != .off {
-            Logger.switcher.info(
-                "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
-            )
+            if let queueMs {
+                Logger.switcher.info(
+                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                )
+            } else {
+                Logger.switcher.info(
+                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=n/a, permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                )
+            }
         }
         showWithPreviews()
 
@@ -581,7 +591,7 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
             let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
             guard !Task.isCancelled, !orderedItems.isEmpty else { return }
-            self.cachedOpenItems = orderedItems
+            self.updateCachedOpenItems(orderedItems)
             let ms = Date().timeIntervalSince(start) * 1000
             if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
@@ -589,6 +599,22 @@ final class SwitcherStore: ObservableObject {
                 )
             }
         }
+    }
+
+    private func updateCachedOpenItems(_ orderedItems: [WindowItem]) {
+        cachedOpenItems = orderedItems
+        cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
+    }
+
+    private func isCachedOpenItemsFresh(now: Date = Date()) -> Bool {
+        guard let updatedAt = cachedOpenItemsUpdatedAt else { return false }
+        return now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge
+    }
+
+    private func discardStaleCachedOpenItems(now: Date = Date()) {
+        guard !cachedOpenItems.isEmpty, !isCachedOpenItemsFresh(now: now) else { return }
+        cachedOpenItems = []
+        cachedOpenItemsUpdatedAt = nil
     }
 
     private func snapshotVisibleOnlyOffMain() async -> [WindowItem] {

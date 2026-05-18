@@ -17,6 +17,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_fastReleaseCommitsAfterOpen", requestCycle_fastReleaseCommitsAfterOpen),
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
+        ("Store/requestCycle_ignoresStaleCachedItems", requestCycle_ignoresStaleCachedItems),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -217,6 +218,29 @@ enum SwitcherStoreTests {
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+    }
+
+    @MainActor static func requestCycle_ignoresStaleCachedItems() async throws {
+        let (store, catalog, _, _) = makeStore(cachedOpenItemsMaxAge: -1)
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        store.cycle(forward: true)
+        store.cancel()
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        catalog.visibleItems = [
+            makeItem(id: 3, isFrontmostApp: true),
+            makeItem(id: 4)
+        ]
+
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [3, 4])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
     }
 
     // MARK: ordering

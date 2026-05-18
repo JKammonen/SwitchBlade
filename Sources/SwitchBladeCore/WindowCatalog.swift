@@ -385,11 +385,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 nextIndex += 1
                 nonisolated(unsafe) let capturedWindow = window
                 group.addTask {
-                    // First attempt — usually succeeds, but SCKit's first call
+                    // First attempt usually succeeds, but SCKit's first call
                     // after a few seconds idle can fail silently while the
-                    // capture pipeline warms up. Both attempts are bounded by a
-                    // 300 ms UX timeout so one slow preview doesn't block the
-                    // caller, though the underlying SCKit work may outlive it.
+                    // capture pipeline warms up. Failed captures get one retry;
+                    // timed-out captures return promptly so a cold pipeline
+                    // doesn't spend another 300 ms on the same tile.
                     let first = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow, maxDim: maxDim, timeoutMs: 300
                     )
@@ -401,8 +401,16 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             secondAttempt: nil
                         )
                     }
+                    guard case .failed = first else {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: nil
+                        )
+                    }
                     Logger.capture.notice(
-                        "First capture failed/timed out for windowID=\(windowID, privacy: .public) — retrying"
+                        "First capture failed for windowID=\(windowID, privacy: .public) — retrying"
                     )
                     let second = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow, maxDim: maxDim, timeoutMs: 300
