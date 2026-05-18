@@ -210,7 +210,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.handleCaptureContentInvalidation(reason: "system will sleep")
+                    self?.handleCaptureContentInvalidation(reason: "system will sleep", warmAfter: false)
                 }
             }
         ))
@@ -222,7 +222,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.handleCaptureContentInvalidation(reason: "system did wake")
+                    self?.handleCaptureContentInvalidation(reason: "system did wake", warmAfter: true)
                 }
             }
         ))
@@ -236,15 +236,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.handleCaptureContentInvalidation(reason: "screen parameters changed")
+                    self?.handleCaptureContentInvalidation(reason: "screen parameters changed", warmAfter: true)
                 }
             }
         ))
     }
 
-    private func handleCaptureContentInvalidation(reason: String) {
+    // Sleep drops the cache; wake and screen changes also re-warm because the
+    // user's next action is typically Cmd+Tab and an empty cache there means a
+    // visible cold-open delay. Sleep alone skips the warm — the system is on
+    // its way down and warming would just be wasted work.
+    private func handleCaptureContentInvalidation(reason: String, warmAfter: Bool) {
         Logger.capture.notice("Handling capture lifecycle event: \(reason, privacy: .public)")
         store.invalidateCaptureCache(reason: reason)
+        if warmAfter {
+            warmCaptureCaches(context: reason)
+        }
     }
 
     private func handleApplicationTerminated(pid: pid_t?) {
