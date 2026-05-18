@@ -38,9 +38,9 @@ SwitchBlade core context:
 
 Always-active rules that apply here too:
 
-- `feedback_direct_style.md` — lead with the gap, not the win. Numbers > adjectives.
+- `feedback_direct_communication.md` — lead with the gap, not the win. Numbers > adjectives.
   Say what a test proves AND what it doesn't.
-- `feedback_verify_before_done.md` — green build is not a green test. Verify the
+- `feedback_verification_discipline.md` §3 — green build is not a green test. Verify the
   thing the user reported.
 - `feedback_root_cause_not_speculation.md` — two failed code changes without improvement
   on the real symptom = stop and reconsider the bug model.
