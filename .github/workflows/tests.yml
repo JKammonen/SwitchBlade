@@ -32,4 +32,8 @@ jobs:
       - name: Run tests
         # SwitchBladeTests is a custom in-process runner that exits non-zero on
         # failure; no XCTest / swift-testing harness needed.
+        # SWIFT_DETERMINISTIC_HASHING removes per-process Hasher seed
+        # randomness so the synthetic-ID collision sweep is reproducible.
+        env:
+          SWIFT_DETERMINISTIC_HASHING: "1"
         run: swift run SwitchBladeTests

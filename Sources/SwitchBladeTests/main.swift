@@ -17,6 +17,7 @@ func runAll() async -> Int {
         ("PreviewCacheStore",       PreviewCacheStoreTests.all),
         ("MRUTracker",              MRUTrackerTests.all),
         ("WindowSharingPolicy",     WindowSharingPolicyTests.all),
+        ("SyntheticWindowID",       SyntheticWindowIDTests.all),
         ("WindowActivator",         WindowActivatorTests.all),
         ("SwitcherStore",           SwitcherStoreTests.all),
         ("MRUPersistence",          MRUPersistenceTests.all),

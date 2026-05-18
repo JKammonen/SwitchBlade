@@ -125,10 +125,32 @@ public enum WindowFilterState {
     }
 }
 
-public enum HiddenAppFilterState {
-    private static let storage = LockedValue<Set<String>>([])
+/// A hidden-app filter rule. Comes in two flavors:
+///   - `.contains("code")` matches both "Code" and "Xcode". Default for bare
+///     tokens, kept for back-compat with users who already typed "Slack" etc.
+///   - `.exact("code")` matches only when the app name or bundle id is exactly
+///     "code". Opt-in via leading `=` in the settings field, e.g. `=Code`.
+/// Stored lowercased — match comparison lowercases the candidate strings.
+public enum HiddenAppToken: Hashable, Sendable {
+    case contains(String)
+    case exact(String)
 
-    public static var normalizedTokens: Set<String> {
+    public func matches(appName: String, bundleIdentifier: String?) -> Bool {
+        let app = appName.lowercased()
+        let bundle = (bundleIdentifier ?? "").lowercased()
+        switch self {
+        case .contains(let value):
+            return app.contains(value) || bundle.contains(value)
+        case .exact(let value):
+            return app == value || bundle == value
+        }
+    }
+}
+
+public enum HiddenAppFilterState {
+    private static let storage = LockedValue<Set<HiddenAppToken>>([])
+
+    public static var normalizedTokens: Set<HiddenAppToken> {
         get { storage.value }
         set { storage.value = newValue }
     }

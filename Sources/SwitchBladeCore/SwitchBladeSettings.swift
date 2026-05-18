@@ -331,12 +331,28 @@ final class SwitchBladeSettings: ObservableObject {
         reducedMotion = false
     }
 
-    static func normalizedHiddenAppTokens(from text: String) -> Set<String> {
+    /// Parses the comma/semicolon/newline-separated hidden-apps field.
+    /// Bare tokens become `.contains`; a leading `=` makes the rule exact.
+    /// `=` with no body, or empty entries, are silently dropped.
+    static func normalizedHiddenAppTokens(from text: String) -> Set<HiddenAppToken> {
         let separators = CharacterSet(charactersIn: ",;\n")
         return Set(text
             .components(separatedBy: separators)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty })
+            .compactMap { raw -> HiddenAppToken? in
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                if trimmed.hasPrefix("=") {
+                    let body = trimmed.dropFirst()
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    // `==`, `===`, etc. are silently dropped — only one leading
+                    // `=` is meaningful, and a body that's still `=`-prefixed
+                    // can never match a real app or bundle identifier.
+                    guard !body.isEmpty, !body.hasPrefix("=") else { return nil }
+                    return .exact(body)
+                }
+                return .contains(trimmed.lowercased())
+            })
     }
 }
 

@@ -568,7 +568,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     continue
                 }
 
-                let syntheticID = syntheticWindowID(pid: application.processIdentifier, index: index, title: title)
+                let syntheticID = SyntheticWindowID.make(
+                    pid: application.processIdentifier, index: index, title: title
+                )
                 guard !visibleWindowIDs.contains(syntheticID) else { continue }
 
                 result.append(WindowItem(
@@ -614,10 +616,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private func isHiddenByUser(appName: String, bundleIdentifier: String?) -> Bool {
         let tokens = HiddenAppFilterState.normalizedTokens
         guard !tokens.isEmpty else { return false }
-        let app = appName.lowercased()
-        let bundle = (bundleIdentifier ?? "").lowercased()
         return tokens.contains { token in
-            app.contains(token) || bundle.contains(token)
+            token.matches(appName: appName, bundleIdentifier: bundleIdentifier)
         }
     }
 
@@ -670,11 +670,33 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return CGRect(origin: point, size: size)
     }
 
-    private func syntheticWindowID(pid: pid_t, index: Int, title: String) -> CGWindowID {
-        var hash = UInt32(bitPattern: Int32(pid)) & 0x7FFF
-        for scalar in title.unicodeScalars {
-            hash = hash &* 31 &+ scalar.value
-        }
-        return 0x8000_0000 | ((UInt32(bitPattern: Int32(pid)) & 0x7FFF) << 16) | ((hash &+ UInt32(index)) & 0xFFFF)
+}
+
+/// Generates CGWindowID-shaped identifiers for minimized windows that
+/// CGWindowList doesn't expose. The previous implementation packed (pid, title
+/// hash, index) into a hand-rolled 31-bit layout with 15 bits for pid and 16
+/// bits of title hash — different titles within the same app collided at
+/// ~0.7% by 30 windows. This version uses Swift's `Hasher` across the full
+/// (pid, index, title) tuple and keeps only the top bit (0x8000_0000)
+/// reserved so synthetic IDs never collide with real CGWindowIDs.
+///
+/// Stable within a single launch; `Hasher`'s per-process seed means the same
+/// tuple produces different IDs across launches. That's fine — real
+/// CGWindowIDs aren't stable across launches either, and MRU persistence keys
+/// on bundle identifier rather than window ID.
+enum SyntheticWindowID {
+    static let markerBit: UInt32 = 0x8000_0000
+
+    static func make(pid: pid_t, index: Int, title: String) -> CGWindowID {
+        var hasher = Hasher()
+        hasher.combine(pid)
+        hasher.combine(index)
+        hasher.combine(title)
+        let raw = UInt32(truncatingIfNeeded: hasher.finalize())
+        return markerBit | (raw & 0x7FFF_FFFF)
+    }
+
+    static func isSynthetic(_ id: CGWindowID) -> Bool {
+        (id & markerBit) != 0
     }
 }
