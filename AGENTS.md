@@ -45,20 +45,20 @@ Always-active rules that apply here too:
 - `feedback_root_cause_not_speculation.md` — two failed code changes without improvement
   on the real symptom = stop and reconsider the bug model.
 
-## Workflow Triggers & Exempt Categories
+## Workflow Triggers & Baba Yaga Categories
 
 Before the first Edit/Write of a task, the assistant declares exactly one of:
 
-- `Exempt: <category>` — naming one of the five categories below verbatim.
-- `Workflow on` — workflow applies.
+- `Baba Yaga: <category>` — naming one of the five categories below verbatim.
+- `Rules of Engagement` — workflow applies.
 
 Include a short human-readable reason in the same chat message so the marker is
-understandable to Janne, e.g. `Workflow on: this touches SwitchBlade code, so I
+understandable to Janne, e.g. `Rules of Engagement: this touches SwitchBlade code, so I
 will check status and route the slice before editing.`
 
-Fuzzy match → default `Workflow on`. Do not ask the user; the user overrides silently by saying "skip the workflow" or continuing past an `Exempt:` line without comment.
+Fuzzy match → default `Rules of Engagement`. Do not ask the user; the user overrides silently by saying "skip the workflow" or continuing past an `Baba Yaga:` line without comment.
 
-Exempt categories (must match exactly):
+Baba Yaga categories (must match exactly):
 
 - Typo or copy edit
 - Single read-only command, lookup, or grep
@@ -78,9 +78,9 @@ Words like "non-trivial", "complex", "multi-file", or "worth using scout" are NO
 
 ## Pre-Edit Guard
 
-When `Workflow on` and the task touches `SwitchBlade/**`, run this 4-step thought before the FIRST Edit/Write:
+When `Rules of Engagement` and the task touches `SwitchBlade/**`, run this 4-step thought before the FIRST Edit/Write:
 
-1. `Workflow on`? (If `Exempt:` was declared and accepted, proceed without slice routing.)
+1. `Rules of Engagement`? (If `Baba Yaga:` was declared and accepted, proceed without slice routing.)
 2. Which slice — store/state (`SwitcherStore`, `MRUTracker`, `HotkeyMonitor`), capture/catalog (`WindowCatalog`, `SCContentCache`, `PreviewCacheStore`), panel/UI (`SwitcherPanelController`, `SwitcherLayoutCalculator`, `SwitcherView`), permissions/signing (`PermissionService`, `scripts/`), or test runner (`Sources/SwitchBladeTests/`)?
 3. Routing: no named switchblade-builder yet. Use `codebase-scout` to confirm module ownership when unclear. Re-read `Critical Settled Decisions` BEFORE editing capture or ScreenCaptureKit paths — no SCStream, no hard timeout, no `sharingState=0` exceptions beyond Teams. For stubborn ScreenCaptureKit / AX / TCC bugs after 2 failed fixes use `regression-hunter` (Opus).
 4. Do not start implementation in the main session until the slice + settled-decision check are recorded.
@@ -130,6 +130,13 @@ Goal: stop the "teen itse nopeasti" reflex and avoid re-litigating settled SCK/A
 5. **Custom test runner, not XCTest / swift-testing.** Xcode is not installed on
    Janne's machine; CLT-only toolchain. `Sources/SwitchBladeTests/main.swift` is
    the runner. Run with `swift run SwitchBladeTests`.
+6. **Lifecycle observers: invalidate + warm pair on wake / screen-params; sleep
+   invalidates only.** Cold SCKit pipelines after idle return `.timedOut` more
+   often than `.failed`, so both `WindowCatalog.capturePreviews` capture retry
+   and `handleCaptureContentInvalidation` warmup must cover the timeout path.
+   `willSleep` deliberately skips warm — no future Cmd+Tab to preempt. Removing
+   either half (the timeout-retry or the wake-warm) reintroduces the post-idle
+   empty-tile regression that took ~12 commits to land.
 
 ## Build & Run
 
