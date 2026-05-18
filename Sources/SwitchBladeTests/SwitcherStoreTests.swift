@@ -13,6 +13,9 @@ enum SwitcherStoreTests {
         ("Store/cycle_whenVisible_movesForward", cycle_visibleForward),
         ("Store/cycle_whenVisible_movesBackward_wraps", cycle_visibleBackwardWraps),
         ("Store/cycle_selectionWrapsAtEnd", cycle_selectionWraps),
+        ("Store/requestCycle_marksSwitchingSynchronously", requestCycle_marksSwitchingSynchronously),
+        ("Store/requestCycle_fastReleaseCommitsAfterOpen", requestCycle_fastReleaseCommitsAfterOpen),
+        ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -145,6 +148,52 @@ enum SwitcherStoreTests {
         try expectEqual(store.selectedID, 1)
         store.cycle(forward: true)              // → 2
         try expectEqual(store.selectedID, 2)
+    }
+
+    @MainActor static func requestCycle_marksSwitchingSynchronously() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isSwitching, "event-tap path should mark release tracking before async open work runs")
+        await runPendingMainTasks()
+    }
+
+    @MainActor static func requestCycle_fastReleaseCommitsAfterOpen() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+
+        store.requestCycle(forward: true)
+        store.commitSelection()
+        await runPendingMainTasks()
+
+        try expectEqual(activator.activatedItems.map(\.id), [2])
+        try expect(!store.isVisible)
+    }
+
+    @MainActor static func requestCycle_doubleCallDropped() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+
+        store.requestCycle(forward: true)
+        // Second call while isSwitching=true should be dropped — only one cycle() task fires.
+        store.requestCycle(forward: true)
+
+        await runPendingMainTasks()
+
+        // Panel opened exactly once: one items load, one show.
+        try expect(store.isVisible)
+        try expectEqual(store.items.count, 2)
     }
 
     // MARK: ordering

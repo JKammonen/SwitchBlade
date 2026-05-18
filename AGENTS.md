@@ -52,6 +52,10 @@ Before the first Edit/Write of a task, the assistant declares exactly one of:
 - `Exempt: <category>` — naming one of the five categories below verbatim.
 - `Workflow on` — workflow applies.
 
+Include a short human-readable reason in the same chat message so the marker is
+understandable to Janne, e.g. `Workflow on: this touches SwitchBlade code, so I
+will check status and route the slice before editing.`
+
 Fuzzy match → default `Workflow on`. Do not ask the user; the user overrides silently by saying "skip the workflow" or continuing past an `Exempt:` line without comment.
 
 Exempt categories (must match exactly):

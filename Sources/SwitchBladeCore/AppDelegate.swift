@@ -77,7 +77,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyMonitor = HotkeyMonitor()
         hotkeyMonitor.onHotkey = { [weak self] direction in
             MainActor.assumeIsolated {
-                self?.store.cycle(forward: direction == .forward)
+                self?.store.requestCycle(forward: direction == .forward)
             }
         }
         hotkeyMonitor.shouldTrackModifierRelease = { [weak self] in
@@ -262,7 +262,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 reason: reason,
                 context: "application terminated"
             )
-            await self.store.warmPreviewCache(context: "application terminated")
+            self.store.schedulePreviewCacheWarmup(context: "application terminated")
         }
     }
 
@@ -270,7 +270,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.windowCatalog.refreshContentCache(context: context)
-            await self.store.warmPreviewCache(context: context)
+            self.store.schedulePreviewCacheWarmup(context: context)
         }
     }
 }

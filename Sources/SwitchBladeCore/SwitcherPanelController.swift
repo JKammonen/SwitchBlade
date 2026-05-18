@@ -74,11 +74,16 @@ final class SwitcherPanelController {
 
     func show(itemCount: Int) {
         let start = Date()
+        let sizeStart = Date()
         sizeAndCenter(itemCount: itemCount)
+        let sizeEnd = Date()
         // Ensure SwiftUI has laid out the current store state before the
         // transparent panel becomes visible.
+        let layoutStart = Date()
         hostingView.needsLayout = true
         hostingView.layoutSubtreeIfNeeded()
+        let layoutEnd = Date()
+        let orderStart = Date()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         panel.alphaValue = 1
@@ -88,11 +93,15 @@ final class SwitcherPanelController {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         clickMonitor.start()
+        let orderEnd = Date()
 
         let ms = Date().timeIntervalSince(start) * 1000
         if ms > 50 {
+            let sizeMs = sizeEnd.timeIntervalSince(sizeStart) * 1000
+            let layoutMs = layoutEnd.timeIntervalSince(layoutStart) * 1000
+            let orderMs = orderEnd.timeIntervalSince(orderStart) * 1000
             Logger.switcher.notice(
-                "Panel show slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items"
+                "Panel show slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items; size=\(sizeMs, format: .fixed(precision: 1), privacy: .public), layout=\(layoutMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
             )
         }
     }
@@ -128,7 +137,7 @@ final class SwitcherPanelController {
             tileAspectRatio: SwitcherLayout.tileAspectRatio
         ))
 
-        panel.setFrame(result.panelFrame, display: true)
+        panel.setFrame(result.panelFrame, display: false)
         updateCardMask(panelWidth: result.panelFrame.width,
                        panelHeight: result.panelFrame.height)
     }

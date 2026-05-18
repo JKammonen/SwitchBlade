@@ -341,6 +341,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         maxCount: Int?,
         maxConcurrentCaptures: Int
     ) async -> [CGWindowID: NSImage] {
+        guard !Task.isCancelled else { return [:] }
         // Single preflight syscall instead of currentState() which does three.
         guard CGPreflightScreenCaptureAccess() else { return [:] }
 
@@ -357,6 +358,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 await contentCache.refreshIfAllowed()
             }
         }
+        guard !Task.isCancelled else { return [:] }
         let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
         let maxDim = 320
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
@@ -378,7 +380,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             var secondAttemptFailures = 0
 
             func enqueueNextCapture() -> Bool {
-                guard nextIndex < captureTargets.count else { return false }
+                guard !Task.isCancelled, nextIndex < captureTargets.count else { return false }
                 let (windowID, window) = captureTargets[nextIndex]
                 nextIndex += 1
                 nonisolated(unsafe) let capturedWindow = window
@@ -434,6 +436,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
             var result: [CGWindowID: NSImage] = [:]
             for await captureResult in group {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
                 switch captureResult.firstAttempt {
                 case .success:
                     break

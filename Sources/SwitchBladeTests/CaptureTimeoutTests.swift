@@ -26,16 +26,16 @@ enum CaptureTimeoutTests {
     /// Calls SwitcherStore.handleAppActivation directly (same entry point the
     /// NSWorkspace observer uses) and verifies the catalog gets an opportunistic
     /// `refreshContentCacheIfStale` kick. This is the path that keeps the SCKit
-    /// cache warm whenever the user is switching between apps.
+    /// cache warm whenever the user is switching between apps. The refresh is
+    /// delayed briefly so the newly-active app has finished settling.
     @MainActor static func activationTriggersRefresh() async throws {
         let (store, catalog, _, _) = makeStore()
         let baseline = catalog.refreshIfStaleCallCount
 
         store.handleAppActivation(pid: 1234)
 
-        // The refresh is dispatched via Task.detached — yield a few times so
-        // the detached task actually executes before we check.
-        for _ in 0 ..< 30 {
+        // The warmup is deliberately debounced by 250 ms.
+        for _ in 0 ..< 80 {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 5_000_000)
             if catalog.refreshIfStaleCallCount > baseline { break }

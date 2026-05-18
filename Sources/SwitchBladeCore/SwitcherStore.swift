@@ -33,7 +33,11 @@ final class SwitcherStore: ObservableObject {
     private let switchBladePID: pid_t
 
     private var previewLoadTask: Task<Void, Never>?
+    private var contentCacheWarmupTask: Task<Void, Never>?
+    private var previewWarmupTask: Task<Void, Never>?
     private var previewGeneration = 0
+    private var commitWhenOpenCompletes = false
+    private var pendingOpenRequestedAt: Date?
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
@@ -102,19 +106,15 @@ final class SwitcherStore: ObservableObject {
             }
             mruTracker.trackSystemActivation(pid: pid, in: items)
         }
-        // Opportunistic SCKit cache warmup — gated on recent-use so we don't
-        // burn cycles for users who haven't touched the switcher in a while.
-        // The cache's IfStale check is a second throttle layer (no SCKit call
-        // when cache is fresh), but this outer gate ensures we don't even
-        // hit the actor for idle users.
+        // Opportunistic cache warmup — gated on recent-use so we don't burn
+        // cycles for users who haven't touched the switcher in a while.
         guard Date().timeIntervalSince(lastSwitcherUse) < activationWarmupWindow else { return }
-        let catalogRef = self.catalog
-        Task.detached(priority: .utility) {
-            await catalogRef.refreshContentCacheIfStale()
-        }
+        scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
     }
 
     deinit {
+        contentCacheWarmupTask?.cancel()
+        previewWarmupTask?.cancel()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
         }
@@ -133,6 +133,7 @@ final class SwitcherStore: ObservableObject {
 
     func warmPreviewCache(context: String) async {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else { return }
+        guard !isVisible, !isSwitching else { return }
 
         let visibleSnapshot = catalog.snapshotVisibleOnly()
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
@@ -141,6 +142,7 @@ final class SwitcherStore: ObservableObject {
             .map(\.windowID)
         let initialWindowIDs = Array(windowIDs.prefix(10))
         guard !initialWindowIDs.isEmpty else { return }
+        guard !Task.isCancelled else { return }
 
         let start = Date()
         let previews = await catalog.capturePreviews(
@@ -148,6 +150,7 @@ final class SwitcherStore: ObservableObject {
             maxCount: nil,
             maxConcurrentCaptures: min(4, initialWindowIDs.count)
         )
+        guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let acceptedPreviews = previewCache.record(previews, liveItems: orderedItems)
         let ms = Date().timeIntervalSince(start) * 1000
         Logger.switcher.info(
@@ -160,21 +163,34 @@ final class SwitcherStore: ObservableObject {
         // knows it's worth warming the SCKit cache on app switches for the next
         // ~minute. Idle users (haven't pressed Cmd+Tab in a while) skip the warmup.
         lastSwitcherUse = Date()
+        contentCacheWarmupTask?.cancel()
+        previewWarmupTask?.cancel()
+        let permissionStart = Date()
         permissionState = permissionService.currentState()
+        let permissionMs = Date().timeIntervalSince(permissionStart) * 1000
 
         if !isVisible {
             let openStart = Date()
+            let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
+            pendingOpenRequestedAt = nil
             isSwitching = true
             previewLoadTask?.cancel()
+            let snapshotStart = Date()
             let visibleSnapshot = catalog.snapshotVisibleOnly()
+            let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
+            let orderStart = Date()
             let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderMs = Date().timeIntervalSince(orderStart) * 1000
             guard !orderedItems.isEmpty else {
                 isSwitching = false
+                commitWhenOpenCompletes = false
                 Logger.switcher.notice("Cycle aborted: snapshot is empty")
                 return
             }
 
+            let hydrateStart = Date()
             items = hydratedForDisplay(orderedItems)
+            let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
             // Preselect the second item so a tap-Cmd+Tab+release toggles between
             // the two most-recent windows. With only one item, select that.
             selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
@@ -184,10 +200,18 @@ final class SwitcherStore: ObservableObject {
             let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
             if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
-                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
                 )
             }
             showWithPreviews()
+
+            if commitWhenOpenCompletes {
+                // Clear before the delegate call — commitSelection() must not
+                // re-enter this branch if it somehow triggers another cycle.
+                commitWhenOpenCompletes = false
+                commitSelection()
+                return
+            }
 
             // Lazily fetch minimized windows off the main thread and merge them in.
             // The AX walk is ~150–500ms with many apps — running it here would block
@@ -202,6 +226,29 @@ final class SwitcherStore: ObservableObject {
         }
 
         moveSelection(forward ? 1 : -1)
+    }
+
+    /// Entry point for the CGEventTap hotkey callback. Keep this cheap so
+    /// macOS does not disable the tap while SwitchBlade enumerates windows.
+    func requestCycle(forward: Bool) {
+        if isVisible {
+            cycle(forward: forward)
+            return
+        }
+        // Two rapid Cmd+Tab events arrive before the async open completes: the
+        // second call would post another cycle() task and double-fire the preview
+        // load. Drop it — the in-flight open already covers this key-down.
+        guard !isSwitching else { return }
+
+        lastSwitcherUse = Date()
+        contentCacheWarmupTask?.cancel()
+        previewWarmupTask?.cancel()
+        pendingOpenRequestedAt = Date()
+        isSwitching = true
+
+        Task { @MainActor [weak self] in
+            self?.cycle(forward: forward)
+        }
     }
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
@@ -312,6 +359,11 @@ final class SwitcherStore: ObservableObject {
     }
 
     func commitSelection() {
+        if isSwitching, !isVisible {
+            commitWhenOpenCompletes = true
+            return
+        }
+
         guard let item = selectedItem else {
             cancel()
             return
@@ -432,10 +484,33 @@ final class SwitcherStore: ObservableObject {
         previewGeneration += 1
         previewLoadTask?.cancel()
         previewLoadTask = nil
+        previewWarmupTask?.cancel()
         isVisible = false
         isSwitching = false
         hoverEnabled = false
+        commitWhenOpenCompletes = false
+        pendingOpenRequestedAt = nil
         onHide?()
+        scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
+    }
+
+    func schedulePreviewCacheWarmup(context: String) {
+        previewWarmupTask?.cancel()
+        previewWarmupTask = Task { @MainActor [weak self] in
+            await self?.warmPreviewCache(context: context)
+        }
+    }
+
+    private func scheduleContentCacheWarmup(delayNanoseconds: UInt64) {
+        contentCacheWarmupTask?.cancel()
+        let catalog = self.catalog
+        contentCacheWarmupTask = Task { @MainActor [weak self] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
+            await catalog.refreshContentCacheIfStale()
+        }
     }
 
     private func showWithPreviews() {
@@ -516,10 +591,8 @@ final class SwitcherStore: ObservableObject {
                 self.applyPreviews(allPreviews, generation: generation)
             }
 
-            // Refresh SC content cache so the next Cmd+Tab is warm.
-            // Detached so a fast Cmd+Tab+release (which cancels previewLoadTask)
-            // still leaves the cache fresh — otherwise the next switch hits a
-            // stale cache and previews load slowly.
+            // Refresh SC content cache after a full preview pass. Fast
+            // Cmd+Tab+release is covered by the hide/app-activation warmup path.
             Task.detached(priority: .utility) { [catalog] in
                 await catalog.refreshContentCache()
             }
