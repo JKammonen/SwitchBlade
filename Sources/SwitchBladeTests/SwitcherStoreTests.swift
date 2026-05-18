@@ -16,6 +16,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_marksSwitchingSynchronously", requestCycle_marksSwitchingSynchronously),
         ("Store/requestCycle_fastReleaseCommitsAfterOpen", requestCycle_fastReleaseCommitsAfterOpen),
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
+        ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -194,6 +195,28 @@ enum SwitcherStoreTests {
         // Panel opened exactly once: one items load, one show.
         try expect(store.isVisible)
         try expectEqual(store.items.count, 2)
+    }
+
+    @MainActor static func requestCycle_usesCachedItemsWithoutSnapshot() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        store.cycle(forward: true)
+        store.cancel()
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        catalog.visibleItems = [
+            makeItem(id: 3, isFrontmostApp: true),
+            makeItem(id: 4)
+        ]
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 2])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
     }
 
     // MARK: ordering

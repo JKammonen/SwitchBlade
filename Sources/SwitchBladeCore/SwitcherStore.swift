@@ -34,10 +34,12 @@ final class SwitcherStore: ObservableObject {
 
     private var previewLoadTask: Task<Void, Never>?
     private var contentCacheWarmupTask: Task<Void, Never>?
+    private var openItemsWarmupTask: Task<Void, Never>?
     private var previewWarmupTask: Task<Void, Never>?
     private var previewGeneration = 0
     private var commitWhenOpenCompletes = false
     private var pendingOpenRequestedAt: Date?
+    private var cachedOpenItems: [WindowItem] = []
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
@@ -110,10 +112,12 @@ final class SwitcherStore: ObservableObject {
         // cycles for users who haven't touched the switcher in a while.
         guard Date().timeIntervalSince(lastSwitcherUse) < activationWarmupWindow else { return }
         scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
+        scheduleOpenItemsCacheWarmup(context: "app activation", delayNanoseconds: 250_000_000)
     }
 
     deinit {
         contentCacheWarmupTask?.cancel()
+        openItemsWarmupTask?.cancel()
         previewWarmupTask?.cancel()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
@@ -135,8 +139,10 @@ final class SwitcherStore: ObservableObject {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else { return }
         guard !isVisible, !isSwitching else { return }
 
-        let visibleSnapshot = catalog.snapshotVisibleOnly()
+        let visibleSnapshot = await snapshotVisibleOnlyOffMain()
+        guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
+        cachedOpenItems = orderedItems
         let windowIDs = orderedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
             .map(\.windowID)
@@ -164,6 +170,7 @@ final class SwitcherStore: ObservableObject {
         // ~minute. Idle users (haven't pressed Cmd+Tab in a while) skip the warmup.
         lastSwitcherUse = Date()
         contentCacheWarmupTask?.cancel()
+        openItemsWarmupTask?.cancel()
         previewWarmupTask?.cancel()
         let permissionStart = Date()
         permissionState = permissionService.currentState()
@@ -181,47 +188,15 @@ final class SwitcherStore: ObservableObject {
             let orderStart = Date()
             let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
-            guard !orderedItems.isEmpty else {
-                isSwitching = false
-                commitWhenOpenCompletes = false
-                Logger.switcher.notice("Cycle aborted: snapshot is empty")
-                return
-            }
-
-            let hydrateStart = Date()
-            items = hydratedForDisplay(orderedItems)
-            let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
-            // Preselect the second item so a tap-Cmd+Tab+release toggles between
-            // the two most-recent windows. With only one item, select that.
-            selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
-
-            let cachedHits = items.filter { $0.preview != nil }.count
-            let coldMs = Date().timeIntervalSince(openStart) * 1000
-            let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
-            if PerformanceLoggingState.mode != .off {
-                Logger.switcher.info(
-                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
-                )
-            }
-            showWithPreviews()
-
-            if commitWhenOpenCompletes {
-                // Clear before the delegate call — commitSelection() must not
-                // re-enter this branch if it somehow triggers another cycle.
-                commitWhenOpenCompletes = false
-                commitSelection()
-                return
-            }
-
-            // Lazily fetch minimized windows off the main thread and merge them in.
-            // The AX walk is ~150–500ms with many apps — running it here would block
-            // the panel from appearing.
-            let mergeGeneration = previewGeneration
-            let catalog = self.catalog
-            Task.detached(priority: .userInitiated) { [weak self] in
-                let minimized = await catalog.snapshotMinimized()
-                await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
-            }
+            openFromOrderedItems(
+                orderedItems,
+                openStart: openStart,
+                queueMs: queueMs,
+                permissionMs: permissionMs,
+                snapshotMs: snapshotMs,
+                orderMs: orderMs,
+                source: "snapshot"
+            )
             return
         }
 
@@ -242,9 +217,30 @@ final class SwitcherStore: ObservableObject {
 
         lastSwitcherUse = Date()
         contentCacheWarmupTask?.cancel()
+        openItemsWarmupTask?.cancel()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
         isSwitching = true
+
+        if !cachedOpenItems.isEmpty {
+            let openStart = Date()
+            let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
+            pendingOpenRequestedAt = nil
+            openFromOrderedItems(
+                cachedOpenItems,
+                openStart: openStart,
+                queueMs: queueMs,
+                permissionMs: 0,
+                snapshotMs: 0,
+                orderMs: 0,
+                source: "cached"
+            )
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.refreshPermissionState()
+            }
+            return
+        }
 
         Task { @MainActor [weak self] in
             self?.cycle(forward: forward)
@@ -484,6 +480,7 @@ final class SwitcherStore: ObservableObject {
         previewGeneration += 1
         previewLoadTask?.cancel()
         previewLoadTask = nil
+        openItemsWarmupTask?.cancel()
         previewWarmupTask?.cancel()
         isVisible = false
         isSwitching = false
@@ -492,6 +489,60 @@ final class SwitcherStore: ObservableObject {
         pendingOpenRequestedAt = nil
         onHide?()
         scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
+        scheduleOpenItemsCacheWarmup(context: "after hide", delayNanoseconds: 250_000_000)
+    }
+
+    private func openFromOrderedItems(
+        _ orderedItems: [WindowItem],
+        openStart: Date,
+        queueMs: Double,
+        permissionMs: Double,
+        snapshotMs: Double,
+        orderMs: Double,
+        source: String
+    ) {
+        guard !orderedItems.isEmpty else {
+            isSwitching = false
+            commitWhenOpenCompletes = false
+            Logger.switcher.notice("Cycle aborted: snapshot is empty")
+            return
+        }
+
+        cachedOpenItems = orderedItems
+        let hydrateStart = Date()
+        items = hydratedForDisplay(orderedItems)
+        let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
+        // Preselect the second item so a tap-Cmd+Tab+release toggles between
+        // the two most-recent windows. With only one item, select that.
+        selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
+
+        let cachedHits = items.filter { $0.preview != nil }.count
+        let coldMs = Date().timeIntervalSince(openStart) * 1000
+        let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
+        if PerformanceLoggingState.mode != .off {
+            Logger.switcher.info(
+                "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+            )
+        }
+        showWithPreviews()
+
+        if commitWhenOpenCompletes {
+            // Clear before the delegate call — commitSelection() must not
+            // re-enter this branch if it somehow triggers another cycle.
+            commitWhenOpenCompletes = false
+            commitSelection()
+            return
+        }
+
+        // Lazily fetch minimized windows off the main thread and merge them in.
+        // The AX walk is ~150–500ms with many apps — running it here would block
+        // the panel from appearing.
+        let mergeGeneration = previewGeneration
+        let catalog = self.catalog
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let minimized = await catalog.snapshotMinimized()
+            await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+        }
     }
 
     func schedulePreviewCacheWarmup(context: String) {
@@ -499,6 +550,10 @@ final class SwitcherStore: ObservableObject {
         previewWarmupTask = Task { @MainActor [weak self] in
             await self?.warmPreviewCache(context: context)
         }
+    }
+
+    func scheduleOpenItemsCacheWarmup(context: String) {
+        scheduleOpenItemsCacheWarmup(context: context, delayNanoseconds: 0)
     }
 
     private func scheduleContentCacheWarmup(delayNanoseconds: UInt64) {
@@ -511,6 +566,36 @@ final class SwitcherStore: ObservableObject {
             guard let self, !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
             await catalog.refreshContentCacheIfStale()
         }
+    }
+
+    private func scheduleOpenItemsCacheWarmup(context: String, delayNanoseconds: UInt64) {
+        openItemsWarmupTask?.cancel()
+        openItemsWarmupTask = Task { @MainActor [weak self] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
+
+            let start = Date()
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
+            guard !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
+            guard !Task.isCancelled, !orderedItems.isEmpty else { return }
+            self.cachedOpenItems = orderedItems
+            let ms = Date().timeIntervalSince(start) * 1000
+            if PerformanceLoggingState.mode != .off {
+                Logger.switcher.info(
+                    "Open-items cache warmup (\(context, privacy: .public)): \(orderedItems.count, privacy: .public) windows in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+                )
+            }
+        }
+    }
+
+    private func snapshotVisibleOnlyOffMain() async -> [WindowItem] {
+        let catalog = self.catalog
+        return await Task.detached(priority: .utility) {
+            catalog.snapshotVisibleOnly()
+        }.value
     }
 
     private func showWithPreviews() {

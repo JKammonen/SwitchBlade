@@ -262,6 +262,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 reason: reason,
                 context: "application terminated"
             )
+            self.store.scheduleOpenItemsCacheWarmup(context: "application terminated")
             self.store.schedulePreviewCacheWarmup(context: "application terminated")
         }
     }
@@ -269,6 +270,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func warmCaptureCaches(context: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self.store.scheduleOpenItemsCacheWarmup(context: context)
             await self.windowCatalog.refreshContentCache(context: context)
             self.store.schedulePreviewCacheWarmup(context: context)
         }
