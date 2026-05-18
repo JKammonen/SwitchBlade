@@ -40,7 +40,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if state.hasScreenRecording {
             Logger.capture.info("Starting SCKit cache warmup")
-            windowCatalog.startBackgroundRefresh()
+            windowCatalog.startBackgroundRefresh(context: "launch")
             lastKnownHadScreenRecording = true
         } else {
             // Re-check after a short delay so TCC has settled from launch
@@ -53,7 +53,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 Logger.capture.info("Starting delayed SCKit cache warmup")
-                self.windowCatalog.startBackgroundRefresh()
+                self.windowCatalog.startBackgroundRefresh(context: "delayed launch")
                 self.lastKnownHadScreenRecording = true
             }
         }
@@ -132,7 +132,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // `refreshIfAllowed`, which bypasses the 60 s failure cooldown —
             // any earlier-failed refresh (e.g. denied at launch) is healed too.
             Logger.capture.info("Screen Recording newly granted — warming SCKit cache")
-            windowCatalog.startBackgroundRefresh()
+            windowCatalog.startBackgroundRefresh(context: "screen recording granted")
         }
         lastKnownHadScreenRecording = state.hasScreenRecording
         store.refreshPermissionState()

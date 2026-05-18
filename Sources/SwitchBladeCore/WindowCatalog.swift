@@ -27,7 +27,7 @@ actor SCContentCache {
     /// NSWorkspace app activation, so this threshold is mostly the safety net.
     static let staleThreshold: TimeInterval = 5
 
-    func refreshIfAllowed() async {
+    func refreshIfAllowed(successContext: String? = nil) async {
         // Guard: SCKit can trigger an OS permission dialog without Screen Recording access.
         guard CGPreflightScreenCaptureAccess() else {
             Logger.capture.notice("SCShareableContent refresh skipped — no Screen Recording permission")
@@ -39,7 +39,9 @@ actor SCContentCache {
             lastRefreshFailedAt = nil
             lastSuccessfulRefresh = Date()
             let ms = Date().timeIntervalSince(start) * 1000
-            if PerformanceLoggingState.mode == .debug {
+            if let successContext {
+                Logger.capture.info("SCShareableContent refresh ok (\(successContext, privacy: .public)) in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
+            } else if PerformanceLoggingState.mode == .debug {
                 Logger.capture.info("SCShareableContent refresh ok in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
             }
         } catch {
@@ -199,9 +201,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     /// Warms SCShareableContent cache. Safe to call only when SR permission is
     /// confirmed — never call at launch before TCC has settled.
-    func startBackgroundRefresh() {
+    func startBackgroundRefresh(context: String) {
         Task.detached(priority: .utility) { [contentCache] in
-            await contentCache.refreshIfAllowed()
+            await contentCache.refreshIfAllowed(successContext: context)
         }
     }
 
