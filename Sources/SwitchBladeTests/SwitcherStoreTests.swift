@@ -21,6 +21,8 @@ enum SwitcherStoreTests {
         // preview modes
         ("Store/previewMode_iconsOnlySkipsCaptures", previewMode_iconsOnlySkipsCaptures),
         ("Store/previewCapture_skipsUncapturableItems", previewCapture_skipsUncapturableItems),
+        ("Store/warmPreviewCache_populatesFirstOpen", warmPreviewCache_populatesFirstOpen),
+        ("Store/warmPreviewCache_iconsOnlySkipsCaptures", warmPreviewCache_iconsOnlySkipsCaptures),
         // handleKeyDown
         ("Store/handleKeyDown_whenNotVisible_false", handleKeyDown_notVisible),
         ("Store/handleKeyDown_tab_forward", handleKeyDown_tabForward),
@@ -260,6 +262,44 @@ enum SwitcherStoreTests {
         let capturedIDs = catalog.captureWindowIDCalls.flatMap { $0 }
         try expectEqual(Set(capturedIDs), Set<CGWindowID>([1, 3]))
         try expect(!capturedIDs.contains(2), "uncapturable item should not be requested")
+    }
+
+    @MainActor static func warmPreviewCache_populatesFirstOpen() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        catalog.previewsToReturn = [1: preview]
+
+        await store.warmPreviewCache(context: "test")
+        store.cycle(forward: true)
+
+        try expectEqual(catalog.captureCallCount, 1)
+        try expect(store.items.first(where: { $0.id == 1 })?.preview === preview)
+    }
+
+    @MainActor static func warmPreviewCache_iconsOnlySkipsCaptures() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .iconsOnly
+        defer { settings.previewMode = oldPreviewMode }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+
+        await store.warmPreviewCache(context: "test")
+
+        try expectEqual(catalog.captureCallCount, 0)
     }
 
     // MARK: handleKeyDown

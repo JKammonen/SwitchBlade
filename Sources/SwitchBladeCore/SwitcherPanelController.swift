@@ -1,4 +1,5 @@
 import AppKit
+import os.log
 import QuartzCore
 import SwiftUI
 
@@ -72,16 +73,12 @@ final class SwitcherPanelController {
     }
 
     func show(itemCount: Int) {
+        let start = Date()
         sizeAndCenter(itemCount: itemCount)
-        // Ensure SwiftUI has laid out and painted the current store state before
-        // the transparent panel becomes visible; otherwise AppKit can briefly
-        // show stale backing-store pixels from the previous frame.
+        // Ensure SwiftUI has laid out the current store state before the
+        // transparent panel becomes visible.
         hostingView.needsLayout = true
         hostingView.layoutSubtreeIfNeeded()
-        hostingView.needsDisplay = true
-        hostingView.displayIfNeeded()
-        panel.contentView?.displayIfNeeded()
-        panel.disableScreenUpdatesUntilFlush()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         panel.alphaValue = 1
@@ -91,9 +88,17 @@ final class SwitcherPanelController {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         clickMonitor.start()
+
+        let ms = Date().timeIntervalSince(start) * 1000
+        if ms > 50 {
+            Logger.switcher.notice(
+                "Panel show slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items"
+            )
+        }
     }
 
     func hide() {
+        let start = Date()
         clickMonitor.stop()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -103,6 +108,13 @@ final class SwitcherPanelController {
         CATransaction.commit()
         panel.orderOut(nil)
         CATransaction.flush()
+
+        let ms = Date().timeIntervalSince(start) * 1000
+        if ms > 20 {
+            Logger.switcher.notice(
+                "Panel hide slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+            )
+        }
     }
 
     private func sizeAndCenter(itemCount: Int) {

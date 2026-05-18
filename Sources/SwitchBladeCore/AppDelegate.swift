@@ -17,6 +17,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyMonitor: HotkeyMonitor?
     private var menuBarController: MenuBarController?
     private var lifecycleObservers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var appTerminationRefreshTask: Task<Void, Never>?
     private var lastPresentedMissingPermissions: [PermissionKind] = []
     private var isPresentingPermissionAlert = false
     /// Last observed Screen Recording grant. Used to detect the
@@ -40,7 +41,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if state.hasScreenRecording {
             Logger.capture.info("Starting SCKit cache warmup")
-            windowCatalog.startBackgroundRefresh(context: "launch")
+            warmCaptureCaches(context: "launch")
             lastKnownHadScreenRecording = true
         } else {
             // Re-check after a short delay so TCC has settled from launch
@@ -53,7 +54,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 Logger.capture.info("Starting delayed SCKit cache warmup")
-                self.windowCatalog.startBackgroundRefresh(context: "delayed launch")
+                self.warmCaptureCaches(context: "delayed launch")
                 self.lastKnownHadScreenRecording = true
             }
         }
@@ -115,6 +116,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        appTerminationRefreshTask?.cancel()
         hotkeyMonitor?.stop()
         for (center, observer) in lifecycleObservers {
             center.removeObserver(observer)
@@ -128,11 +130,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = permissionService.currentState()
         if state.hasScreenRecording && !lastKnownHadScreenRecording {
             // Screen Recording was just granted mid-session. Warm SCKit now so
-            // the next Cmd+Tab is hot. `startBackgroundRefresh` calls
-            // `refreshIfAllowed`, which bypasses the 60 s failure cooldown —
-            // any earlier-failed refresh (e.g. denied at launch) is healed too.
+            // the next Cmd+Tab is hot. The explicit refresh bypasses the 60 s
+            // failure cooldown, so any earlier-failed refresh (e.g. denied at
+            // launch) is healed too.
             Logger.capture.info("Screen Recording newly granted — warming SCKit cache")
-            windowCatalog.startBackgroundRefresh(context: "screen recording granted")
+            warmCaptureCaches(context: "screen recording granted")
         }
         lastKnownHadScreenRecording = state.hasScreenRecording
         store.refreshPermissionState()
@@ -189,6 +191,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         lifecycleObservers.append((
             workspaceCenter,
             workspaceCenter.addObserver(
+                forName: NSWorkspace.didTerminateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                let pid = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
+                    .processIdentifier
+                MainActor.assumeIsolated {
+                    self?.handleApplicationTerminated(pid: pid)
+                }
+            }
+        ))
+        lifecycleObservers.append((
+            workspaceCenter,
+            workspaceCenter.addObserver(
                 forName: NSWorkspace.willSleepNotification,
                 object: nil,
                 queue: .main
@@ -229,5 +245,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleCaptureContentInvalidation(reason: String) {
         Logger.capture.notice("Handling capture lifecycle event: \(reason, privacy: .public)")
         store.invalidateCaptureCache(reason: reason)
+    }
+
+    private func handleApplicationTerminated(pid: pid_t?) {
+        guard pid != getpid() else { return }
+
+        appTerminationRefreshTask?.cancel()
+        appTerminationRefreshTask = Task { @MainActor [weak self] in
+            // Coalesce rapid helper-process exits into one SCKit refresh.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self, !Task.isCancelled else { return }
+
+            let reason = pid.map { "application terminated pid=\($0)" } ?? "application terminated"
+            Logger.capture.notice("Handling capture lifecycle event: \(reason, privacy: .public)")
+            await self.windowCatalog.invalidateAndRefreshContentCache(
+                reason: reason,
+                context: "application terminated"
+            )
+            await self.store.warmPreviewCache(context: "application terminated")
+        }
+    }
+
+    private func warmCaptureCaches(context: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.windowCatalog.refreshContentCache(context: context)
+            await self.store.warmPreviewCache(context: context)
+        }
     }
 }

@@ -131,6 +131,30 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
+    func warmPreviewCache(context: String) async {
+        guard SwitchBladeSettings.shared.previewMode != .iconsOnly else { return }
+
+        let visibleSnapshot = catalog.snapshotVisibleOnly()
+        let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
+        let windowIDs = orderedItems
+            .filter { !$0.isMinimized && $0.canCapturePreview }
+            .map(\.windowID)
+        let initialWindowIDs = Array(windowIDs.prefix(10))
+        guard !initialWindowIDs.isEmpty else { return }
+
+        let start = Date()
+        let previews = await catalog.capturePreviews(
+            for: initialWindowIDs,
+            maxCount: nil,
+            maxConcurrentCaptures: min(4, initialWindowIDs.count)
+        )
+        let acceptedPreviews = previewCache.record(previews, liveItems: orderedItems)
+        let ms = Date().timeIntervalSince(start) * 1000
+        Logger.switcher.info(
+            "Preview cache warmup (\(context, privacy: .public)): \(acceptedPreviews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+        )
+    }
+
     func cycle(forward: Bool) {
         // Mark "the user is using the switcher right now" so handleAppActivation
         // knows it's worth warming the SCKit cache on app switches for the next
@@ -367,10 +391,11 @@ final class SwitcherStore: ObservableObject {
     ) {
         mruTracker.rememberSelection(item.id, in: items)
         hide()
-        // Defer past the current RunLoop cycle so panel.orderOut renders before
-        // WindowActivator starts synchronous AX IPC to the target app.
+        // Give AppKit one frame to commit orderOut before WindowActivator starts
+        // synchronous AX IPC to the target app.
         let activator = self.activator
         Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 16_000_000)
             action(activator, item)
         }
     }

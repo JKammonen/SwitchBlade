@@ -170,9 +170,13 @@ func makeIsolatedUserDefaults() -> UserDefaults {
     return ud
 }
 
-/// Yield to MainActor a few times so deferred Task { @MainActor in } work runs.
+/// Yield to MainActor, then wait one frame so deferred selection actions run.
 @MainActor
 func runPendingMainTasks(_ iterations: Int = 8) async {
+    for _ in 0 ..< iterations {
+        await Task.yield()
+    }
+    try? await Task.sleep(nanoseconds: 20_000_000)
     for _ in 0 ..< iterations {
         await Task.yield()
     }

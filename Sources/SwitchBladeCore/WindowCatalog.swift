@@ -5,8 +5,7 @@ import os.log
 @preconcurrency import ScreenCaptureKit
 
 // Cache for SCShareableContent. Three refresh paths:
-//   1. Launch warmup via `startBackgroundRefresh()` once Screen Recording has
-//      been granted.
+//   1. Launch warmup once Screen Recording has been granted.
 //   2. End-of-cycle refresh via `refreshContentCache()` so the next Cmd+Tab
 //      starts fresh.
 //   3. Hot-path refresh via `refreshIfStale()` inside `capturePreviews` when
@@ -199,17 +198,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     init() {}
 
-    /// Warms SCShareableContent cache. Safe to call only when SR permission is
-    /// confirmed — never call at launch before TCC has settled.
-    func startBackgroundRefresh(context: String) {
-        Task.detached(priority: .utility) { [contentCache] in
-            await contentCache.refreshIfAllowed(successContext: context)
-        }
-    }
-
     /// Re-warms the cache after a capture session so the next Cmd+Tab is fast.
     func refreshContentCache() async {
         await contentCache.refreshIfAllowed()
+    }
+
+    func refreshContentCache(context: String) async {
+        await contentCache.refreshIfAllowed(successContext: context)
     }
 
     /// Like `refreshContentCache` but no-op when the cache is still fresh.
@@ -222,6 +217,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     func invalidateContentCache(reason: String) async {
         await contentCache.invalidate(reason: reason)
+    }
+
+    /// Drops stale SCWindow refs after process topology changes, then warms
+    /// replacement content before the next Cmd+Tab preview batch needs it.
+    func invalidateAndRefreshContentCache(reason: String, context: String) async {
+        await contentCache.invalidate(reason: reason)
+        await contentCache.refreshIfAllowed(successContext: context)
     }
 
     /// Fast path used on the Cmd+Tab critical path. Skips the AX walk for
