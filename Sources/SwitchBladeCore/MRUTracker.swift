@@ -151,7 +151,7 @@ final class MRUTracker {
     /// Records the user's choice from `liveItems` and writes the bundle list
     /// back to UserDefaults.
     func rememberSelection(_ id: CGWindowID, in liveItems: [WindowItem]) {
-        lastFromPID = liveItems.first?.pid
+        lastFromPID = liveItems.first?.pid  // nil when liveItems is empty — resets same-app cycling, which is correct
         recentWindowIDs = [id] + liveItems.map(\.id).filter { $0 != id }
 
         guard let item = liveItems.first(where: { $0.id == id }),
