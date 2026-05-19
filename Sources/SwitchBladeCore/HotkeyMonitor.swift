@@ -23,18 +23,39 @@ final class HotkeyMonitor {
     private var didInstallEventMonitors = false
     private var isTapModifierPressed = false
     private var lastTapModifierPressTimestamp: TimeInterval?
+    private var tapWatchdogTask: Task<Void, Never>?
 
     private static let modifierDoubleTapThreshold: TimeInterval = 0.35
+
+    private static let machTimebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return info
+    }()
+
+    /// Converts a `mach_absolute_time` delta into milliseconds. CGEvent.timestamp
+    /// is mach_absolute_time at event creation — comparing it to now reveals how
+    /// long the event sat in the system event queue before the tap callback
+    /// dispatched it.
+    private static func machDeltaMilliseconds(from then: UInt64, to now: UInt64) -> Double {
+        let delta = now &- then
+        let nanos = Double(delta) * Double(machTimebase.numer) / Double(machTimebase.denom)
+        return nanos / 1_000_000
+    }
 
     func start() {
         installEventTap()
         installEventMonitors()
+        startTapWatchdog()
     }
 
     /// Tears down event tap and NSEvent monitors. Call before drop to guarantee
     /// no callback fires after the owner is gone (deinit is non-isolated and
     /// may race with the main RunLoop's tap callback otherwise).
     func stop() {
+        tapWatchdogTask?.cancel()
+        tapWatchdogTask = nil
+
         if let eventTapSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
             self.eventTapSource = nil
@@ -68,6 +89,25 @@ final class HotkeyMonitor {
     // a nonisolated deinit, and the prior race between the main RunLoop's tap
     // callback and an off-thread deinit was exactly what we're guarding against.
     // Owners MUST call stop() from MainActor before dropping the monitor.
+
+    /// Periodic safety net: macOS can silently disable an event tap without
+    /// firing `.tapDisabledByTimeout`/`.tapDisabledByUserInput` (rare but
+    /// observed under system stress). Polling `CGEvent.tapIsEnabled` every 5 s
+    /// catches that and re-enables the tap — and the log line is the smoking
+    /// gun if user-reported "Cmd+Tab did nothing for a few seconds" recurs.
+    private func startTapWatchdog() {
+        tapWatchdogTask?.cancel()
+        tapWatchdogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled, let self, let tap = self.eventTap else { return }
+                if !CGEvent.tapIsEnabled(tap: tap) {
+                    Logger.hotkey.notice("Watchdog: tap silently disabled — re-enabling")
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
+            }
+        }
+    }
 
     private func installEventTap() {
         guard eventTap == nil else {
@@ -146,7 +186,12 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
-        onHotkey?(flags.contains(.maskShift) ? .backward : .forward)
+        let direction: Direction = flags.contains(.maskShift) ? .backward : .forward
+        let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
+        Logger.hotkey.notice(
+            "Hotkey forwarded: \(String(describing: direction), privacy: .public) (queue delay \(queueDelayMs, format: .fixed(precision: 1), privacy: .public) ms)"
+        )
+        onHotkey?(direction)
         return nil
     }
 

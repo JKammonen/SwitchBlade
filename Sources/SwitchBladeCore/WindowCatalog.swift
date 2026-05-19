@@ -8,8 +8,8 @@ import os.log
 //   1. Launch warmup once Screen Recording has been granted.
 //   2. End-of-cycle refresh via `refreshContentCache()` so the next Cmd+Tab
 //      starts fresh.
-//   3. Hot-path refresh via `refreshIfStale()` inside `capturePreviews` when
-//      the cache is older than `staleThreshold` seconds.
+//   3. Hot-path refresh via `refreshContentCacheIfStale()` inside
+//      `capturePreviews` when the cache is older than `staleThreshold`.
 // Never polled — ScreenCaptureKit can surface a macOS permission dialog when
 // touched repeatedly in an unsettled TCC state.
 actor SCContentCache {
@@ -19,11 +19,11 @@ actor SCContentCache {
 
     /// Stale cache leads to slow first captures after idle: the cached SCWindow
     /// refs lose their warm capture-pipeline link, and SCScreenshotManager has
-    /// to re-resolve each one. Below this age the cache is reused as-is.
-    ///
-    /// 5 s is tight enough that "a few seconds of idle" still gets a fresh
-    /// fetch; SwitcherStore also triggers opportunistic refreshes on every
-    /// NSWorkspace app activation, so this threshold is mostly the safety net.
+    /// to re-resolve each one (300 ms timeout + retry per window). Above this
+    /// age `capturePreviews` refreshes inline so the first batch hits a warm
+    /// pipeline. SwitcherStore also kicks opportunistic refreshes on every
+    /// NSWorkspace app activation; the hot-path refresh is the safety net when
+    /// the user idles without switching apps.
     static let staleThreshold: TimeInterval = 5
 
     func refreshIfAllowed(successContext: String? = nil) async {
@@ -62,25 +62,11 @@ actor SCContentCache {
         return Date().timeIntervalSince(lastSuccessfulRefresh) > Self.staleThreshold
     }
 
-    /// Refreshes inline only when there is no cached content to use, respecting
-    /// the failure cooldown. Stale-but-present content is still useful on the
-    /// Cmd+Tab hot path; callers can refresh it in the background.
-    func refreshIfMissing() async {
-        if content == nil {
-            guard shouldRetryAfterFailure() else { return }
-            await refreshIfAllowed()
-        }
-    }
-
     func refreshIfStale() async {
         if content == nil || isStale() {
             guard shouldRetryAfterFailure() else { return }
             await refreshIfAllowed()
         }
-    }
-
-    func shouldRefreshStaleContentInBackground() -> Bool {
-        content != nil && isStale() && shouldRetryAfterFailure()
     }
 
     func invalidate(reason: String) {
@@ -345,18 +331,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // Single preflight syscall instead of currentState() which does three.
         guard CGPreflightScreenCaptureAccess() else { return [:] }
 
-        // Missing content must block; stale-but-present content is used
-        // immediately and refreshed in the background so Cmd+Tab doesn't pay
-        // an inline SCShareableContent.current call after short idle gaps.
-        await contentCache.refreshIfMissing()
+        // Refresh inline when the cache is missing OR stale: stale SCWindow refs
+        // lose their warm capture-pipeline link, and proceeding with them costs
+        // ~300 ms timeout + retry per window. The inline refresh is ~30–80 ms.
+        await self.refreshContentCacheIfStale()
         guard let content = await contentCache.content else {
             Logger.capture.error("capturePreviews: no SCShareableContent available")
             return [:]
-        }
-        if await contentCache.shouldRefreshStaleContentInBackground() {
-            Task.detached(priority: .utility) { [contentCache] in
-                await contentCache.refreshIfAllowed()
-            }
         }
         guard !Task.isCancelled else { return [:] }
         let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
@@ -366,7 +347,19 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             guard let window = windowsByID[windowID] else { return nil }
             return (windowID, window)
         }
-        guard !captureTargets.isEmpty else {
+        let captureTargetIDs = Set(captureTargets.map { $0.0 })
+        // Windows known to the switcher (from CGWindowList) but absent from
+        // SCShareableContent. SCKit silently drops these — they get no capture
+        // attempt at all. CGWindowList fallback runs for them after the SCKit pass.
+        let scMissingIDs = requestedIDs.filter {
+            !captureTargetIDs.contains($0) && !SyntheticWindowID.isSynthetic($0)
+        }
+        if !scMissingIDs.isEmpty {
+            Logger.capture.notice(
+                "capturePreviews: \(scMissingIDs.count, privacy: .public) windows absent from SCShareableContent — CGWindowList fallback queued"
+            )
+        }
+        guard !captureTargets.isEmpty || !scMissingIDs.isEmpty else {
             Logger.capture.notice("capturePreviews: no matching SCWindows for \(windowIDs.count, privacy: .public) requested IDs")
             return [:]
         }
@@ -421,8 +414,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             secondAttempt: second
                         )
                     }
+                    let fallback = await Task.detached(priority: .userInitiated) {
+                        WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
+                    }.value
+                    if let image = fallback {
+                        Logger.capture.notice(
+                            "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — SCKit retry also failed"
+                        )
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: image,
+                            firstAttempt: first,
+                            secondAttempt: second
+                        )
+                    }
                     Logger.capture.error(
-                        "Both capture attempts failed for windowID=\(windowID, privacy: .public)"
+                        "All capture attempts failed for windowID=\(windowID, privacy: .public)"
                     )
                     return WindowCaptureOutcome(
                         windowID: windowID,
@@ -472,10 +479,31 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 _ = enqueueNextCapture()
             }
 
+            if !Task.isCancelled, !scMissingIDs.isEmpty {
+                await withTaskGroup(of: (CGWindowID, NSImage?).self) { fallbackGroup in
+                    for windowID in scMissingIDs {
+                        let wid = windowID
+                        fallbackGroup.addTask {
+                            let image = await Task.detached(priority: .userInitiated) {
+                                WindowCatalog.captureWithCGWindowList(windowID: wid, maxDim: maxDim)
+                            }.value
+                            return (wid, image)
+                        }
+                    }
+                    for await (windowID, image) in fallbackGroup {
+                        if let image {
+                            Logger.capture.notice(
+                                "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — not in SCShareableContent"
+                            )
+                            result[windowID] = image
+                        }
+                    }
+                }
+            }
             let ms = Date().timeIntervalSince(captureStart) * 1000
             if PerformanceLoggingState.mode == .debug {
                 Logger.capture.info(
-                    "Captured \(result.count, privacy: .public)/\(captureTargets.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"
+                    "Captured \(result.count, privacy: .public)/\(requestedIDs.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"
                 )
             }
             return result
@@ -666,6 +694,39 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         AXValueGetValue(sizeAX, .cgSize, &size)
 
         return CGRect(origin: point, size: size)
+    }
+
+    // CGWindowListCreateImage is deprecated in macOS 14 but still functional.
+    // Used as a last-resort fallback when both SCKit capture attempts time out
+    // or fail: SCKit can be flaky on off-screen / multi-Space / recently-created
+    // windows, while the legacy API often succeeds where SCKit stalls.
+    private static func captureWithCGWindowList(windowID: CGWindowID, maxDim: Int) -> NSImage? {
+        guard let cgImage = CGWindowListCreateImage(
+            .null,
+            .optionIncludingWindow,
+            windowID,
+            [.bestResolution, .boundsIgnoreFraming]
+        ) else { return nil }
+        let width = cgImage.width
+        let height = cgImage.height
+        let scale = min(CGFloat(maxDim) / CGFloat(max(width, 1)),
+                        CGFloat(maxDim) / CGFloat(max(height, 1)))
+        if scale >= 1.0 {
+            return NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+        }
+        let newW = max(1, Int(CGFloat(width) * scale))
+        let newH = max(1, Int(CGFloat(height) * scale))
+        let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: newW, height: newH,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: newW, height: newH))
+        guard let scaled = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: scaled, size: NSSize(width: newW, height: newH))
     }
 
 }

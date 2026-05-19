@@ -96,14 +96,12 @@ final class SwitcherPanelController {
         let orderEnd = Date()
 
         let ms = Date().timeIntervalSince(start) * 1000
-        if ms > 50 {
-            let sizeMs = sizeEnd.timeIntervalSince(sizeStart) * 1000
-            let layoutMs = layoutEnd.timeIntervalSince(layoutStart) * 1000
-            let orderMs = orderEnd.timeIntervalSince(orderStart) * 1000
-            Logger.switcher.notice(
-                "Panel show slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items; size=\(sizeMs, format: .fixed(precision: 1), privacy: .public), layout=\(layoutMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
-            )
-        }
+        let sizeMs = sizeEnd.timeIntervalSince(sizeStart) * 1000
+        let layoutMs = layoutEnd.timeIntervalSince(layoutStart) * 1000
+        let orderMs = orderEnd.timeIntervalSince(orderStart) * 1000
+        Logger.switcher.notice(
+            "Panel show: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items; size=\(sizeMs, format: .fixed(precision: 1), privacy: .public), layout=\(layoutMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+        )
     }
 
     func hide() {

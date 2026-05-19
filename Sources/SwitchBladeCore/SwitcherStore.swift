@@ -169,6 +169,7 @@ final class SwitcherStore: ObservableObject {
     }
 
     func cycle(forward: Bool) {
+        Logger.switcher.notice("cycle: enter isVisible=\(self.isVisible, privacy: .public)")
         // Mark "the user is using the switcher right now" so handleAppActivation
         // knows it's worth warming the SCKit cache on app switches for the next
         // ~minute. Idle users (haven't pressed Cmd+Tab in a while) skip the warmup.
@@ -210,6 +211,7 @@ final class SwitcherStore: ObservableObject {
     /// Entry point for the CGEventTap hotkey callback. Keep this cheap so
     /// macOS does not disable the tap while SwitchBlade enumerates windows.
     func requestCycle(forward: Bool) {
+        Logger.switcher.notice("requestCycle: enter isVisible=\(self.isVisible, privacy: .public) isSwitching=\(self.isSwitching, privacy: .public)")
         if isVisible {
             cycle(forward: forward)
             return
@@ -226,8 +228,9 @@ final class SwitcherStore: ObservableObject {
         pendingOpenRequestedAt = Date()
         isSwitching = true
 
-        if !cachedOpenItems.isEmpty, isCachedOpenItemsFresh() {
+        if !cachedOpenItems.isEmpty {
             let openStart = Date()
+            let isStale = !isCachedOpenItemsFresh()
             pendingOpenRequestedAt = nil
             openFromOrderedItems(
                 cachedOpenItems,
@@ -236,15 +239,17 @@ final class SwitcherStore: ObservableObject {
                 permissionMs: 0,
                 snapshotMs: 0,
                 orderMs: 0,
-                source: "cached"
+                source: isStale ? "stale" : "cached"
             )
             Task { @MainActor [weak self] in
                 await Task.yield()
                 self?.refreshPermissionState()
+                if isStale {
+                    await self?.reconcileStaleOpenItems()
+                }
             }
             return
         }
-        discardStaleCachedOpenItems()
 
         Task { @MainActor [weak self] in
             self?.cycle(forward: forward)
@@ -611,17 +616,36 @@ final class SwitcherStore: ObservableObject {
         return now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge
     }
 
-    private func discardStaleCachedOpenItems(now: Date = Date()) {
-        guard !cachedOpenItems.isEmpty, !isCachedOpenItemsFresh(now: now) else { return }
-        cachedOpenItems = []
-        cachedOpenItemsUpdatedAt = nil
-    }
-
     private func snapshotVisibleOnlyOffMain() async -> [WindowItem] {
         let catalog = self.catalog
         return await Task.detached(priority: .utility) {
             catalog.snapshotVisibleOnly()
         }.value
+    }
+
+    private func reconcileStaleOpenItems() async {
+        guard isVisible else { return }
+        let freshSnapshot = await snapshotVisibleOnlyOffMain()
+        guard isVisible else { return }
+        let freshOrdered = orderItems(mruTracker.orderedForDisplay(from: freshSnapshot))
+        updateCachedOpenItems(freshOrdered)
+        let freshIDs = Set(freshOrdered.map(\.id))
+        let currentIDs = Set(items.map(\.id))
+        let newItems = freshOrdered
+            .filter { !currentIDs.contains($0.id) }
+            .map(previewCache.hydrated)
+        // Bulk replace: keep surviving items in display order, append new ones.
+        // Avoids calling removeItem(withID:) per-item, which would invoke cancel()
+        // prematurely if all stale items happen to be gone from the fresh snapshot.
+        items = items.filter { freshIDs.contains($0.id) } + newItems
+        mruTracker.pruneToLive(items)
+        if items.isEmpty {
+            cancel()
+            return
+        }
+        if !items.contains(where: { $0.id == selectedID }) {
+            selectedID = items.first?.id
+        }
     }
 
     private func showWithPreviews() {
@@ -739,11 +763,8 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func schedulePanelShow(generation: Int) {
-        Task { @MainActor [weak self] in
-            await Task.yield()
-            guard let self, self.isVisible, self.previewGeneration == generation else { return }
-            self.onShow?()
-        }
+        guard isVisible, previewGeneration == generation else { return }
+        onShow?()
     }
 
     private func removeItem(withID id: WindowItem.ID) {

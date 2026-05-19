@@ -259,9 +259,9 @@ enum SwitcherStoreTests {
     @MainActor static func ordering_recent() async throws {
         let (store, catalog, activator, _) = makeStore()
         catalog.visibleItems = [
-            makeItem(id: 1, isFrontmostApp: true),
-            makeItem(id: 2),
-            makeItem(id: 3)
+            makeItem(id: 1, pid: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 2),
+            makeItem(id: 3, pid: 3)
         ]
         store.cycle(forward: true)
         store.selectedID = 3
@@ -270,9 +270,9 @@ enum SwitcherStoreTests {
         try expectEqual(activator.activatedItems.last?.id, 3)
 
         catalog.visibleItems = [
-            makeItem(id: 1, isFrontmostApp: true),
-            makeItem(id: 2),
-            makeItem(id: 3)
+            makeItem(id: 1, pid: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 2),
+            makeItem(id: 3, pid: 3)
         ]
         store.cycle(forward: true)
         try expectEqual(store.items.map(\.id), [1, 3, 2])
