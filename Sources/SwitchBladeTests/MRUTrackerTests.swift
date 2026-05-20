@@ -14,10 +14,16 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_sameAppWindows_keepIndependentRanks", sameAppWindowsNotBundled),
         ("MRU/orderedForDisplay_sameAppSwitchMovesSelectedWindowOnly", sameAppSwitchMovesSelectedWindowOnly),
         ("MRU/orderedForDisplay_transientMissingWindow_keepsRankWhenItReturns", transientMissingWindowKeepsRank),
+        ("MRU/orderedForDisplay_recreatedWindow_keepsRankBySignature", recreatedWindowKeepsRankBySignature),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
         ("MRU/trackSystemActivation_doesNotPruneFromStaleStoreSnapshot", systemActivationDoesNotPrune),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
-        ("MRU/rememberSelection_capsAtMaxBundles", capsBundles)
+        ("MRU/pruneToLive_emptyList_clearsAllRankData", pruneToLiveEmpty),
+        ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
+        ("MRU/rememberSelection_capsAtMaxBundles", capsBundles),
+        ("MRU/rememberSelection_nilBundleID_writesRanksSkipsBundleList", rememberSelectionNilBundle),
+        ("MRU/orderedForDisplay_emptySnapshot_returnsEmpty", orderedForDisplayEmpty),
+        ("MRU/orderedForDisplay_noFrontmostFlag_usesFirstInSnapshot", orderedForDisplayNoFrontmost)
     ]
 
     @MainActor static func frontmostFirst() throws {
@@ -188,6 +194,25 @@ enum MRUTrackerTests {
         try expectEqual(orderedAfterReturn.map(\.id), [1, 2, 3])
     }
 
+    @MainActor static func recreatedWindowKeepsRankBySignature() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Terminal", title: "Terminal A", isFrontmostApp: true),
+            makeItem(id: 2, pid: 100, appName: "Terminal", title: "Terminal B"),
+            makeItem(id: 3, pid: 200, appName: "Browser", title: "Browser")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        let recreatedSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Terminal", title: "Terminal A", isFrontmostApp: true),
+            makeItem(id: 3, pid: 200, appName: "Browser", title: "Browser"),
+            makeItem(id: 20, pid: 100, appName: "Terminal", title: "Terminal B")
+        ]
+
+        let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
+        try expectEqual(ordered.map(\.id), [1, 20, 3])
+    }
+
     // Regression guard: app-level activation must not move every known window
     // of that pid. The notification does not tell us which window was touched.
     @MainActor static func systemActivation() throws {
@@ -243,6 +268,60 @@ enum MRUTrackerTests {
         // Only item 1 is still alive.
         tracker.pruneToLive([makeItem(id: 1, isFrontmostApp: true)])
         try expectEqual(tracker.recentWindowIDs, [1])
+    }
+
+    @MainActor static func pruneToLiveEmpty() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [makeItem(id: 1, isFrontmostApp: true), makeItem(id: 2)]
+        tracker.rememberSelection(2, in: snapshot)
+        tracker.pruneToLive([])
+        try expectEqual(tracker.recentWindowIDs, [])
+        try expectEqual(tracker.recentWindowSignatures, [])
+    }
+
+    @MainActor static func pruneDropsSignatures() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [
+            makeItem(id: 1, appName: "Terminal", title: "A", isFrontmostApp: true),
+            makeItem(id: 2, appName: "Terminal", title: "B")
+        ]
+        tracker.rememberSelection(2, in: snapshot)
+        try expect(!tracker.recentWindowSignatures.isEmpty)
+        tracker.pruneToLive([makeItem(id: 1, appName: "Terminal", title: "A", isFrontmostApp: true)])
+        // Signature for "Terminal B" must be gone; only "Terminal A" survives.
+        try expectEqual(tracker.recentWindowSignatures.count, 1)
+    }
+
+    @MainActor static func rememberSelectionNilBundle() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [
+            makeItem(id: 1, appName: "NoBundle", isFrontmostApp: true, bundleIdentifier: nil),
+            makeItem(id: 2, appName: "NoBundle", bundleIdentifier: nil)
+        ]
+        tracker.rememberSelection(2, in: snapshot)
+        // Window and signature ranks are written.
+        try expectEqual(tracker.recentWindowIDs.first, 2)
+        try expect(!tracker.recentWindowSignatures.isEmpty)
+        // Bundle list must stay empty — no bundleIdentifier to persist.
+        try expectEqual(tracker.recentBundleIDs, [])
+    }
+
+    @MainActor static func orderedForDisplayEmpty() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let result = tracker.orderedForDisplay(from: [])
+        try expectEqual(result, [])
+    }
+
+    @MainActor static func orderedForDisplayNoFrontmost() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [
+            makeItem(id: 1, appName: "A"),
+            makeItem(id: 2, appName: "B"),
+            makeItem(id: 3, appName: "C")
+        ]
+        let ordered = tracker.orderedForDisplay(from: snapshot)
+        // No isFrontmostApp flag → snapshot[0] used as frontmost.
+        try expectEqual(ordered.first?.id, 1)
     }
 
     @MainActor static func capsBundles() throws {
