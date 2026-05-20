@@ -150,10 +150,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if missingPermissions == [.screenRecording] {
-            return
-        }
-
         guard !isPresentingPermissionAlert,
               missingPermissions != lastPresentedMissingPermissions,
               let permission = state.primaryMissingPermission else {
