@@ -13,13 +13,6 @@ import Foundation
 final class MRUTracker {
     private(set) var recentWindowIDs: [CGWindowID] = []
     private(set) var recentBundleIDs: [String]
-    // PID of the app the user was leaving when they last committed a switcher
-    // selection. Used by orderedForDisplay to detect same-app cycling: when
-    // lastFromPID matches the current frontmost PID the user was bouncing
-    // within the same app, and the most-recent sibling surfaces at position 1.
-    // Direct-click activations (trackSystemActivation) intentionally do NOT
-    // update this — only explicit switcher choices count.
-    private(set) var lastFromPID: pid_t?
 
     private let maxBundles: Int
     private let userDefaults: UserDefaults
@@ -48,7 +41,6 @@ final class MRUTracker {
         // accurate than snapshot.first (CGWindowList z-order lags briefly after
         // an activation).
         let currentFrontmost = snapshot.first(where: { $0.isFrontmostApp }) ?? snapshot[0]
-        let frontmostBundleID = currentFrontmost.bundleIdentifier
 
         let liveIDs = Set(snapshot.map(\.id))
         recentWindowIDs.removeAll { !liveIDs.contains($0) }
@@ -70,7 +62,7 @@ final class MRUTracker {
         // when `recentWindowIDs` hasn't been populated yet.
         if !recentBundleIDs.isEmpty {
             let snapshotByBundle = Dictionary(grouping: snapshot, by: { $0.bundleIdentifier })
-            for bundleID in recentBundleIDs where bundleID != frontmostBundleID {
+            for bundleID in recentBundleIDs {
                 guard let group = snapshotByBundle[bundleID] else { continue }
                 for item in group where seen.insert(item.id).inserted {
                     ordered.append(item)
@@ -89,7 +81,6 @@ final class MRUTracker {
     /// Records the user's choice from `liveItems` and writes the bundle list
     /// back to UserDefaults.
     func rememberSelection(_ id: CGWindowID, in liveItems: [WindowItem]) {
-        lastFromPID = liveItems.first?.pid  // nil when liveItems is empty — resets same-app cycling, which is correct
         recentWindowIDs = [id] + liveItems.map(\.id).filter { $0 != id }
 
         guard let item = liveItems.first(where: { $0.id == id }),

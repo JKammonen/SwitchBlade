@@ -8,10 +8,11 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_putsFrontmostFirst", frontmostFirst),
         ("MRU/orderedForDisplay_thenRecentWindowIDs", recentSecond),
         ("MRU/orderedForDisplay_persistedBundleIDs_seedNewSession", persistedSeed),
+        ("MRU/orderedForDisplay_persistedBundleIDs_includeFrontmostSiblings", persistedSeedIncludesFrontmostSiblings),
         ("MRU/orderedForDisplay_keepsSameAppMRURank", sameAppKeepsMRURank),
-        ("MRU/orderedForDisplay_frontmostAppOtherWindows_rankLast", frontmostAppOtherWindowsLast),
+        ("MRU/orderedForDisplay_switchMovesSelectedWindowOnly", switchMovesSelectedWindowOnly),
         ("MRU/orderedForDisplay_sameAppWindows_keepIndependentRanks", sameAppWindowsNotBundled),
-        ("MRU/orderedForDisplay_sameAppCycling_siblingStaysAtPositionOne", sameAppCyclingSiblingAtOne),
+        ("MRU/orderedForDisplay_sameAppSwitchMovesSelectedWindowOnly", sameAppSwitchMovesSelectedWindowOnly),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
         ("MRU/rememberSelection_capsAtMaxBundles", capsBundles)
@@ -41,6 +42,21 @@ enum MRUTrackerTests {
         let ordered = tracker.orderedForDisplay(from: snapshot)
         // Frontmost (1), then recent (3), then the rest (2).
         try expectEqual(ordered.map(\.id), [1, 3, 2])
+    }
+
+    @MainActor static func persistedSeedIncludesFrontmostSiblings() throws {
+        let ud = makeIsolatedUserDefaults()
+        ud.set(["bundle.a", "bundle.b"], forKey: "sb_recentBundleIDs")
+
+        let tracker = MRUTracker(userDefaults: ud)
+        let snapshot = [
+            makeItem(id: 1, pid: 1, isFrontmostApp: true, bundleIdentifier: "bundle.a"),
+            makeItem(id: 2, pid: 2, bundleIdentifier: "bundle.c"),
+            makeItem(id: 3, pid: 1, bundleIdentifier: "bundle.a"),
+            makeItem(id: 4, pid: 3, bundleIdentifier: "bundle.b")
+        ]
+        let ordered = tracker.orderedForDisplay(from: snapshot)
+        try expectEqual(ordered.map(\.id), [1, 3, 4, 2])
     }
 
     @MainActor static func persistedSeed() throws {
@@ -78,14 +94,12 @@ enum MRUTrackerTests {
         try expectEqual(ordered.map(\.id), [1, 2, 3])
     }
 
-    // Regression test for the "another terminal instead of browser" bug:
-    // when the frontmost app has multiple windows, Cmd+Tab position 1 must be
-    // the previous *app* (browser), not another window of the same app.
-    @MainActor static func frontmostAppOtherWindowsLast() throws {
+    // Switching to a window moves only that selected window. Other windows keep
+    // the rank they already had in the MRU chain.
+    @MainActor static func switchMovesSelectedWindowOnly() throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         // User was in browser (pid=200), switches to terminal-A (pid=100) via
-        // the switcher. liveItems passed to rememberSelection has browser at
-        // position 0 — that records lastFromPID = 200.
+        // the switcher.
         let snapshotFromBrowser = [
             makeItem(id: 3, pid: 200, isFrontmostApp: true),  // browser (leaving)
             makeItem(id: 1, pid: 100),                          // terminal-A
@@ -100,8 +114,7 @@ enum MRUTrackerTests {
             makeItem(id: 3, pid: 200),                          // browser
         ]
         let ordered = tracker.orderedForDisplay(from: snapshotAfter)
-        // lastFromPID = 200 (browser) ≠ frontmostPID 100 → lastWasSameApp = false.
-        // Position 1 must be browser (previous app), not terminal-B.
+        // Terminal-A is current, then browser and terminal-B keep their existing rank.
         try expectEqual(ordered.map(\.id), [1, 3, 2])
     }
 
@@ -131,10 +144,9 @@ enum MRUTrackerTests {
         try expectEqual(ordered.map(\.id), [10, 40, 20, 30, 21])
     }
 
-    // Regression test for the "same-app sibling jumps to end" bug: when the
-    // user is cycling between two windows of the same app via the switcher,
-    // the other window must stay at position 1, not be pushed to the end.
-    @MainActor static func sameAppCyclingSiblingAtOne() throws {
+    // Same-app switching follows the same per-window rule: the selected window
+    // moves to the front, unrelated windows keep their rank.
+    @MainActor static func sameAppSwitchMovesSelectedWindowOnly() throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         // App X (pid=100) has two windows A (id=1) and B (id=2). App Y (pid=200)
         // has one window C (id=3). User is cycling between A and B.
@@ -148,8 +160,7 @@ enum MRUTrackerTests {
         tracker.rememberSelection(2, in: snapshot)  // user committed X-B
 
         let ordered = tracker.orderedForDisplay(from: snapshot)
-        // X-B at 0 (frontmost), X-A at 1 (same-app sibling should stay close),
-        // Y-C at 2 (cross-app pushed back while cycling within same app).
+        // X-B at 0 (frontmost), then X-A and Y-C keep the rank from the last selection.
         try expectEqual(ordered.map(\.id), [2, 1, 3])
     }
 
