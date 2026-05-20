@@ -398,8 +398,8 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        let effectiveCurrentPID = currentAppPID
         let orderedItems = itemsForPreviousSwitchTarget()
+        let effectiveCurrentPID = orderedItems.first?.pid ?? currentAppPID
         if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
             lastSwitcherUse = Date()
             mruTracker.rememberSelection(targetItem.id, in: orderedItems)
@@ -435,15 +435,10 @@ final class SwitcherStore: ObservableObject {
     private func previousSwitchTarget(from orderedItems: [WindowItem], currentPID: pid_t?) -> WindowItem? {
         guard orderedItems.count > 1 else { return nil }
 
-        let effectiveCurrentPID = currentPID ?? orderedItems.first?.pid
-        let targetItem = orderedItems[1]
-        guard targetItem.pid != switchBladePID else { return nil }
-
-        // When the current app is known and the MRU target is a different app,
-        // keep the existing app-level fast path. Window-level targeting matters
-        // when the user is bouncing between sibling windows of the same app.
-        guard let effectiveCurrentPID, targetItem.pid == effectiveCurrentPID else { return nil }
-        return targetItem
+        guard let effectiveCurrentPID = currentPID ?? orderedItems.first?.pid else { return nil }
+        return orderedItems.dropFirst().first { item in
+            item.pid == effectiveCurrentPID && item.pid != switchBladePID
+        }
     }
 
     private func itemsForPreviousSwitchTarget() -> [WindowItem] {

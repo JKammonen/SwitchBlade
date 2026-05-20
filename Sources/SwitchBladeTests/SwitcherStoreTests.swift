@@ -47,6 +47,7 @@ enum SwitcherStoreTests {
         ("Store/switchToPreviousApplication_disabledSetting_skipsActivation", switchToPreviousApplication_disabledSetting),
         ("Store/switchToPreviousApplication_infersPreviousPidWhenUntracked", switchToPreviousApplication_infersPreviousPid),
         ("Store/switchToPreviousApplication_sameAppWindowsBounceInsteadOfPickingOtherApp", switchToPreviousApplication_sameAppWindowsBounceInsteadOfPickingOtherApp),
+        ("Store/switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale", switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale),
         ("Store/switchToPreviousApplication_repeatedCallsCanBounceBetweenTwoApps", switchToPreviousApplication_bouncesBetweenTwoApps),
         ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
         // commit / cancel
@@ -656,9 +657,9 @@ enum SwitcherStoreTests {
         let permissions = MockPermissionService()
         let mruTracker = MRUTracker(userDefaults: userDefaults)
         mruTracker.rememberSelection(2, in: [
-            makeItem(id: 1, pid: 100, title: "A", isFrontmostApp: true),
-            makeItem(id: 2, pid: 100, title: "B"),
-            makeItem(id: 3, pid: 200, title: "Other App")
+            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 1, pid: 100, title: "A"),
+            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true)
         ])
         let store = SwitcherStore(
             catalog: catalog,
@@ -672,8 +673,8 @@ enum SwitcherStoreTests {
 
         catalog.visibleItems = [
             makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
-            makeItem(id: 1, pid: 100, title: "A"),
-            makeItem(id: 3, pid: 200, title: "Other App")
+            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 1, pid: 100, title: "A")
         ]
 
         store.switchToPreviousApplication()
@@ -690,6 +691,44 @@ enum SwitcherStoreTests {
         store.switchToPreviousApplication()
 
         try expectEqual(activator.activatedItems.map(\.id), [1, 2])
+        try expect(activator.activatedApplicationPIDs.isEmpty)
+    }
+
+    @MainActor static func switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
+
+        let userDefaults = makeIsolatedUserDefaults()
+        let catalog = MockWindowCatalog()
+        let activator = MockWindowActivator()
+        let permissions = MockPermissionService()
+        let mruTracker = MRUTracker(userDefaults: userDefaults)
+        mruTracker.rememberSelection(2, in: [
+            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 1, pid: 100, title: "A"),
+            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true)
+        ])
+        let store = SwitcherStore(
+            catalog: catalog,
+            activator: activator,
+            permissionService: permissions,
+            userDefaults: userDefaults,
+            mruTracker: mruTracker,
+            initialFrontmostAppPID: 200,
+            switchBladePID: 999
+        )
+
+        catalog.visibleItems = [
+            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
+            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 1, pid: 100, title: "A")
+        ]
+
+        store.switchToPreviousApplication()
+
+        try expectEqual(activator.activatedItems.map(\.id), [1])
         try expect(activator.activatedApplicationPIDs.isEmpty)
     }
 
