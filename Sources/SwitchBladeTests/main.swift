@@ -12,6 +12,7 @@ func runAll() async -> Int {
         ("Localization",            LocalizationTests.all),
         ("SwitchBladeSettings",     SwitchBladeSettingsTests.all),
         ("SwitcherLayoutCalculator", SwitcherLayoutCalculatorTests.all),
+        ("HotkeyMonitor",           HotkeyMonitorTests.all),
         ("LockedValue",             LockedValueTests.all),
         ("LRUDictionary",           LRUDictionaryTests.all),
         ("PreviewCacheStore",       PreviewCacheStoreTests.all),

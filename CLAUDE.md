@@ -54,7 +54,7 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 | `WindowActivator` | `Sendable`. Activate / close / quit / hide. Selected-window activate/snap target the AX window first, then activate the app so the target can become frontmost. |
 | `PermissionService` | Preflight checks for Accessibility + Screen Recording. Never calls `CGRequest*`. |
 | `SwitcherPanelController` | NSPanel host. CAShapeLayer mask for antialiased corners. Picks cursor's screen. |
-| `HotkeyMonitor` | CGEventTap + NSEvent monitors for Cmd+Tab. |
+| `HotkeyMonitor` | CGEventTap + NSEvent monitors for Cmd+Tab plus modifier + left-mouse previous-app shortcut. |
 | `MRUTracker` | In-memory recent window IDs + app/title signatures + persisted recent bundle IDs (UserDefaults, cap 30). Recovers single-window apps by app identity when ID/title churns; refuses to guess among multiple same-app windows. |
 | `PreviewCacheStore` | Two-level LRU (windowID + signature). Capacity 40. Stale-while-revalidate. |
 | `ClickOutsideMonitor` | Global + local mouse-down monitors. Closes panel on click outside card. |

@@ -12,6 +12,7 @@ final class HotkeyMonitor {
     var onHotkey: ((Direction) -> Void)?
     var onCommandReleased: (() -> Void)?
     var onModifierDoubleTap: (() -> Void)?
+    var onModifierMouseSwitch: (() -> Void)?
     var shouldTrackModifierRelease: (() -> Bool)?
     var onLocalKeyDown: ((NSEvent) -> Bool)?
 
@@ -115,7 +116,9 @@ final class HotkeyMonitor {
         }
 
         let unmanagedSelf = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
+        let eventMask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue)
 
         guard let eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -164,6 +167,10 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
+        if type == .leftMouseDown {
+            return handleLeftMouseDown(event)
+        }
+
         guard type == .keyDown else {
             return Unmanaged.passUnretained(event)
         }
@@ -193,6 +200,37 @@ final class HotkeyMonitor {
         )
         onHotkey?(direction)
         return nil
+    }
+
+    private func handleLeftMouseDown(_ event: CGEvent) -> Unmanaged<CGEvent>? {
+        let (isEnabled, hotkeyModifier) = MainActor.assumeIsolated {
+            (
+                SwitchBladeSettings.shared.doubleModifierSwitchEnabled,
+                SwitchBladeSettings.shared.modifier.cgFlag
+            )
+        }
+        guard Self.shouldTriggerModifierMouseSwitch(
+            isEnabled: isEnabled,
+            flags: event.flags,
+            hotkeyModifier: hotkeyModifier
+        ) else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        // The double-tap modifier was used with a mouse button, so it was not
+        // a standalone double-tap.
+        lastTapModifierPressTimestamp = nil
+        Logger.hotkey.info("Modifier + left mouse detected")
+        onModifierMouseSwitch?()
+        return nil
+    }
+
+    static func shouldTriggerModifierMouseSwitch(
+        isEnabled: Bool,
+        flags: CGEventFlags,
+        hotkeyModifier: CGEventFlags
+    ) -> Bool {
+        isEnabled && flags.contains(hotkeyModifier)
     }
 
     private func installEventMonitors() {

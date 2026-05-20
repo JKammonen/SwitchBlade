@@ -97,6 +97,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.store.switchToPreviousApplication()
             }
         }
+        hotkeyMonitor.onModifierMouseSwitch = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.store.switchToPreviousApplication()
+            }
+        }
         hotkeyMonitor.onLocalKeyDown = { [weak self] event in
             MainActor.assumeIsolated {
                 self?.store.handleKeyDown(event) ?? false
