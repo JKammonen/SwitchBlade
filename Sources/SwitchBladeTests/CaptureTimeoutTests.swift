@@ -7,7 +7,7 @@ enum CaptureTimeoutTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
-        ("ActivationRefresh/updatesMRU_onlyWhenHidden", activation_updatesMRU_onlyWhenHidden),
+        ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation)
     ]
@@ -46,7 +46,7 @@ enum CaptureTimeoutTests {
 
     /// If the user hasn't used Cmd+Tab in `activationWarmupWindow`, app
     /// activations stop triggering the SCKit warmup. Cost is genuinely zero
-    /// for idle users — handleAppActivation just records MRU and returns.
+    /// for idle users.
     @MainActor static func activation_skipsRefreshWhenIdle() async throws {
         // 50 ms warmup window — long enough to let the constructor-set
         // `lastSwitcherUse = Date()` count as "recent", short enough to expire
@@ -67,10 +67,9 @@ enum CaptureTimeoutTests {
                         "warmup gate should have blocked the refresh")
     }
 
-    /// Activation while the switcher is hidden updates the MRU. While visible,
-    /// MRU stays put (the user is mid-cycle and we don't want their list to
-    /// reshuffle under them).
-    @MainActor static func activation_updatesMRU_onlyWhenHidden() async throws {
+    /// System activation gives us only an app PID, not a concrete window. It
+    /// must not reshuffle the per-window MRU order.
+    @MainActor static func activation_doesNotUpdateMRUFromSystemActivation() async throws {
         let (store, catalog, _, _) = makeStore()
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
@@ -82,12 +81,10 @@ enum CaptureTimeoutTests {
         store.commitSelection()
         await runPendingMainTasks()       // hidden again, MRU now [2, ...]
 
-        // While hidden, activation should reshuffle MRU.
+        // App activation alone should not move pid=300 ahead of id=2.
         store.handleAppActivation(pid: 300)
         store.cycle(forward: true)
-        try expectEqual(store.items.first?.pid, 100)  // frontmost unchanged
-        // After activation pid=300, its window (id=3) should be the recent.
-        try expect(store.items.map(\.pid).prefix(2).contains(300))
+        try expectEqual(store.items.map(\.id), [1, 2, 3])
     }
 
     @MainActor static func storeForwardsLifecycleInvalidation() async throws {

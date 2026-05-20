@@ -399,7 +399,22 @@ final class SwitcherStore: ObservableObject {
         }
 
         let effectiveCurrentPID = currentAppPID
-        guard let targetPID = previousApplicationPID(currentPID: effectiveCurrentPID) else {
+        let orderedItems = itemsForPreviousSwitchTarget()
+        if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
+            lastSwitcherUse = Date()
+            mruTracker.rememberSelection(targetItem.id, in: orderedItems)
+            if let effectiveCurrentPID, effectiveCurrentPID != switchBladePID, effectiveCurrentPID != targetItem.pid {
+                previousAppPID = effectiveCurrentPID
+            }
+            currentAppPID = targetItem.pid
+            Logger.switcher.info(
+                "Double modifier switching window current=\(effectiveCurrentPID ?? -1, privacy: .public) targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public)"
+            )
+            activator.activate(targetItem)
+            return
+        }
+
+        guard let targetPID = previousApplicationPID(currentPID: effectiveCurrentPID, orderedItems: orderedItems) else {
             Logger.switcher.info(
                 "Double modifier switch ignored: no previous app current=\(effectiveCurrentPID ?? -1, privacy: .public) previous=\(self.previousAppPID ?? -1, privacy: .public)"
             )
@@ -417,14 +432,32 @@ final class SwitcherStore: ObservableObject {
         activator.activateApplication(pid: targetPID)
     }
 
-    private func previousApplicationPID(currentPID: pid_t?) -> pid_t? {
+    private func previousSwitchTarget(from orderedItems: [WindowItem], currentPID: pid_t?) -> WindowItem? {
+        guard orderedItems.count > 1 else { return nil }
+
+        let effectiveCurrentPID = currentPID ?? orderedItems.first?.pid
+        let targetItem = orderedItems[1]
+        guard targetItem.pid != switchBladePID else { return nil }
+
+        // When the current app is known and the MRU target is a different app,
+        // keep the existing app-level fast path. Window-level targeting matters
+        // when the user is bouncing between sibling windows of the same app.
+        guard let effectiveCurrentPID, targetItem.pid == effectiveCurrentPID else { return nil }
+        return targetItem
+    }
+
+    private func itemsForPreviousSwitchTarget() -> [WindowItem] {
+        orderItems(mruTracker.orderedForDisplay(from: catalog.snapshotVisibleOnly()))
+    }
+
+    private func previousApplicationPID(currentPID: pid_t?, orderedItems: [WindowItem]) -> pid_t? {
         if let previousAppPID,
            previousAppPID != switchBladePID,
            previousAppPID != currentPID {
             return previousAppPID
         }
 
-        return catalog.snapshotVisibleOnly().first { item in
+        return orderedItems.first { item in
             item.pid != switchBladePID && item.pid != currentPID
         }?.pid
     }

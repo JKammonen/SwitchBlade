@@ -8,11 +8,11 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_putsFrontmostFirst", frontmostFirst),
         ("MRU/orderedForDisplay_thenRecentWindowIDs", recentSecond),
         ("MRU/orderedForDisplay_persistedBundleIDs_seedNewSession", persistedSeed),
-        ("MRU/orderedForDisplay_usesSnapshotZorderWithinSameApp", sameAppZOrder),
+        ("MRU/orderedForDisplay_keepsSameAppMRURank", sameAppKeepsMRURank),
         ("MRU/orderedForDisplay_frontmostAppOtherWindows_rankLast", frontmostAppOtherWindowsLast),
         ("MRU/orderedForDisplay_sameAppWindows_keepIndependentRanks", sameAppWindowsNotBundled),
         ("MRU/orderedForDisplay_sameAppCycling_siblingStaysAtPositionOne", sameAppCyclingSiblingAtOne),
-        ("MRU/trackSystemActivation_movesPidWindowsToFront", systemActivation),
+        ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
         ("MRU/rememberSelection_capsAtMaxBundles", capsBundles)
     ]
@@ -57,15 +57,12 @@ enum MRUTrackerTests {
         try expectEqual(ordered.map(\.id), [1, 3, 2])
     }
 
-    // Regression test for the "wrong terminal" bug: when the user directly
-    // clicks a window (bypassing the switcher), z-order reflects the actual
-    // focus order. Within the same app, snapshot z-order must win over the
-    // switcher's own recentWindowIDs order.
-    @MainActor static func sameAppZOrder() throws {
+    // Same-app windows keep the explicit MRU rank instead of being rearranged
+    // as an app-level group.
+    @MainActor static func sameAppKeepsMRURank() throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         // Two terminal windows (same pid), one browser (different pid).
         // Snapshot z-order: browser (frontmost), terminal-B (z-front), terminal-A.
-        // terminal-B is z-front because the user just clicked it directly.
         let snapshot = [
             makeItem(id: 1, pid: 200, isFrontmostApp: true),  // browser
             makeItem(id: 3, pid: 100),                          // terminal-B (z-front)
@@ -75,9 +72,10 @@ enum MRUTrackerTests {
         tracker.rememberSelection(2, in: snapshot)
 
         let ordered = tracker.orderedForDisplay(from: snapshot)
-        // Expected: browser first, then terminal-B (z-front) before terminal-A,
-        // despite terminal-A being more recent in switcher history.
-        try expectEqual(ordered.map(\.id), [1, 3, 2])
+        // Expected: browser first, then terminal-A before terminal-B. Clicking
+        // the app should not move terminal-B ahead unless that exact window is
+        // the current frontmost item.
+        try expectEqual(ordered.map(\.id), [1, 2, 3])
     }
 
     // Regression test for the "another terminal instead of browser" bug:
@@ -155,10 +153,8 @@ enum MRUTrackerTests {
         try expectEqual(ordered.map(\.id), [2, 1, 3])
     }
 
-    // Regression guard: cross-app arrivals must NOT trigger the same-app-sibling
-    // promotion. Position 1 is still the previous *app* when the last selection
-    // was cross-app (even after a system activation moves same-app windows to
-    // the front of recentWindowIDs).
+    // Regression guard: app-level activation must not move every known window
+    // of that pid. The notification does not tell us which window was touched.
     @MainActor static func systemActivation() throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let items = [
@@ -172,9 +168,12 @@ enum MRUTrackerTests {
         tracker.rememberSelection(10, in: items)
         tracker.rememberSelection(20, in: items)
 
-        // System reports pid 100 just activated → its windows move to the front.
+        let before = tracker.recentWindowIDs
+
+        // System reports pid 100 just activated. That should prune stale IDs
+        // only, not reshuffle windows unrelated to a concrete selection.
         tracker.trackSystemActivation(pid: 100, in: items)
-        try expectEqual(tracker.recentWindowIDs.first, 10)
+        try expectEqual(tracker.recentWindowIDs, before)
     }
 
     @MainActor static func pruneDeadIDs() throws {
