@@ -77,19 +77,19 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         menu.addItem(header)
         menu.addItem(.separator())
 
-        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        let settings = NSMenuItem(title: L10n.tr(.menuSettings), action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
 
         menu.addItem(.separator())
 
-        let about = NSMenuItem(title: "About SwitchBlade", action: #selector(openAbout), keyEquivalent: "")
+        let about = NSMenuItem(title: L10n.tr(.menuAbout), action: #selector(openAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "Quit SwitchBlade", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: L10n.tr(.menuQuit), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
         return menu
@@ -100,7 +100,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             let view = SettingsView(settings: SwitchBladeSettings.shared)
             let host = NSHostingController(rootView: view)
             let window = NSWindow(contentViewController: host)
-            window.title = "SwitchBlade Settings"
+            window.title = L10n.tr(.menuSettingsWindowTitle)
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.delegate = self

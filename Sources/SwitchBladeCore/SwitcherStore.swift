@@ -228,9 +228,8 @@ final class SwitcherStore: ObservableObject {
         pendingOpenRequestedAt = Date()
         isSwitching = true
 
-        if !cachedOpenItems.isEmpty {
+        if !cachedOpenItems.isEmpty && isCachedOpenItemsFresh() {
             let openStart = Date()
-            let isStale = !isCachedOpenItemsFresh()
             pendingOpenRequestedAt = nil
             openFromOrderedItems(
                 cachedOpenItems,
@@ -239,14 +238,11 @@ final class SwitcherStore: ObservableObject {
                 permissionMs: 0,
                 snapshotMs: 0,
                 orderMs: 0,
-                source: isStale ? "stale" : "cached"
+                source: "cached"
             )
             Task { @MainActor [weak self] in
                 await Task.yield()
                 self?.refreshPermissionState()
-                if isStale {
-                    await self?.reconcileStaleOpenItems()
-                }
             }
             return
         }

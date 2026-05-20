@@ -82,7 +82,7 @@ struct SwitcherView: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.white.opacity(0.72))
             .background(Circle().fill(Color.black.opacity(0.28)))
-            .help("Settings")
+            .help(L10n.tr(.tooltipSettings))
             .padding(.top, 16)
             .padding(.trailing, 24)
         }

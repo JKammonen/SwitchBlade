@@ -297,6 +297,13 @@ public enum L10n {
         // Badge positions
         case badgeBottom
         case badgeTop
+
+        // Menu bar / status menu
+        case menuSettings
+        case menuAbout
+        case menuQuit
+        case menuSettingsWindowTitle
+        case tooltipSettings
     }
 
     public static func tr(_ key: Key) -> String {
@@ -404,7 +411,13 @@ public enum L10n {
         .selectionWobble:                 "Wobble",
 
         .badgeBottom:                     "Bottom",
-        .badgeTop:                        "Top"
+        .badgeTop:                        "Top",
+
+        .menuSettings:                    "Settings…",
+        .menuAbout:                       "About SwitchBlade",
+        .menuQuit:                        "Quit SwitchBlade",
+        .menuSettingsWindowTitle:         "SwitchBlade Settings",
+        .tooltipSettings:                 "Settings"
     ]
 
     nonisolated(unsafe) private static let finnishTable: [Key: String] = [
@@ -490,6 +503,12 @@ public enum L10n {
         .selectionWobble:                 "Heilunta",
 
         .badgeBottom:                     "Alhaalla",
-        .badgeTop:                        "Ylhäällä"
+        .badgeTop:                        "Ylhäällä",
+
+        .menuSettings:                    "Asetukset…",
+        .menuAbout:                       "Tietoja SwitchBladesta",
+        .menuQuit:                        "Lopeta SwitchBlade",
+        .menuSettingsWindowTitle:         "SwitchBlade-asetukset",
+        .tooltipSettings:                 "Asetukset"
     ]
 }
