@@ -13,7 +13,9 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_switchMovesSelectedWindowOnly", switchMovesSelectedWindowOnly),
         ("MRU/orderedForDisplay_sameAppWindows_keepIndependentRanks", sameAppWindowsNotBundled),
         ("MRU/orderedForDisplay_sameAppSwitchMovesSelectedWindowOnly", sameAppSwitchMovesSelectedWindowOnly),
+        ("MRU/orderedForDisplay_transientMissingWindow_keepsRankWhenItReturns", transientMissingWindowKeepsRank),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
+        ("MRU/trackSystemActivation_doesNotPruneFromStaleStoreSnapshot", systemActivationDoesNotPrune),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
         ("MRU/rememberSelection_capsAtMaxBundles", capsBundles)
     ]
@@ -164,6 +166,28 @@ enum MRUTrackerTests {
         try expectEqual(ordered.map(\.id), [2, 1, 3])
     }
 
+    // Regression guard: a window can be absent from one CGWindowList snapshot
+    // during warmup / Space churn and then reappear. That must not erase its
+    // per-window rank and push it to the fallback tail.
+    @MainActor static func transientMissingWindowKeepsRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let fullSnapshot = [
+            makeItem(id: 1, pid: 100, title: "Terminal A", isFrontmostApp: true),
+            makeItem(id: 2, pid: 100, title: "Terminal B"),
+            makeItem(id: 3, pid: 200, title: "Browser")
+        ]
+        tracker.rememberSelection(2, in: fullSnapshot)
+
+        let transientSnapshot = [
+            makeItem(id: 1, pid: 100, title: "Terminal A", isFrontmostApp: true),
+            makeItem(id: 3, pid: 200, title: "Browser")
+        ]
+        _ = tracker.orderedForDisplay(from: transientSnapshot)
+
+        let orderedAfterReturn = tracker.orderedForDisplay(from: fullSnapshot)
+        try expectEqual(orderedAfterReturn.map(\.id), [1, 2, 3])
+    }
+
     // Regression guard: app-level activation must not move every known window
     // of that pid. The notification does not tell us which window was touched.
     @MainActor static func systemActivation() throws {
@@ -184,6 +208,25 @@ enum MRUTrackerTests {
         // System reports pid 100 just activated. That should prune stale IDs
         // only, not reshuffle windows unrelated to a concrete selection.
         tracker.trackSystemActivation(100, in: items)
+        try expectEqual(tracker.recentWindowIDs, before)
+    }
+
+    @MainActor static func systemActivationDoesNotPrune() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let items = [
+            makeItem(id: 10, pid: 100),
+            makeItem(id: 20, pid: 200),
+            makeItem(id: 30, pid: 300)
+        ]
+        tracker.rememberSelection(30, in: items)
+        tracker.rememberSelection(20, in: items)
+
+        let before = tracker.recentWindowIDs
+        tracker.trackSystemActivation(300, in: [
+            makeItem(id: 10, pid: 100),
+            makeItem(id: 30, pid: 300)
+        ])
+
         try expectEqual(tracker.recentWindowIDs, before)
     }
 

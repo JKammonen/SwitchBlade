@@ -29,11 +29,12 @@ final class MRUTracker {
         self.recentBundleIDs = (userDefaults.array(forKey: storageKey) as? [String]) ?? []
     }
 
-    /// Builds the display order for a snapshot.
+    /// Builds the display order for a snapshot without mutating MRU state.
     ///
     /// Each window keeps its independent rank in `recentWindowIDs`. Same-app
     /// windows are treated like any other windows: if a switch does not involve
-    /// them, their relative positions do not change.
+    /// them, their relative positions do not change. Missing IDs are skipped for
+    /// this snapshot only; a transient CGWindowList miss must not erase rank.
     func orderedForDisplay(from snapshot: [WindowItem]) -> [WindowItem] {
         guard !snapshot.isEmpty else { return [] }
 
@@ -41,9 +42,6 @@ final class MRUTracker {
         // accurate than snapshot.first (CGWindowList z-order lags briefly after
         // an activation).
         let currentFrontmost = snapshot.first(where: { $0.isFrontmostApp }) ?? snapshot[0]
-
-        let liveIDs = Set(snapshot.map(\.id))
-        recentWindowIDs.removeAll { !liveIDs.contains($0) }
 
         let itemsByID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.id, $0) })
 
@@ -96,9 +94,12 @@ final class MRUTracker {
     }
 
     /// System activation only tells us the app PID, not the specific window.
-    /// Do not reshuffle per-window MRU from that coarse signal.
+    /// Do not reshuffle or prune per-window MRU from that coarse signal: the
+    /// live item list may be a stale switcher snapshot, not an authoritative
+    /// window inventory.
     func trackSystemActivation(_ pid: pid_t, in liveItems: [WindowItem]) {
-        pruneToLive(liveItems)
+        // Intentionally no-op. Explicit selections, closes, and quits update
+        // known-live state; activation notifications are app-level only.
     }
 
     /// Removes IDs that no longer correspond to live items.
