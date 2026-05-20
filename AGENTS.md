@@ -137,6 +137,10 @@ Goal: stop the "teen itse nopeasti" reflex and avoid re-litigating settled SCK/A
    `willSleep` deliberately skips warm — no future Cmd+Tab to preempt. Removing
    either half (the timeout-retry or the wake-warm) reintroduces the post-idle
    empty-tile regression that took ~12 commits to land.
+7. **Selected-window activation is AX-only.** Do not call
+   `NSRunningApplication.activate()` from `WindowActivator.activate(_:)` or
+   `snap(_:to:)`; AppKit can raise sibling windows as an app-level side effect.
+   Keep app-level activation for previous-app switching only.
 
 ## Build & Run
 
@@ -180,6 +184,9 @@ log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
 - Prefer existing SwitchBlade patterns: protocol-backed dependencies, `@MainActor`
   store/view state, actor/LockedValue bridges for nonisolated hot paths, and focused
   custom-runner tests.
+- MRU is per-window first: preserve independent ranks for same-app windows. Fallbacks
+  may recover recreated windows by app/title signature, and by app identity only when
+  that app has exactly one visible window.
 - Verification scales with risk: docs-only -> `git diff --check`; focused code ->
   `swift build` + `swift run SwitchBladeTests`; UI/lifecycle changes also need manual
   app verification when possible.

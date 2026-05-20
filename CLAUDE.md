@@ -30,7 +30,7 @@ SwitcherStore  ──►  WindowCatalog  ──►  SCContentCache (actor)
    │   PreviewCacheStore  (windowID + signature LRU)
    │   │
    │   ▼
-   MRUTracker  (in-memory recent IDs + persisted recent bundle IDs)
+   MRUTracker  (in-memory recent IDs + signatures + persisted bundle IDs)
    │
    ▼
 SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherView)
@@ -51,11 +51,11 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 | `SwitcherStore` | `@MainActor ObservableObject`. Holds `items`, `selectedID`, `isVisible`. Orchestrates everything else. |
 | `WindowCatalog` | `Sendable`. Window enumeration + ScreenCaptureKit capture. Owns `SCContentCache` actor. |
 | `SCContentCache` | Actor. Caches `SCShareableContent` with staleness tracking (5 s threshold). |
-| `WindowActivator` | `Sendable`. Activate / close / quit / hide. Pure AX + NSRunningApplication. |
+| `WindowActivator` | `Sendable`. Activate / close / quit / hide. Selected-window activate/snap are AX-only; app-level activate is only for previous-app switching. |
 | `PermissionService` | Preflight checks for Accessibility + Screen Recording. Never calls `CGRequest*`. |
 | `SwitcherPanelController` | NSPanel host. CAShapeLayer mask for antialiased corners. Picks cursor's screen. |
 | `HotkeyMonitor` | CGEventTap + NSEvent monitors for Cmd+Tab. |
-| `MRUTracker` | In-memory recent IDs + persisted recent bundle IDs (UserDefaults, cap 30). |
+| `MRUTracker` | In-memory recent window IDs + app/title signatures + persisted recent bundle IDs (UserDefaults, cap 30). Recovers single-window apps by app identity when ID/title churns; refuses to guess among multiple same-app windows. |
 | `PreviewCacheStore` | Two-level LRU (windowID + signature). Capacity 40. Stale-while-revalidate. |
 | `ClickOutsideMonitor` | Global + local mouse-down monitors. Closes panel on click outside card. |
 | `SwitcherPerformanceMetrics` | Rolling 100-sample p50/p95/p99 for cold-open + first-preview-batch. |
@@ -121,3 +121,10 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   current Space, all Spaces, and current app.
 - **Permission dialog reappears** → never add `CGRequest*` calls. Use `CGPreflight*` +
   NSAlert that links to System Settings.
+- **Single window jumps to switcher tail** → check whether the app recreates its
+  window with a new CGWindowID and title. `MRUTracker` should keep rank by
+  app identity only when that app has exactly one visible window.
+- **All windows of an app jump forward on activation** → do not add
+  `NSRunningApplication.activate()` back to selected-window activate/snap paths.
+  Use AX raise/focus for the selected window; app-level activation is reserved
+  for previous-app switching.
