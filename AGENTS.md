@@ -137,10 +137,11 @@ Goal: stop the "teen itse nopeasti" reflex and avoid re-litigating settled SCK/A
    `willSleep` deliberately skips warm — no future Cmd+Tab to preempt. Removing
    either half (the timeout-retry or the wake-warm) reintroduces the post-idle
    empty-tile regression that took ~12 commits to land.
-7. **Selected-window activation is AX-only.** Do not call
-   `NSRunningApplication.activate()` from `WindowActivator.activate(_:)` or
-   `snap(_:to:)`; AppKit can raise sibling windows as an app-level side effect.
-   Keep app-level activation for previous-app switching only.
+7. **Selected-window activation is AX-targeted before app activation.** AX
+   raise/focus alone does not bring many apps frontmost. Do not activate the app
+   before targeting the selected AX window; AppKit can otherwise raise the
+   app's previously-main sibling window. The intended sequence is AX
+   raise/main/focus first, then `NSRunningApplication.activate(options: [])`.
 
 ## Build & Run
 

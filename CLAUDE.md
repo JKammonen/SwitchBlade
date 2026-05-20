@@ -51,7 +51,7 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 | `SwitcherStore` | `@MainActor ObservableObject`. Holds `items`, `selectedID`, `isVisible`. Orchestrates everything else. |
 | `WindowCatalog` | `Sendable`. Window enumeration + ScreenCaptureKit capture. Owns `SCContentCache` actor. |
 | `SCContentCache` | Actor. Caches `SCShareableContent` with staleness tracking (5 s threshold). |
-| `WindowActivator` | `Sendable`. Activate / close / quit / hide. Selected-window activate/snap are AX-only; app-level activate is only for previous-app switching. |
+| `WindowActivator` | `Sendable`. Activate / close / quit / hide. Selected-window activate/snap target the AX window first, then activate the app so the target can become frontmost. |
 | `PermissionService` | Preflight checks for Accessibility + Screen Recording. Never calls `CGRequest*`. |
 | `SwitcherPanelController` | NSPanel host. CAShapeLayer mask for antialiased corners. Picks cursor's screen. |
 | `HotkeyMonitor` | CGEventTap + NSEvent monitors for Cmd+Tab. |
@@ -133,7 +133,7 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 - **Single window jumps to switcher tail** → check whether the app recreates its
   window with a new CGWindowID and title. `MRUTracker` should keep rank by
   app identity only when that app has exactly one visible window.
-- **All windows of an app jump forward on activation** → do not add
-  `NSRunningApplication.activate()` back to selected-window activate/snap paths.
-  Use AX raise/focus for the selected window; app-level activation is reserved
-  for previous-app switching.
+- **All windows of an app jump forward on activation** → verify
+  `WindowActivator` targets the selected AX window before calling
+  `NSRunningApplication.activate(options: [])`. AX-only activation does not bring
+  many apps frontmost; app-first activation can raise sibling windows.

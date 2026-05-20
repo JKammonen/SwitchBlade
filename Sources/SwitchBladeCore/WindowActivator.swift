@@ -10,18 +10,16 @@ final class WindowActivator: WindowActivating, Sendable {
 
     func activate(_ item: WindowItem) {
         log(action: "activate", item: item)
-        // Do not call NSRunningApplication.activate() here: even without
-        // .activateAllWindows, AppKit can raise the app's sibling windows as
-        // an app-level side effect. AX targets the selected window only.
-        // kAXRaiseAction must run on the main thread; commitSelection() defers
-        // this call by one RunLoop cycle after hiding the panel.
-        raiseMatchingWindow(item)
+        // Select the target window first, then activate the app. AX raise/focus
+        // alone does not make many apps frontmost, while app activation before
+        // AX targeting can raise the app's previously-main sibling window.
+        _ = raiseMatchingWindow(item)
+        activateRunningApplication(pid: item.pid)
     }
 
     func activateApplication(pid: pid_t) {
-        guard pid != getpid() else { return }
         Logger.activator.info("activate app pid=\(pid, privacy: .public)")
-        NSRunningApplication(processIdentifier: pid)?.activate(options: [])
+        activateRunningApplication(pid: pid)
     }
 
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
@@ -56,6 +54,7 @@ final class WindowActivator: WindowActivating, Sendable {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        activateRunningApplication(pid: item.pid)
         return true
     }
 
@@ -86,10 +85,11 @@ final class WindowActivator: WindowActivating, Sendable {
         )
     }
 
-    private func raiseMatchingWindow(_ item: WindowItem) {
+    @discardableResult
+    private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
         let appElement = AXUIElementCreateApplication(item.pid)
         guard let window = matchingWindow(for: appElement, item: item) else {
-            return
+            return false
         }
 
         if item.isMinimized {
@@ -98,6 +98,17 @@ final class WindowActivator: WindowActivating, Sendable {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        return true
+    }
+
+    @discardableResult
+    private func activateRunningApplication(pid: pid_t) -> Bool {
+        guard pid != getpid(),
+              let app = NSRunningApplication(processIdentifier: pid) else {
+            return false
+        }
+
+        return app.activate(options: [])
     }
 
     private func closeMatchingWindow(_ item: WindowItem) -> Bool {
