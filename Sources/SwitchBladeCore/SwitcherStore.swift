@@ -655,31 +655,6 @@ final class SwitcherStore: ObservableObject {
         }.value
     }
 
-    private func reconcileStaleOpenItems() async {
-        guard isVisible else { return }
-        let freshSnapshot = await snapshotVisibleOnlyOffMain()
-        guard isVisible else { return }
-        let freshOrdered = orderItems(mruTracker.orderedForDisplay(from: freshSnapshot))
-        updateCachedOpenItems(freshOrdered)
-        let freshIDs = Set(freshOrdered.map(\.id))
-        let currentIDs = Set(items.map(\.id))
-        let newItems = freshOrdered
-            .filter { !currentIDs.contains($0.id) }
-            .map(previewCache.hydrated)
-        // Bulk replace: keep surviving items in display order, append new ones.
-        // Avoids calling removeItem(withID:) per-item, which would invoke cancel()
-        // prematurely if all stale items happen to be gone from the fresh snapshot.
-        items = items.filter { freshIDs.contains($0.id) } + newItems
-        mruTracker.pruneToLive(items)
-        if items.isEmpty {
-            cancel()
-            return
-        }
-        if !items.contains(where: { $0.id == selectedID }) {
-            selectedID = items.first?.id
-        }
-    }
-
     private func showWithPreviews() {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
             previewGeneration += 1
