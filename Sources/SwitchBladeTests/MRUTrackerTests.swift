@@ -15,6 +15,8 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_sameAppSwitchMovesSelectedWindowOnly", sameAppSwitchMovesSelectedWindowOnly),
         ("MRU/orderedForDisplay_transientMissingWindow_keepsRankWhenItReturns", transientMissingWindowKeepsRank),
         ("MRU/orderedForDisplay_recreatedWindow_keepsRankBySignature", recreatedWindowKeepsRankBySignature),
+        ("MRU/orderedForDisplay_singleWindowTitleChange_keepsRankByAppIdentity", singleWindowTitleChangeKeepsRankByAppIdentity),
+        ("MRU/orderedForDisplay_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowTitleChangeDoesNotGuessByAppIdentity),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
         ("MRU/trackSystemActivation_doesNotPruneFromStaleStoreSnapshot", systemActivationDoesNotPrune),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
@@ -211,6 +213,46 @@ enum MRUTrackerTests {
 
         let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
         try expectEqual(ordered.map(\.id), [1, 20, 3])
+    }
+
+    @MainActor static func singleWindowTitleChangeKeepsRankByAppIdentity() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 2, pid: 200, appName: "Ghostty", title: "shell"),
+            makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        let recreatedSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs"),
+            makeItem(id: 20, pid: 200, appName: "Ghostty", title: "vim")
+        ]
+
+        let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
+        try expectEqual(ordered.map(\.id), [1, 20, 3])
+    }
+
+    @MainActor static func multiWindowTitleChangeDoesNotGuessByAppIdentity() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 2, pid: 200, appName: "Ghostty", title: "shell A"),
+            makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs"),
+            makeItem(id: 4, pid: 200, appName: "Ghostty", title: "shell B")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        let recreatedSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs"),
+            makeItem(id: 20, pid: 200, appName: "Ghostty", title: "vim A"),
+            makeItem(id: 40, pid: 200, appName: "Ghostty", title: "vim B")
+        ]
+
+        let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
+        try expectEqual(ordered.map(\.id), [1, 3, 20, 40])
     }
 
     // Regression guard: app-level activation must not move every known window

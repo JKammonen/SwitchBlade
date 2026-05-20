@@ -10,12 +10,11 @@ final class WindowActivator: WindowActivating, Sendable {
 
     func activate(_ item: WindowItem) {
         log(action: "activate", item: item)
-        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [])
-        // raiseMatchingWindow must run on the main thread: kAXRaiseAction internally
-        // calls makeKeyAndOrderFront: which is AppKit-main-thread-only. Running it
-        // off-thread causes EXC_BREAKPOINT ("Must only be used from the main thread").
-        // The panel is already dismissed before this point because commitSelection()
-        // defers the entire activate() call past one RunLoop cycle (Task @MainActor).
+        // Do not call NSRunningApplication.activate() here: even without
+        // .activateAllWindows, AppKit can raise the app's sibling windows as
+        // an app-level side effect. AX targets the selected window only.
+        // kAXRaiseAction must run on the main thread; commitSelection() defers
+        // this call by one RunLoop cycle after hiding the panel.
         raiseMatchingWindow(item)
     }
 
@@ -54,7 +53,6 @@ final class WindowActivator: WindowActivating, Sendable {
             return false
         }
 
-        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [])
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
