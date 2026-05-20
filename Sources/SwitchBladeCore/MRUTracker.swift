@@ -97,7 +97,7 @@ final class MRUTracker {
 
     /// System activation only tells us the app PID, not the specific window.
     /// Do not reshuffle per-window MRU from that coarse signal.
-    func trackSystemActivation(pid: pid_t, in liveItems: [WindowItem]) {
+    func trackSystemActivation(_ pid: pid_t, in liveItems: [WindowItem]) {
         pruneToLive(liveItems)
     }
 

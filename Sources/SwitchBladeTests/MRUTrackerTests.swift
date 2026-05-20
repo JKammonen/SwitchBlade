@@ -183,7 +183,7 @@ enum MRUTrackerTests {
 
         // System reports pid 100 just activated. That should prune stale IDs
         // only, not reshuffle windows unrelated to a concrete selection.
-        tracker.trackSystemActivation(pid: 100, in: items)
+        tracker.trackSystemActivation(100, in: items)
         try expectEqual(tracker.recentWindowIDs, before)
     }
 

@@ -110,7 +110,7 @@ final class SwitcherStore: ObservableObject {
                 previousAppPID = currentAppPID
                 currentAppPID = pid
             }
-            mruTracker.trackSystemActivation(pid: pid, in: items)
+            mruTracker.trackSystemActivation(pid, in: items)
         }
         // Opportunistic cache warmup — gated on recent-use so we don't burn
         // cycles for users who haven't touched the switcher in a while.
