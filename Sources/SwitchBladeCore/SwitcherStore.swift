@@ -485,7 +485,7 @@ final class SwitcherStore: ObservableObject {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
             return sourceItems
         }
-        return sourceItems.map(previewCache.hydrated)
+        return sourceItems.map { previewCache.hydrated($0, liveItems: sourceItems) }
     }
 
     private func orderItems(_ sourceItems: [WindowItem]) -> [WindowItem] {
@@ -755,7 +755,9 @@ final class SwitcherStore: ObservableObject {
         let newItems = minimized
             .filter { !existingIDs.contains($0.id) }
             .map { item in
-                SwitchBladeSettings.shared.previewMode == .iconsOnly ? item : previewCache.hydrated(item)
+                SwitchBladeSettings.shared.previewMode == .iconsOnly
+                    ? item
+                    : previewCache.hydrated(item, liveItems: items + minimized)
             }
         guard !newItems.isEmpty else { return }
         items = items + newItems

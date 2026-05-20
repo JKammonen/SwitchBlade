@@ -7,6 +7,9 @@ import CoreGraphics
 /// 2. Fallback key — "pid::displayTitle" signature. Hits when the windowID
 ///    changed (window recreated, e.g. after a doc reload) but the same
 ///    process is still showing the same title; bounds may differ.
+/// 3. Narrow app-identity fallback. If an app currently has exactly one live
+///    window, a recreated window can reuse that app's last preview even when
+///    both ID and title changed.
 ///
 /// Kept off SwitcherStore so the storage logic can be reasoned about in
 /// isolation; the store just feeds it the live items + fresh captures and
@@ -15,10 +18,12 @@ import CoreGraphics
 final class PreviewCacheStore {
     private var byID: LRUDictionary<CGWindowID, CachedPreview>
     private var bySignature: LRUDictionary<String, CachedPreview>
+    private var byAppIdentity: LRUDictionary<String, CachedPreview>
 
     init(capacity: Int = 40) {
         byID = LRUDictionary(capacity: capacity)
         bySignature = LRUDictionary(capacity: capacity)
+        byAppIdentity = LRUDictionary(capacity: capacity)
     }
 
     struct CachedPreview {
@@ -35,11 +40,16 @@ final class PreviewCacheStore {
     /// sees an instant, slightly off-aspect preview instead of a blank tile
     /// for ~100 ms. Window IDs are stable for the lifetime of the window in
     /// macOS, so there's no risk of showing the wrong window's image.
-    func hydrated(_ item: WindowItem) -> WindowItem {
+    func hydrated(_ item: WindowItem, liveItems: [WindowItem]) -> WindowItem {
         if let cached = byID[item.windowID] {
             return item.withPreview(cached.image)
         }
         if let cached = bySignature[signature(for: item)] {
+            return item.withPreview(cached.image)
+        }
+        let identity = appIdentity(for: item)
+        if liveItems.filter({ appIdentity(for: $0) == identity }).count == 1,
+           let cached = byAppIdentity[identity] {
             return item.withPreview(cached.image)
         }
         return item
@@ -58,6 +68,7 @@ final class PreviewCacheStore {
             return [:]
         }
         let itemsByID = Dictionary(uniqueKeysWithValues: liveItems.map { ($0.windowID, $0) })
+        let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: liveItems, appIdentity: appIdentity(for:))
         let isBlankStorm = Self.isBlankStorm(previews)
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
@@ -68,6 +79,9 @@ final class PreviewCacheStore {
             let cached = CachedPreview(image: image, bounds: item.bounds)
             byID[windowID] = cached
             bySignature[signature(for: item)] = cached
+            if singleWindowAppIdentities.contains(appIdentity(for: item)) {
+                byAppIdentity[appIdentity(for: item)] = cached
+            }
             accepted[windowID] = image
         }
         keepOnlyLive(liveItems)
@@ -77,10 +91,15 @@ final class PreviewCacheStore {
     private func keepOnlyLive(_ items: [WindowItem]) {
         byID.keepOnly(Set(items.map(\.windowID)))
         bySignature.keepOnly(Set(items.map(signature(for:))))
+        byAppIdentity.keepOnly(Self.singleWindowAppIdentities(in: items, appIdentity: appIdentity(for:)))
     }
 
     private func signature(for item: WindowItem) -> String {
         "\(item.pid)::\(item.displayTitle)"
+    }
+
+    private func appIdentity(for item: WindowItem) -> String {
+        item.bundleIdentifier ?? item.appName
     }
 
     private func shouldRejectTransientBlankCapture(
@@ -149,5 +168,16 @@ final class PreviewCacheStore {
             count + (isMostlyWhite(image) ? 1 : 0)
         }
         return Double(whiteCount) / Double(previews.count) >= 0.75
+    }
+
+    private static func singleWindowAppIdentities(
+        in items: [WindowItem],
+        appIdentity: (WindowItem) -> String
+    ) -> Set<String> {
+        Set(
+            Dictionary(grouping: items, by: appIdentity)
+                .filter { $0.value.count == 1 }
+                .map(\.key)
+        )
     }
 }
