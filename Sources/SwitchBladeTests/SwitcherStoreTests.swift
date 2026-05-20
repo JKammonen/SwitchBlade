@@ -656,10 +656,11 @@ enum SwitcherStoreTests {
         let activator = MockWindowActivator()
         let permissions = MockPermissionService()
         let mruTracker = MRUTracker(userDefaults: userDefaults)
+        // Seed MRU so that position 1 is a same-app sibling (A before Other App).
         mruTracker.rememberSelection(2, in: [
-            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
             makeItem(id: 1, pid: 100, title: "A"),
-            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true)
+            makeItem(id: 3, pid: 200, title: "Other App")
         ])
         let store = SwitcherStore(
             catalog: catalog,
@@ -671,14 +672,16 @@ enum SwitcherStoreTests {
             switchBladePID: 999
         )
 
+        // Snapshot: B frontmost. orderedForDisplay → [B, A, Other]. Position 1 = A (same pid).
         catalog.visibleItems = [
             makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
-            makeItem(id: 3, pid: 200, title: "Other App"),
-            makeItem(id: 1, pid: 100, title: "A")
+            makeItem(id: 1, pid: 100, title: "A"),
+            makeItem(id: 3, pid: 200, title: "Other App")
         ]
 
         store.switchToPreviousApplication()
 
+        // Position 1 = A (same pid 100) → window-level switch to A.
         try expectEqual(activator.activatedItems.map(\.id), [1])
         try expect(activator.activatedApplicationPIDs.isEmpty)
 
@@ -690,6 +693,7 @@ enum SwitcherStoreTests {
 
         store.switchToPreviousApplication()
 
+        // Position 1 = B (same pid 100) → window-level bounce back to B.
         try expectEqual(activator.activatedItems.map(\.id), [1, 2])
         try expect(activator.activatedApplicationPIDs.isEmpty)
     }
@@ -705,11 +709,14 @@ enum SwitcherStoreTests {
         let activator = MockWindowActivator()
         let permissions = MockPermissionService()
         let mruTracker = MRUTracker(userDefaults: userDefaults)
+        // Seed MRU so position 1 is a same-app sibling (A before Other App).
         mruTracker.rememberSelection(2, in: [
-            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
             makeItem(id: 1, pid: 100, title: "A"),
-            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true)
+            makeItem(id: 3, pid: 200, title: "Other App")
         ])
+        // initialFrontmostAppPID is 200 (stale — store hasn't received the activation
+        // notification yet). The snapshot already shows B (pid=100) as frontmost.
         let store = SwitcherStore(
             catalog: catalog,
             activator: activator,
@@ -720,10 +727,13 @@ enum SwitcherStoreTests {
             switchBladePID: 999
         )
 
+        // Snapshot pid 100 must win over stale currentAppPID 200.
+        // orderedForDisplay → [B, A, Other]. effectiveCurrentPID = 100 (from snapshot).
+        // Position 1 = A (pid 100) → window-level switch to A.
         catalog.visibleItems = [
             makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
-            makeItem(id: 3, pid: 200, title: "Other App"),
-            makeItem(id: 1, pid: 100, title: "A")
+            makeItem(id: 1, pid: 100, title: "A"),
+            makeItem(id: 3, pid: 200, title: "Other App")
         ]
 
         store.switchToPreviousApplication()

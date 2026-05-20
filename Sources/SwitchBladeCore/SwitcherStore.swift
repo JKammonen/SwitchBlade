@@ -436,9 +436,9 @@ final class SwitcherStore: ObservableObject {
         guard orderedItems.count > 1 else { return nil }
 
         guard let effectiveCurrentPID = currentPID ?? orderedItems.first?.pid else { return nil }
-        return orderedItems.dropFirst().first { item in
-            item.pid == effectiveCurrentPID && item.pid != switchBladePID
-        }
+        let candidate = orderedItems[1]
+        guard candidate.pid == effectiveCurrentPID, candidate.pid != switchBladePID else { return nil }
+        return candidate
     }
 
     private func itemsForPreviousSwitchTarget() -> [WindowItem] {

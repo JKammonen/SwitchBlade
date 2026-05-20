@@ -10,7 +10,7 @@ final class WindowActivator: WindowActivating, Sendable {
 
     func activate(_ item: WindowItem) {
         log(action: "activate", item: item)
-        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
+        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [])
         // raiseMatchingWindow must run on the main thread: kAXRaiseAction internally
         // calls makeKeyAndOrderFront: which is AppKit-main-thread-only. Running it
         // off-thread causes EXC_BREAKPOINT ("Must only be used from the main thread").
@@ -22,7 +22,7 @@ final class WindowActivator: WindowActivating, Sendable {
     func activateApplication(pid: pid_t) {
         guard pid != getpid() else { return }
         Logger.activator.info("activate app pid=\(pid, privacy: .public)")
-        NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [])
     }
 
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
@@ -54,7 +54,7 @@ final class WindowActivator: WindowActivating, Sendable {
             return false
         }
 
-        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [.activateAllWindows])
+        NSRunningApplication(processIdentifier: item.pid)?.activate(options: [])
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
