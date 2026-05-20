@@ -100,6 +100,15 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   feature code.
 - Commit messages should be plain and specific, without over-claiming readiness.
 
+## Workflow Reminders
+
+- After two plausible fixes fail the same live symptom, add diagnostics before
+  another heuristic.
+- Use scout/reviewer agents for cross-module uncertainty, history checks, and
+  test-gap review; keep roles bounded.
+- Tests must say what they prove. macOS AX/z-order/TCC behavior still needs a
+  signed-app live check when that is the reported failure.
+
 ## Known Gaps
 
 - No type-to-filter

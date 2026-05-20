@@ -191,3 +191,52 @@ log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
   `swift build` + `swift run SwitchBladeTests`; UI/lifecycle changes also need manual
   app verification when possible.
 - Stage exact files only, never `git add .`.
+
+## Parallel Agent / Scout Routing
+
+Use parallel agents, scouts, or reviewer roles when the task has separable
+uncertainty, not by default. Good triggers:
+
+- the bug crosses 2+ modules, e.g. store/order + catalog + activation
+- the same user-visible symptom survives 2 plausible fixes
+- commit history or prior decisions matter to the next change
+- implementation and test design can proceed in parallel
+- a review pass is likely to catch a regression before commit
+
+Prefer bounded roles:
+
+- scout: confirm ownership, patterns, and relevant tests
+- regression hunter: inspect history and prior decisions
+- test reviewer: check what tests prove and what they do not
+- docs/context updater: update `AGENTS.md` / `CLAUDE.md` after behavior settles
+
+Do not use parallel agents for typo/docs-only/simple one-file changes, tightly
+coupled edits where agents would touch the same files, or live GUI verification
+that requires one operator interpreting the desktop.
+
+## Persistent Live-Symptom Rule
+
+If the same reported behavior survives two plausible fixes and green tests, stop
+adding heuristics. Before the next behavioral fix:
+
+1. Write the current bug model in one sentence.
+2. Add privacy-safe diagnostics or a targeted reproduction hook.
+3. Build/sign the app and reproduce the real symptom once when possible.
+4. Use observed diagnostic output to choose the next fix.
+5. Add a regression test for the proven branch.
+6. State what the test proves and what remains live-integration-only.
+
+For MRU/order bugs, diagnostics should log only IDs, pid, app identity, signature
+match/fallback path, frontmost marker, and final rank by default. Do not log
+window titles unless Janne explicitly asks for a one-off diagnostic build.
+
+## Capability Escalation
+
+Use the strongest available reasoning/model mode for cross-module bugs, repeated
+failed fixes, architecture decisions, or high-risk refactors. Use normal/default
+mode for narrow implementation once the bug model is clear.
+
+Escalate from direct editing to scout/review/diagnostics when uncertainty is
+about the system, not syntax. Do not substitute a larger model for live
+verification when the failure depends on macOS AX, CGWindowList, TCC, signing, or
+real app behavior.
