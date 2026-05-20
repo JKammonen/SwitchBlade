@@ -49,6 +49,7 @@ enum SwitcherStoreTests {
         ("Store/switchToPreviousApplication_sameAppWindowsBounceInsteadOfPickingOtherApp", switchToPreviousApplication_sameAppWindowsBounceInsteadOfPickingOtherApp),
         ("Store/switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale", switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale),
         ("Store/switchToPreviousApplication_repeatedCallsCanBounceBetweenTwoApps", switchToPreviousApplication_bouncesBetweenTwoApps),
+        ("Store/handleModifierMouseSwitch_visible_commitsSelection", handleModifierMouseSwitch_visibleCommitsSelection),
         ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
@@ -769,6 +770,30 @@ enum SwitcherStoreTests {
         store.switchToPreviousApplication()
 
         try expectEqual(activator.activatedApplicationPIDs, [101, 202])
+    }
+
+    @MainActor static func handleModifierMouseSwitch_visibleCommitsSelection() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
+
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300)
+        ]
+        store.cycle(forward: true)
+
+        try expect(store.isVisible)
+        try expectEqual(store.selectedID, 2)
+
+        store.handleModifierMouseSwitch()
+        await runPendingMainTasks()
+
+        try expectEqual(activator.activatedItems.map(\.id), [2])
+        try expect(!store.isVisible)
     }
 
     @MainActor static func snap_itemRoutesToActivator() async throws {

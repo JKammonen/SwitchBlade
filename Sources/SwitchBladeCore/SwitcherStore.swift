@@ -384,6 +384,21 @@ final class SwitcherStore: ObservableObject {
         onOpenSettings?()
     }
 
+    func handleModifierMouseSwitch() {
+        guard SwitchBladeSettings.shared.doubleModifierSwitchEnabled else {
+            Logger.switcher.info("Modifier mouse switch ignored: setting disabled")
+            return
+        }
+
+        guard !isVisible, !isSwitching else {
+            Logger.switcher.info("Modifier mouse switch committing current selection")
+            commitSelection()
+            return
+        }
+
+        switchToPreviousApplication()
+    }
+
     func switchToPreviousApplication() {
         guard SwitchBladeSettings.shared.doubleModifierSwitchEnabled else {
             Logger.switcher.info("Double modifier switch ignored: setting disabled")
