@@ -696,6 +696,19 @@ enum SwitcherStoreTests {
         // Position 1 = B (same pid 100) → window-level bounce back to B.
         try expectEqual(activator.activatedItems.map(\.id), [1, 2])
         try expect(activator.activatedApplicationPIDs.isEmpty)
+
+        catalog.visibleItems = [
+            makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true),
+            makeItem(id: 1, pid: 100, title: "A"),
+            makeItem(id: 3, pid: 200, title: "Other App")
+        ]
+
+        store.switchToPreviousApplication()
+
+        // Third press: still bouncing within the same-app pair (A↔B cycling is sticky).
+        // Cross-app fallback is not triggered while a same-app sibling sits at position 1.
+        try expectEqual(activator.activatedItems.map(\.id), [1, 2, 1])
+        try expect(activator.activatedApplicationPIDs.isEmpty)
     }
 
     @MainActor static func switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale() async throws {

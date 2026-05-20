@@ -435,14 +435,14 @@ final class SwitcherStore: ObservableObject {
     private func previousSwitchTarget(from orderedItems: [WindowItem], currentPID: pid_t?) -> WindowItem? {
         guard orderedItems.count > 1 else { return nil }
 
-        guard let effectiveCurrentPID = currentPID ?? orderedItems.first?.pid else { return nil }
+        guard let effectiveCurrentPID = currentPID else { return nil }
         let candidate = orderedItems[1]
         guard candidate.pid == effectiveCurrentPID, candidate.pid != switchBladePID else { return nil }
         return candidate
     }
 
     private func itemsForPreviousSwitchTarget() -> [WindowItem] {
-        orderItems(mruTracker.orderedForDisplay(from: catalog.snapshotVisibleOnly()))
+        mruTracker.orderedForDisplay(from: catalog.snapshotVisibleOnly())
     }
 
     private func previousApplicationPID(currentPID: pid_t?, orderedItems: [WindowItem]) -> pid_t? {
@@ -547,11 +547,19 @@ final class SwitcherStore: ObservableObject {
 
         updateCachedOpenItems(orderedItems)
         let hydrateStart = Date()
-        items = hydratedForDisplay(orderedItems)
+        let hydratedItems = hydratedForDisplay(orderedItems)
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
         // Preselect the second item so a tap-Cmd+Tab+release toggles between
         // the two most-recent windows. With only one item, select that.
-        selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
+        // Disable animations so tiles appear at their final positions instantly
+        // on open — sliding/scaling on open is distracting; animation is reserved
+        // for explicit Tab/arrow navigation while the panel is already visible.
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            items = hydratedItems
+            selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
+        }
 
         let cachedHits = items.filter { $0.preview != nil }.count
         let coldMs = Date().timeIntervalSince(openStart) * 1000
