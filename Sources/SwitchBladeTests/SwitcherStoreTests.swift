@@ -18,6 +18,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
+        ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -251,6 +252,42 @@ enum SwitcherStoreTests {
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [3, 4])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
+    }
+
+    @MainActor static func requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit() async throws {
+        let (store, catalog, activator, _) = makeStore(cachedOpenItemsMaxAge: -1)
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        store.cycle(forward: true)
+        store.cancel()
+
+        catalog.visibleItems = [
+            makeItem(id: 3, isFrontmostApp: true),
+            makeItem(id: 4)
+        ]
+        catalog.visibleSnapshotDelayNanoseconds = 100_000_000
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 2])
+
+        store.commitSelection()
+        await runPendingMainTasks()
+
+        try expect(!store.isVisible)
+        try expectEqual(activator.activatedItems.map(\.id), [2])
+
+        catalog.visibleSnapshotDelayNanoseconds = 0
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        await runPendingMainTasks()
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [3, 4])
     }
 
     // MARK: ordering

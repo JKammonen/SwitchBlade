@@ -34,6 +34,7 @@ final class SwitcherStore: ObservableObject {
 
     private var previewLoadTask: Task<Void, Never>?
     private var openRefreshTask: Task<Void, Never>?
+    private var staleCacheHealTask: Task<Void, Never>?
     private var contentCacheWarmupTask: Task<Void, Never>?
     private var openItemsWarmupTask: Task<Void, Never>?
     private var previewWarmupTask: Task<Void, Never>?
@@ -45,6 +46,8 @@ final class SwitcherStore: ObservableObject {
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
+    /// True while the visible switcher still shows a stale cached list.
+    private var isShowingStaleCachedItems = false
     private var currentAppPID: pid_t?
     private var previousAppPID: pid_t?
 
@@ -124,6 +127,7 @@ final class SwitcherStore: ObservableObject {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
+        staleCacheHealTask?.cancel()
         previewWarmupTask?.cancel()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
@@ -244,11 +248,11 @@ final class SwitcherStore: ObservableObject {
                 snapshotMs: 0,
                 orderMs: 0,
                 source: cacheIsFresh ? "cached" : "stale-cached",
-                updateCachedItems: cacheIsFresh
+                updateCachedItems: cacheIsFresh,
+                showingStaleCachedItems: !cacheIsFresh
             )
-            let generation = previewGeneration
             if !cacheIsFresh {
-                refreshOpenItemsAfterCachedOpen(generation: generation)
+                scheduleStaleCacheHealingIfNeeded()
             }
             Task { @MainActor [weak self] in
                 await Task.yield()
@@ -557,6 +561,7 @@ final class SwitcherStore: ObservableObject {
         isVisible = false
         isSwitching = false
         hoverEnabled = false
+        isShowingStaleCachedItems = false
         commitWhenOpenCompletes = false
         pendingOpenRequestedAt = nil
         onHide?()
@@ -572,7 +577,8 @@ final class SwitcherStore: ObservableObject {
         snapshotMs: Double,
         orderMs: Double,
         source: String,
-        updateCachedItems: Bool = true
+        updateCachedItems: Bool = true,
+        showingStaleCachedItems: Bool = false
     ) {
         guard !orderedItems.isEmpty else {
             isSwitching = false
@@ -584,6 +590,7 @@ final class SwitcherStore: ObservableObject {
         if updateCachedItems {
             updateCachedOpenItems(orderedItems)
         }
+        isShowingStaleCachedItems = showingStaleCachedItems
         let hydrateStart = Date()
         let hydratedItems = hydratedForDisplay(orderedItems)
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
@@ -667,15 +674,20 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func refreshOpenItemsAfterCachedOpen(generation: Int) {
-        openRefreshTask = Task { @MainActor [weak self] in
+    private func scheduleStaleCacheHealingIfNeeded() {
+        guard staleCacheHealTask == nil else {
+            return
+        }
+
+        staleCacheHealTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.staleCacheHealTask = nil }
 
             let snapshotStart = Date()
             let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
 
-            guard !Task.isCancelled, self.isVisible, self.previewGeneration == generation else { return }
+            guard !Task.isCancelled else { return }
 
             let orderStart = Date()
             let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
@@ -683,31 +695,43 @@ final class SwitcherStore: ObservableObject {
             guard !orderedItems.isEmpty else { return }
 
             self.updateCachedOpenItems(orderedItems)
-            let previousSelectedID = self.selectedID
-            let hydrateStart = Date()
-            let hydratedItems = self.hydratedForDisplay(orderedItems)
-            let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
 
-            var t = Transaction()
-            t.disablesAnimations = true
-            withTransaction(t) {
-                self.items = hydratedItems
-                if let previousSelectedID, hydratedItems.contains(where: { $0.id == previousSelectedID }) {
-                    self.selectedID = previousSelectedID
-                } else {
-                    self.selectedID = hydratedItems.indices.contains(1) ? hydratedItems[1].id : hydratedItems.first?.id
+            if self.isVisible, self.isShowingStaleCachedItems {
+                let hydrateMs = self.applyStaleCacheRefresh(orderedItems)
+                if PerformanceLoggingState.mode != .off {
+                    Logger.switcher.info(
+                        "Open-items refresh after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public)"
+                    )
                 }
-            }
-
-            self.previewLoadTask?.cancel()
-            self.showWithPreviews()
-
-            if PerformanceLoggingState.mode != .off {
+            } else if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
-                    "Open-items refresh after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public)"
+                    "Open-items cache healed after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
                 )
             }
         }
+    }
+
+    private func applyStaleCacheRefresh(_ orderedItems: [WindowItem]) -> Double {
+        isShowingStaleCachedItems = false
+        let previousSelectedID = selectedID
+        let hydrateStart = Date()
+        let hydratedItems = hydratedForDisplay(orderedItems)
+        let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
+
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            items = hydratedItems
+            if let previousSelectedID, hydratedItems.contains(where: { $0.id == previousSelectedID }) {
+                selectedID = previousSelectedID
+            } else {
+                selectedID = hydratedItems.indices.contains(1) ? hydratedItems[1].id : hydratedItems.first?.id
+            }
+        }
+
+        previewLoadTask?.cancel()
+        showWithPreviews()
+        return hydrateMs
     }
 
     func schedulePreviewCacheWarmup(context: String) {
