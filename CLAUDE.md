@@ -35,7 +35,7 @@ SwitcherStore  ──►  WindowCatalog  ──►  SCContentCache (actor)
    │   PreviewCacheStore  (windowID + signature LRU)
    │   │
    │   ▼
-   MRUTracker  (in-memory recent IDs + signatures + persisted bundle IDs)
+   MRUTracker  (rank entries: windowID + signature + app identity)
    │
    ▼
 SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherView)
@@ -60,7 +60,7 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 | `PermissionService` | Preflight checks for Accessibility + Screen Recording. Never calls `CGRequest*`. |
 | `SwitcherPanelController` | NSPanel host. CAShapeLayer mask for antialiased corners. Picks cursor's screen. |
 | `HotkeyMonitor` | CGEventTap + NSEvent monitors for Cmd+Tab plus modifier + left-mouse previous-app shortcut. |
-| `MRUTracker` | In-memory recent window IDs + app/title signatures + persisted recent bundle IDs (UserDefaults, cap 30). Recovers single-window apps by app identity when ID/title churns; refuses to guess among multiple same-app windows. |
+| `MRUTracker` | In-memory rank entries that keep windowID, app/title signature, and app identity together; persisted recent bundle IDs (UserDefaults, cap 30). Recovers single-window apps by app identity when ID/title churns; refuses to guess among multiple same-app windows. |
 | `PreviewCacheStore` | Two-level LRU (windowID + signature). Capacity 40. Stale-while-revalidate. |
 | `ClickOutsideMonitor` | Global + local mouse-down monitors. Closes panel on click outside card. |
 | `SwitcherPerformanceMetrics` | Rolling 100-sample p50/p95/p99 for cold-open + first-preview-batch. |

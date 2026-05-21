@@ -17,6 +17,7 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_recreatedWindow_keepsRankBySignature", recreatedWindowKeepsRankBySignature),
         ("MRU/orderedForDisplay_singleWindowTitleChange_keepsRankByAppIdentity", singleWindowTitleChangeKeepsRankByAppIdentity),
         ("MRU/orderedForDisplay_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowTitleChangeDoesNotGuessByAppIdentity),
+        ("MRU/pruneToLive_singleWindowIdentityRank_survivesIDAndTitleChange", pruneSingleWindowIdentityRankSurvivesIDAndTitleChange),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
         ("MRU/trackSystemActivation_doesNotPruneFromStaleStoreSnapshot", systemActivationDoesNotPrune),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
@@ -253,6 +254,82 @@ enum MRUTrackerTests {
 
         let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
         try expectEqual(ordered.map(\.id), [1, 3, 20, 40])
+    }
+
+    // Regression guard: if a single-window app changes both CGWindowID and
+    // title, a later prune must not slide the next app into that old rank and
+    // leave the recreated single window at the snapshot tail.
+    @MainActor static func pruneSingleWindowIdentityRankSurvivesIDAndTitleChange() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(
+                id: 1,
+                pid: 100,
+                appName: "Editor",
+                title: "Project",
+                isFrontmostApp: true,
+                bundleIdentifier: "com.example.editor"
+            ),
+            makeItem(
+                id: 2,
+                pid: 200,
+                appName: "Microsoft Word",
+                title: "Doc A",
+                bundleIdentifier: "com.microsoft.Word"
+            ),
+            makeItem(
+                id: 3,
+                pid: 300,
+                appName: "Browser",
+                title: "Docs",
+                bundleIdentifier: "com.example.browser"
+            ),
+            makeItem(
+                id: 4,
+                pid: 400,
+                appName: "Mail",
+                title: "Inbox",
+                bundleIdentifier: "com.example.mail"
+            )
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        let liveAfterWordChurn = [
+            makeItem(
+                id: 1,
+                pid: 100,
+                appName: "Editor",
+                title: "Project",
+                isFrontmostApp: true,
+                bundleIdentifier: "com.example.editor"
+            ),
+            makeItem(
+                id: 3,
+                pid: 300,
+                appName: "Browser",
+                title: "Docs",
+                bundleIdentifier: "com.example.browser"
+            ),
+            makeItem(
+                id: 4,
+                pid: 400,
+                appName: "Mail",
+                title: "Inbox",
+                bundleIdentifier: "com.example.mail"
+            ),
+            makeItem(
+                id: 20,
+                pid: 200,
+                appName: "Microsoft Word",
+                title: "Doc B",
+                bundleIdentifier: "com.microsoft.Word"
+            )
+        ]
+
+        tracker.pruneToLive(liveAfterWordChurn)
+
+        let ordered = tracker.orderedForDisplay(from: liveAfterWordChurn)
+        try expectEqual(ordered.map(\.id), [1, 20, 3, 4])
     }
 
     // Regression guard: app-level activation must not move every known window

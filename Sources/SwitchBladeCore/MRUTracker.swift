@@ -3,19 +3,33 @@ import CoreGraphics
 import Foundation
 
 /// MRU bookkeeping in two layers:
-/// 1. In-memory `recentWindowIDs` — fine-grained, per-window, lost on relaunch.
-/// 2. In-memory `recentWindowSignatures` — fallback when a window gets a new
-///    CGWindowID during the same launch. Exact app/title matches are preferred;
-///    single-window apps can also recover by app identity when the title changes.
-/// 3. Persisted `recentBundleIDs` — coarse, per-app, survives relaunch.
+/// 1. In-memory rank entries — fine-grained, per-window, lost on relaunch.
+///    Each rank stores the last concrete window ID, an app/title signature, and
+///    an app identity fallback together so pruning one key cannot shift another
+///    window into that rank.
+/// 2. Persisted `recentBundleIDs` — coarse, per-app, survives relaunch.
 ///
 /// `orderedForDisplay(from:)` produces the canonical switcher ordering used
 /// every cold open: frontmost window first, then in-memory window recents,
 /// then the persisted bundle order, then anything left in the snapshot.
 @MainActor
 final class MRUTracker {
-    private(set) var recentWindowIDs: [CGWindowID] = []
-    private(set) var recentWindowSignatures: [String] = []
+    private struct RankEntry {
+        var windowID: CGWindowID?
+        var signature: String?
+        let appIdentity: String
+    }
+
+    private var recentRanks: [RankEntry] = []
+
+    var recentWindowIDs: [CGWindowID] {
+        recentRanks.compactMap(\.windowID)
+    }
+
+    var recentWindowSignatures: [String] {
+        recentRanks.compactMap(\.signature)
+    }
+
     private(set) var recentBundleIDs: [String]
 
     private let maxBundles: Int
@@ -35,7 +49,7 @@ final class MRUTracker {
 
     /// Builds the display order for a snapshot without mutating MRU state.
     ///
-    /// Each window keeps its independent rank in `recentWindowIDs`. Same-app
+    /// Each window keeps its independent rank in `recentRanks`. Same-app
     /// windows are treated like any other windows: if a switch does not involve
     /// them, their relative positions do not change. Missing IDs are skipped for
     /// this snapshot only; a transient CGWindowList miss must not erase rank.
@@ -61,19 +75,17 @@ final class MRUTracker {
         var remainingBySignature = Dictionary(grouping: snapshot.filter { !seen.contains($0.id) },
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
-        let rankCount = max(recentWindowIDs.count, recentWindowSignatures.count)
-        for index in 0 ..< rankCount {
-            if recentWindowIDs.indices.contains(index),
-               let item = itemsByID[recentWindowIDs[index]] {
+        for rank in recentRanks {
+            if let windowID = rank.windowID,
+               let item = itemsByID[windowID] {
                 if seen.insert(item.id).inserted {
                     ordered.append(item)
                 }
                 continue
             }
 
-            guard recentWindowSignatures.indices.contains(index) else { continue }
-            let signature = recentWindowSignatures[index]
-            if var matches = remainingBySignature[signature],
+            if let signature = rank.signature,
+               var matches = remainingBySignature[signature],
                let matchIndex = matches.firstIndex(where: { !seen.contains($0.id) }) {
                 let item = matches.remove(at: matchIndex)
                 remainingBySignature[signature] = matches
@@ -82,7 +94,7 @@ final class MRUTracker {
                 continue
             }
 
-            let identity = appIdentity(fromSignature: signature)
+            let identity = rank.appIdentity
             guard appIdentityCounts[identity] == 1,
                   let item = itemsByAppIdentity[identity]?.first,
                   !seen.contains(item.id) else {
@@ -115,14 +127,18 @@ final class MRUTracker {
     /// Records the user's choice from `liveItems` and writes the bundle list
     /// back to UserDefaults.
     func rememberSelection(_ id: CGWindowID, in liveItems: [WindowItem]) {
-        recentWindowIDs = [id] + liveItems.map(\.id).filter { $0 != id }
-
         guard let item = liveItems.first(where: { $0.id == id }) else {
             return
         }
-        let selectedSignature = signature(for: item)
-        recentWindowSignatures = [selectedSignature]
-            + liveItems.map(signature(for:)).filter { $0 != selectedSignature }
+
+        let rankedItems = [item] + liveItems.filter { $0.id != id }
+        recentRanks = rankedItems.map { item in
+            RankEntry(
+                windowID: item.id,
+                signature: signature(for: item),
+                appIdentity: appIdentity(for: item)
+            )
+        }
 
         guard let bundleID = item.bundleIdentifier,
               !bundleID.isEmpty else { return }
@@ -147,9 +163,32 @@ final class MRUTracker {
     /// Removes IDs that no longer correspond to live items.
     func pruneToLive(_ liveItems: [WindowItem]) {
         let liveIDs = Set(liveItems.map(\.id))
-        recentWindowIDs.removeAll { !liveIDs.contains($0) }
         let liveSignatures = Set(liveItems.map(signature(for:)))
-        recentWindowSignatures.removeAll { !liveSignatures.contains($0) }
+        let liveAppIdentityCounts = Dictionary(grouping: liveItems, by: appIdentity(for:))
+            .mapValues(\.count)
+        var seenIdentityOnlyRanks: Set<String> = []
+
+        recentRanks = recentRanks.compactMap { rank in
+            let liveWindowID = rank.windowID.flatMap { liveIDs.contains($0) ? $0 : nil }
+            let liveSignature = rank.signature.flatMap { liveSignatures.contains($0) ? $0 : nil }
+            let liveAppWindowCount = liveAppIdentityCounts[rank.appIdentity] ?? 0
+
+            guard liveWindowID != nil || liveSignature != nil || liveAppWindowCount == 1 else {
+                return nil
+            }
+
+            if liveWindowID == nil && liveSignature == nil {
+                guard seenIdentityOnlyRanks.insert(rank.appIdentity).inserted else {
+                    return nil
+                }
+            }
+
+            return RankEntry(
+                windowID: liveWindowID,
+                signature: liveSignature,
+                appIdentity: rank.appIdentity
+            )
+        }
     }
 
     private func signature(for item: WindowItem) -> String {
@@ -160,10 +199,4 @@ final class MRUTracker {
         item.bundleIdentifier ?? item.appName
     }
 
-    private func appIdentity(fromSignature signature: String) -> String {
-        guard let separator = signature.range(of: "::") else {
-            return signature
-        }
-        return String(signature[..<separator.lowerBound])
-    }
 }

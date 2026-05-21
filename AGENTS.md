@@ -191,7 +191,9 @@ log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
   custom-runner tests.
 - MRU is per-window first: preserve independent ranks for same-app windows. Fallbacks
   may recover recreated windows by app/title signature, and by app identity only when
-  that app has exactly one visible window.
+  that app has exactly one visible window. Keep each MRU rank's window ID, signature,
+  and app identity together; pruning stale concrete keys must not shift another window
+  into that rank.
 - Verification scales with risk: docs-only -> `git diff --check`; focused code ->
   `swift build` + `swift run SwitchBladeTests`; UI/lifecycle changes also need manual
   app verification when possible. If the user will test the app, rebuild/sign
