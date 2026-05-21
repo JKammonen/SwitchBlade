@@ -8,6 +8,11 @@ bash scripts/build-app.sh             # builds, signs with local cert, emits dis
 swift run SwitchBladeTests            # runs the in-process test suite, exit non-zero on failure
 ```
 
+For user-tested behavior changes, `swift build` is not enough. Rebuild/sign with
+`bash scripts/build-app.sh`, quit any old running SwitchBlade process, and launch the
+rebuilt `dist/SwitchBlade.app`; `.build/debug/SwitchBlade` does not update the app
+bundle the user is running.
+
 Streaming logs:
 
 ```bash
@@ -108,6 +113,9 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   test-gap review; keep roles bounded.
 - Tests must say what they prove. macOS AX/z-order/TCC behavior still needs a
   signed-app live check when that is the reported failure.
+- When verifying hotkey, event tap, activation, UI, signing, or TCC behavior for the
+  user, test against the rebuilt signed `dist/SwitchBlade.app`, not only SwiftPM's
+  debug binary.
 
 ## Known Gaps
 

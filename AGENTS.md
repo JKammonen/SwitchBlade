@@ -150,6 +150,10 @@ bash scripts/build-app.sh        # builds, signs with local cert, emits dist/Swi
 swift run SwitchBladeTests       # runs all tests, exit non-zero on failure
 ```
 
+For any user-tested behavior change, `swift build` is not enough. Build the signed
+app with `bash scripts/build-app.sh`, quit any old running SwitchBlade process, and
+launch the rebuilt `dist/SwitchBlade.app` before saying the live app is updated.
+
 To stream the app's structured logs:
 
 ```
@@ -190,7 +194,9 @@ log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
   that app has exactly one visible window.
 - Verification scales with risk: docs-only -> `git diff --check`; focused code ->
   `swift build` + `swift run SwitchBladeTests`; UI/lifecycle changes also need manual
-  app verification when possible.
+  app verification when possible. If the user will test the app, rebuild/sign
+  `dist/SwitchBlade.app` and restart the running app; `.build/debug/SwitchBlade`
+  does not update the launched app bundle.
 - Stage exact files only, never `git add .`.
 
 ## Parallel Agent / Scout Routing
