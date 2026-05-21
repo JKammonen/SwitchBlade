@@ -17,7 +17,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_fastReleaseCommitsAfterOpen", requestCycle_fastReleaseCommitsAfterOpen),
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
-        ("Store/requestCycle_ignoresStaleCachedItems", requestCycle_ignoresStaleCachedItems),
+        ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -165,6 +165,8 @@ enum SwitcherStoreTests {
         store.requestCycle(forward: true)
 
         try expect(store.isSwitching, "event-tap path should mark release tracking before async open work runs")
+        try expect(!store.isVisible, "cache-miss path should not synchronously show before the off-main snapshot returns")
+        try expectEqual(catalog.visibleSnapshotCount, 0)
         await runPendingMainTasks()
     }
 
@@ -223,7 +225,7 @@ enum SwitcherStoreTests {
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
     }
 
-    @MainActor static func requestCycle_ignoresStaleCachedItems() async throws {
+    @MainActor static func requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes() async throws {
         let (store, catalog, _, _) = makeStore(cachedOpenItemsMaxAge: -1)
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
@@ -239,6 +241,11 @@ enum SwitcherStoreTests {
         ]
 
         store.requestCycle(forward: true)
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 2])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+
         await runPendingMainTasks()
 
         try expect(store.isVisible)

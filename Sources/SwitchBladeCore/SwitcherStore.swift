@@ -33,6 +33,7 @@ final class SwitcherStore: ObservableObject {
     private let switchBladePID: pid_t
 
     private var previewLoadTask: Task<Void, Never>?
+    private var openRefreshTask: Task<Void, Never>?
     private var contentCacheWarmupTask: Task<Void, Never>?
     private var openItemsWarmupTask: Task<Void, Never>?
     private var previewWarmupTask: Task<Void, Never>?
@@ -122,6 +123,7 @@ final class SwitcherStore: ObservableObject {
     deinit {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
+        openRefreshTask?.cancel()
         previewWarmupTask?.cancel()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
@@ -182,6 +184,7 @@ final class SwitcherStore: ObservableObject {
         let permissionMs = Date().timeIntervalSince(permissionStart) * 1000
 
         if !isVisible {
+            openRefreshTask?.cancel()
             let openStart = Date()
             let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
             pendingOpenRequestedAt = nil
@@ -224,11 +227,13 @@ final class SwitcherStore: ObservableObject {
         lastSwitcherUse = Date()
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
+        openRefreshTask?.cancel()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
         isSwitching = true
 
-        if !cachedOpenItems.isEmpty && isCachedOpenItemsFresh() {
+        if !cachedOpenItems.isEmpty {
+            let cacheIsFresh = isCachedOpenItemsFresh()
             let openStart = Date()
             pendingOpenRequestedAt = nil
             openFromOrderedItems(
@@ -238,8 +243,13 @@ final class SwitcherStore: ObservableObject {
                 permissionMs: 0,
                 snapshotMs: 0,
                 orderMs: 0,
-                source: "cached"
+                source: cacheIsFresh ? "cached" : "stale-cached",
+                updateCachedItems: cacheIsFresh
             )
+            let generation = previewGeneration
+            if !cacheIsFresh {
+                refreshOpenItemsAfterCachedOpen(generation: generation)
+            }
             Task { @MainActor [weak self] in
                 await Task.yield()
                 self?.refreshPermissionState()
@@ -247,9 +257,7 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        Task { @MainActor [weak self] in
-            self?.cycle(forward: forward)
-        }
+        openFromFreshSnapshotOffMain()
     }
 
     func handleKeyDown(_ event: NSEvent) -> Bool {
@@ -321,13 +329,16 @@ final class SwitcherStore: ObservableObject {
     }
 
     func choose(_ item: WindowItem) {
+        Logger.switcher.info(
+            "Choose item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+        )
         selectedID = item.id
         commitSelection()
     }
 
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) {
         selectedID = item.id
-        performSelectionAction(for: item) { activator, selectedItem in
+        performSelectionAction(for: item, actionName: "snap-\(edge.rawValue)") { activator, selectedItem in
             _ = activator.snap(selectedItem, to: edge)
         }
     }
@@ -361,16 +372,21 @@ final class SwitcherStore: ObservableObject {
 
     func commitSelection() {
         if isSwitching, !isVisible {
+            Logger.switcher.info("Commit selection deferred until open completes")
             commitWhenOpenCompletes = true
             return
         }
 
         guard let item = selectedItem else {
+            Logger.switcher.info("Commit selection cancelled: no selected item")
             cancel()
             return
         }
 
-        performSelectionAction(for: item) { activator, selectedItem in
+        Logger.switcher.info(
+            "Commit selection item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) isVisible=\(self.isVisible, privacy: .public) isSwitching=\(self.isSwitching, privacy: .public)"
+        )
+        performSelectionAction(for: item, actionName: "activate") { activator, selectedItem in
             activator.activate(selectedItem)
         }
     }
@@ -483,8 +499,12 @@ final class SwitcherStore: ObservableObject {
 
     private func performSelectionAction(
         for item: WindowItem,
+        actionName: String,
         action: @escaping (WindowActivating, WindowItem) -> Void
     ) {
+        Logger.switcher.info(
+            "Schedule selection action=\(actionName, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+        )
         mruTracker.rememberSelection(item.id, in: items)
         hide()
         // Give AppKit one frame to commit orderOut before WindowActivator starts
@@ -492,6 +512,9 @@ final class SwitcherStore: ObservableObject {
         let activator = self.activator
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 16_000_000)
+            Logger.switcher.info(
+                "Dispatch selection action=\(actionName, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+            )
             action(activator, item)
         }
     }
@@ -529,6 +552,7 @@ final class SwitcherStore: ObservableObject {
         previewLoadTask?.cancel()
         previewLoadTask = nil
         openItemsWarmupTask?.cancel()
+        openRefreshTask?.cancel()
         previewWarmupTask?.cancel()
         isVisible = false
         isSwitching = false
@@ -547,7 +571,8 @@ final class SwitcherStore: ObservableObject {
         permissionMs: Double,
         snapshotMs: Double,
         orderMs: Double,
-        source: String
+        source: String,
+        updateCachedItems: Bool = true
     ) {
         guard !orderedItems.isEmpty else {
             isSwitching = false
@@ -556,7 +581,9 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
-        updateCachedOpenItems(orderedItems)
+        if updateCachedItems {
+            updateCachedOpenItems(orderedItems)
+        }
         let hydrateStart = Date()
         let hydratedItems = hydratedForDisplay(orderedItems)
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
@@ -604,6 +631,82 @@ final class SwitcherStore: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             let minimized = await catalog.snapshotMinimized()
             await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+        }
+    }
+
+    private func openFromFreshSnapshotOffMain() {
+        openRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let permissionStart = Date()
+            self.permissionState = self.permissionService.currentState()
+            let permissionMs = Date().timeIntervalSince(permissionStart) * 1000
+
+            let openStart = Date()
+            let queueMs = self.pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
+            self.pendingOpenRequestedAt = nil
+
+            let snapshotStart = Date()
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
+            let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
+
+            guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
+
+            let orderStart = Date()
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderMs = Date().timeIntervalSince(orderStart) * 1000
+            self.openFromOrderedItems(
+                orderedItems,
+                openStart: openStart,
+                queueMs: queueMs,
+                permissionMs: permissionMs,
+                snapshotMs: snapshotMs,
+                orderMs: orderMs,
+                source: "snapshot"
+            )
+        }
+    }
+
+    private func refreshOpenItemsAfterCachedOpen(generation: Int) {
+        openRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let snapshotStart = Date()
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
+            let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
+
+            guard !Task.isCancelled, self.isVisible, self.previewGeneration == generation else { return }
+
+            let orderStart = Date()
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderMs = Date().timeIntervalSince(orderStart) * 1000
+            guard !orderedItems.isEmpty else { return }
+
+            self.updateCachedOpenItems(orderedItems)
+            let previousSelectedID = self.selectedID
+            let hydrateStart = Date()
+            let hydratedItems = self.hydratedForDisplay(orderedItems)
+            let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
+
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                self.items = hydratedItems
+                if let previousSelectedID, hydratedItems.contains(where: { $0.id == previousSelectedID }) {
+                    self.selectedID = previousSelectedID
+                } else {
+                    self.selectedID = hydratedItems.indices.contains(1) ? hydratedItems[1].id : hydratedItems.first?.id
+                }
+            }
+
+            self.previewLoadTask?.cancel()
+            self.showWithPreviews()
+
+            if PerformanceLoggingState.mode != .off {
+                Logger.switcher.info(
+                    "Open-items refresh after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public)"
+                )
+            }
         }
     }
 

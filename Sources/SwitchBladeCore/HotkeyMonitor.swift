@@ -203,16 +203,16 @@ final class HotkeyMonitor {
     }
 
     private func handleLeftMouseDown(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let (isEnabled, hotkeyModifier) = MainActor.assumeIsolated {
+        let (isEnabled, doubleTapModifier) = MainActor.assumeIsolated {
             (
                 SwitchBladeSettings.shared.doubleModifierSwitchEnabled,
-                SwitchBladeSettings.shared.modifier.cgFlag
+                SwitchBladeSettings.shared.doubleModifier.cgFlag
             )
         }
         guard Self.shouldTriggerModifierMouseSwitch(
             isEnabled: isEnabled,
             flags: event.flags,
-            hotkeyModifier: hotkeyModifier
+            doubleTapModifier: doubleTapModifier
         ) else {
             return Unmanaged.passUnretained(event)
         }
@@ -220,7 +220,7 @@ final class HotkeyMonitor {
         // The double-tap modifier was used with a mouse button, so it was not
         // a standalone double-tap.
         lastTapModifierPressTimestamp = nil
-        Logger.hotkey.info("Modifier + left mouse detected")
+        Logger.hotkey.info("Double-tap modifier + left mouse detected")
         onModifierMouseSwitch?()
         return nil
     }
@@ -228,9 +228,9 @@ final class HotkeyMonitor {
     static func shouldTriggerModifierMouseSwitch(
         isEnabled: Bool,
         flags: CGEventFlags,
-        hotkeyModifier: CGEventFlags
+        doubleTapModifier: CGEventFlags
     ) -> Bool {
-        isEnabled && flags.contains(hotkeyModifier)
+        isEnabled && flags.contains(doubleTapModifier)
     }
 
     private func installEventMonitors() {

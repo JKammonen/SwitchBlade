@@ -13,13 +13,17 @@ final class WindowActivator: WindowActivating, Sendable {
         // Select the target window first, then activate the app. AX raise/focus
         // alone does not make many apps frontmost, while app activation before
         // AX targeting can raise the app's previously-main sibling window.
-        _ = raiseMatchingWindow(item)
-        activateRunningApplication(pid: item.pid)
+        let raised = raiseMatchingWindow(item)
+        let activated = activateRunningApplication(pid: item.pid)
+        Logger.activator.info(
+            "activate result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) raised=\(raised, privacy: .public) appActivated=\(activated, privacy: .public)"
+        )
     }
 
     func activateApplication(pid: pid_t) {
         Logger.activator.info("activate app pid=\(pid, privacy: .public)")
-        activateRunningApplication(pid: pid)
+        let activated = activateRunningApplication(pid: pid)
+        Logger.activator.info("activate app result pid=\(pid, privacy: .public) appActivated=\(activated, privacy: .public)")
     }
 
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
@@ -54,7 +58,10 @@ final class WindowActivator: WindowActivating, Sendable {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        activateRunningApplication(pid: item.pid)
+        let activated = activateRunningApplication(pid: item.pid)
+        Logger.activator.info(
+            "snap result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appActivated=\(activated, privacy: .public)"
+        )
         return true
     }
 
@@ -89,6 +96,9 @@ final class WindowActivator: WindowActivating, Sendable {
     private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
         let appElement = AXUIElementCreateApplication(item.pid)
         guard let window = matchingWindow(for: appElement, item: item) else {
+            Logger.activator.notice(
+                "AX match failed pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public)"
+            )
             return false
         }
 
@@ -105,6 +115,7 @@ final class WindowActivator: WindowActivating, Sendable {
     private func activateRunningApplication(pid: pid_t) -> Bool {
         guard pid != getpid(),
               let app = NSRunningApplication(processIdentifier: pid) else {
+            Logger.activator.notice("App activation unavailable pid=\(pid, privacy: .public)")
             return false
         }
 
@@ -137,6 +148,7 @@ final class WindowActivator: WindowActivating, Sendable {
         var rawValue: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &rawValue)
         guard result == .success, let windows = rawValue as? [AXUIElement] else {
+            Logger.activator.notice("AX windows fetch failed result=\(result.rawValue, privacy: .public)")
             return nil
         }
 
@@ -148,7 +160,21 @@ final class WindowActivator: WindowActivating, Sendable {
             return nil
         }
 
-        return windows.first(where: { matches($0, item: item) })
+        if let match = windows.first(where: { matches($0, item: item) }) {
+            return match
+        }
+
+        let titleMatchCount = windows.reduce(0) { count, window in
+            count + ((item.title.isEmpty || axString(kAXTitleAttribute, on: window) == item.title) ? 1 : 0)
+        }
+        let frameMatchCount = windows.reduce(0) { count, window in
+            guard let frame = axFrame(on: window) else { return count }
+            return count + (Self.framesAreClose(frame, item.bounds) ? 1 : 0)
+        }
+        Logger.activator.notice(
+            "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public)"
+        )
+        return nil
     }
 
     private func setFrame(_ frame: CGRect, on window: AXUIElement) -> Bool {

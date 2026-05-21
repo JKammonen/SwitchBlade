@@ -5,27 +5,27 @@ import Foundation
 enum HotkeyMonitorTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("HotkeyMonitor/modifierMouseSwitch_requiresSettingEnabled", modifierMouseSwitchRequiresSettingEnabled),
-        ("HotkeyMonitor/modifierMouseSwitch_requiresConfiguredModifier", modifierMouseSwitchRequiresConfiguredModifier)
+        ("HotkeyMonitor/modifierMouseSwitch_requiresDoubleTapModifier", modifierMouseSwitchRequiresDoubleTapModifier)
     ]
 
     @MainActor static func modifierMouseSwitchRequiresSettingEnabled() throws {
         try expect(!HotkeyMonitor.shouldTriggerModifierMouseSwitch(
             isEnabled: false,
             flags: [.maskCommand],
-            hotkeyModifier: .maskCommand
+            doubleTapModifier: .maskCommand
         ))
     }
 
-    @MainActor static func modifierMouseSwitchRequiresConfiguredModifier() throws {
+    @MainActor static func modifierMouseSwitchRequiresDoubleTapModifier() throws {
         try expect(HotkeyMonitor.shouldTriggerModifierMouseSwitch(
             isEnabled: true,
-            flags: [.maskCommand],
-            hotkeyModifier: .maskCommand
+            flags: [.maskAlternate],
+            doubleTapModifier: .maskAlternate
         ))
         try expect(!HotkeyMonitor.shouldTriggerModifierMouseSwitch(
             isEnabled: true,
-            flags: [.maskAlternate],
-            hotkeyModifier: .maskCommand
+            flags: [.maskCommand],
+            doubleTapModifier: .maskAlternate
         ))
     }
 }
