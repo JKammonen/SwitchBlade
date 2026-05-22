@@ -143,6 +143,12 @@ final class MRUTracker {
 
     /// Records the user's choice from `liveItems` and writes the bundle list
     /// back to UserDefaults.
+    ///
+    /// `liveItems` may be a stale switcher snapshot (e.g. cached items shown
+    /// before the fresh enumeration finishes). It is NOT an authoritative
+    /// list of live windows. Existing ranks for windows missing from
+    /// `liveItems` are preserved — `pruneToLive` is the only path that may
+    /// drop ranks, and it is called only on explicit close/quit.
     func rememberSelection(_ id: CGWindowID, in liveItems: [WindowItem], context: String = "unknown") {
         guard let item = liveItems.first(where: { $0.id == id }) else {
             logRememberSelectionMiss(id: id, liveItems: liveItems, context: context)
@@ -150,13 +156,25 @@ final class MRUTracker {
         }
 
         let rankedItems = [item] + liveItems.filter { $0.id != id }
-        recentRanks = rankedItems.map { item in
+        let freshRanks = rankedItems.map { item in
             RankEntry(
                 windowID: item.id,
                 signature: signature(for: item),
                 appIdentity: appIdentity(for: item)
             )
         }
+        let liveIDs = Set(liveItems.map(\.id))
+        let liveAppIdentities = Set(liveItems.map(appIdentity(for:)))
+        let preservedRanks = recentRanks.filter { rank in
+            if let windowID = rank.windowID {
+                return !liveIDs.contains(windowID)
+            }
+            // Identity-only ranks (windowID nil after prior prune) survive
+            // only when the app is absent from liveItems; otherwise the fresh
+            // rank above already covers it.
+            return !liveAppIdentities.contains(rank.appIdentity)
+        }
+        recentRanks = freshRanks + preservedRanks
         logRememberSelection(item, liveItems: liveItems, context: context)
 
         guard let bundleID = item.bundleIdentifier,

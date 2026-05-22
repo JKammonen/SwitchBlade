@@ -25,6 +25,7 @@ enum MRUTrackerTests {
         ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
         ("MRU/rememberSelection_capsAtMaxBundles", capsBundles),
         ("MRU/rememberSelection_nilBundleID_writesRanksSkipsBundleList", rememberSelectionNilBundle),
+        ("MRU/rememberSelection_preservesRanksForWindowsMissingFromStaleLiveItems", rememberSelectionPreservesMissing),
         ("MRU/orderedForDisplay_emptySnapshot_returnsEmpty", orderedForDisplayEmpty),
         ("MRU/orderedForDisplay_noFrontmostFlag_usesFirstInSnapshot", orderedForDisplayNoFrontmost)
     ]
@@ -423,6 +424,45 @@ enum MRUTrackerTests {
         try expect(!tracker.recentWindowSignatures.isEmpty)
         // Bundle list must stay empty — no bundleIdentifier to persist.
         try expectEqual(tracker.recentBundleIDs, [])
+    }
+
+    // Regression guard: when the switcher commits while showing a stale cached
+    // list, `rememberSelection` must NOT erase ranks for windows that exist in
+    // reality but happen to be absent from this snapshot. Only `pruneToLive`
+    // (called on explicit close/quit) may drop ranks. Without this guarantee,
+    // any window missing from the cached list at commit time falls to the
+    // snapshot-fallback tail on the next switcher open.
+    @MainActor static func rememberSelectionPreservesMissing() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let fullSnapshot = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300),
+            makeItem(id: 4, pid: 400)
+        ]
+        // Establish per-window MRU; window 4 holds the tail rank.
+        tracker.rememberSelection(3, in: fullSnapshot)
+
+        // Stale cached list shown to the user — window 4 is missing (warmup
+        // captured a moment when CGWindowList didn't enumerate it).
+        let staleLiveItems = [
+            makeItem(id: 3, pid: 300, isFrontmostApp: true),
+            makeItem(id: 1, pid: 100),
+            makeItem(id: 2, pid: 200)
+        ]
+        tracker.rememberSelection(2, in: staleLiveItems)
+
+        // A brand-new window 5 appears alongside the rediscovered 4. The
+        // genuinely-new window should fall to the tail; 4 must keep its rank.
+        let nextSnapshot = [
+            makeItem(id: 2, pid: 200, isFrontmostApp: true),
+            makeItem(id: 5, pid: 500),
+            makeItem(id: 1, pid: 100),
+            makeItem(id: 3, pid: 300),
+            makeItem(id: 4, pid: 400)
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+        try expectEqual(ordered.map(\.id), [2, 3, 1, 4, 5])
     }
 
     @MainActor static func orderedForDisplayEmpty() throws {
