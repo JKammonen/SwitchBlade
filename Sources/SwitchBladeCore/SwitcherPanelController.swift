@@ -24,6 +24,7 @@ final class SwitcherPanelController {
         didSet { clickMonitor.onClickOutside = onClickOutside }
     }
     private let clickMonitor: ClickOutsideMonitor
+    private var keyWindowVerificationTask: Task<Void, Never>?
 
     init(store: SwitcherStore) {
         panel = SwitcherPanel(
@@ -95,6 +96,8 @@ final class SwitcherPanelController {
         clickMonitor.start()
         let orderEnd = Date()
 
+        scheduleKeyWindowVerification()
+
         let ms = Date().timeIntervalSince(start) * 1000
         let sizeMs = sizeEnd.timeIntervalSince(sizeStart) * 1000
         let layoutMs = layoutEnd.timeIntervalSince(layoutStart) * 1000
@@ -104,7 +107,43 @@ final class SwitcherPanelController {
         )
     }
 
+    /// macOS sometimes returns from `NSApp.activate` + `makeKeyAndOrderFront`
+    /// without actually granting key-window status to an accessory app — most
+    /// often after a long idle pause when the previously-frontmost app refuses
+    /// to yield. The panel renders on screen but local NSEvent monitors
+    /// (Enter, arrow keys, NSTrackingArea hover) never fire because they
+    /// require key-window status, while the global CGEventTap for Cmd+Tab
+    /// keeps working. Result: list cycles but selection cannot be committed.
+    ///
+    /// Retry the activation once if the panel is not key after 150 ms. Log
+    /// both outcomes so we can confirm whether this path is hit in real
+    /// reports.
+    private func scheduleKeyWindowVerification() {
+        keyWindowVerificationTask?.cancel()
+        keyWindowVerificationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let self, !Task.isCancelled, self.panel.isVisible else { return }
+            if self.panel.isKeyWindow { return }
+
+            Logger.switcher.notice(
+                "Panel not key after show — retrying activation (likely accessory-activation stall after idle)"
+            )
+            NSApp.activate(ignoringOtherApps: true)
+            self.panel.makeKeyAndOrderFront(nil)
+
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled, self.panel.isVisible else { return }
+            if !self.panel.isKeyWindow {
+                Logger.switcher.notice(
+                    "Panel still not key after retry — local input (Enter, hover, click) may be lost until macOS reassigns key status"
+                )
+            }
+        }
+    }
+
     func hide() {
+        keyWindowVerificationTask?.cancel()
+        keyWindowVerificationTask = nil
         let start = Date()
         clickMonitor.stop()
         CATransaction.begin()
