@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import os.log
 
 /// MRU bookkeeping in two layers:
 /// 1. In-memory rank entries — fine-grained, per-window, lost on relaunch.
@@ -53,7 +54,7 @@ final class MRUTracker {
     /// windows are treated like any other windows: if a switch does not involve
     /// them, their relative positions do not change. Missing IDs are skipped for
     /// this snapshot only; a transient CGWindowList miss must not erase rank.
-    func orderedForDisplay(from snapshot: [WindowItem]) -> [WindowItem] {
+    func orderedForDisplay(from snapshot: [WindowItem], context: String = "unknown") -> [WindowItem] {
         guard !snapshot.isEmpty else { return [] }
 
         // isFrontmostApp comes from NSWorkspace at snapshot time and is more
@@ -65,6 +66,10 @@ final class MRUTracker {
 
         var ordered: [WindowItem] = [currentFrontmost]
         var seen: Set<WindowItem.ID> = [currentFrontmost.id]
+        var diagnostics: [String] = [
+            diagnosticEntry(for: currentFrontmost, rank: 0, reason: "frontmost")
+        ]
+        var skippedRanks: [String] = []
 
         // Replay the existing per-window MRU chain exactly. The only implicit
         // move is the current frontmost window at position 0. CGWindowIDs can
@@ -75,11 +80,12 @@ final class MRUTracker {
         var remainingBySignature = Dictionary(grouping: snapshot.filter { !seen.contains($0.id) },
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
-        for rank in recentRanks {
+        for (rankIndex, rank) in recentRanks.enumerated() {
             if let windowID = rank.windowID,
                let item = itemsByID[windowID] {
                 if seen.insert(item.id).inserted {
                     ordered.append(item)
+                    diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "rankID:\(rankIndex)"))
                 }
                 continue
             }
@@ -91,6 +97,7 @@ final class MRUTracker {
                 remainingBySignature[signature] = matches
                 seen.insert(item.id)
                 ordered.append(item)
+                diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "rankSignature:\(rankIndex)"))
                 continue
             }
 
@@ -98,10 +105,12 @@ final class MRUTracker {
             guard appIdentityCounts[identity] == 1,
                   let item = itemsByAppIdentity[identity]?.first,
                   !seen.contains(item.id) else {
+                skippedRanks.append(diagnosticSkippedRank(rank, rankIndex: rankIndex, liveCount: appIdentityCounts[identity] ?? 0))
                 continue
             }
             seen.insert(item.id)
             ordered.append(item)
+            diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "rankSingleAppIdentity:\(rankIndex)"))
         }
 
         // Persisted bundle order seeds the first cycle after a fresh launch
@@ -112,6 +121,7 @@ final class MRUTracker {
                 guard let group = snapshotByBundle[bundleID] else { continue }
                 for item in group where seen.insert(item.id).inserted {
                     ordered.append(item)
+                    diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "persistedBundle"))
                 }
             }
         }
@@ -119,15 +129,23 @@ final class MRUTracker {
         // Snapshot fallback for new windows that have no remembered rank yet.
         for item in snapshot where seen.insert(item.id).inserted {
             ordered.append(item)
+            diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "snapshotFallback"))
         }
 
+        logOrderingDiagnostics(
+            context: context,
+            snapshot: snapshot,
+            diagnostics: diagnostics,
+            skippedRanks: skippedRanks
+        )
         return ordered
     }
 
     /// Records the user's choice from `liveItems` and writes the bundle list
     /// back to UserDefaults.
-    func rememberSelection(_ id: CGWindowID, in liveItems: [WindowItem]) {
+    func rememberSelection(_ id: CGWindowID, in liveItems: [WindowItem], context: String = "unknown") {
         guard let item = liveItems.first(where: { $0.id == id }) else {
+            logRememberSelectionMiss(id: id, liveItems: liveItems, context: context)
             return
         }
 
@@ -139,6 +157,7 @@ final class MRUTracker {
                 appIdentity: appIdentity(for: item)
             )
         }
+        logRememberSelection(item, liveItems: liveItems, context: context)
 
         guard let bundleID = item.bundleIdentifier,
               !bundleID.isEmpty else { return }
@@ -197,6 +216,58 @@ final class MRUTracker {
 
     private func appIdentity(for item: WindowItem) -> String {
         item.bundleIdentifier ?? item.appName
+    }
+
+    private func diagnosticEntry(for item: WindowItem, rank: Int, reason: String) -> String {
+        let frontmost = item.isFrontmostApp ? "F" : "-"
+        return "\(rank):id=\(item.id),pid=\(item.pid),app=\(appIdentity(for: item)),front=\(frontmost),reason=\(reason)"
+    }
+
+    private func diagnosticSkippedRank(_ rank: RankEntry, rankIndex: Int, liveCount: Int) -> String {
+        let hasID = rank.windowID == nil ? "nil" : "set"
+        let hasSignature = rank.signature == nil ? "nil" : "set"
+        return "\(rankIndex):app=\(rank.appIdentity),id=\(hasID),sig=\(hasSignature),liveCount=\(liveCount)"
+    }
+
+    private func logOrderingDiagnostics(
+        context: String,
+        snapshot: [WindowItem],
+        diagnostics: [String],
+        skippedRanks: [String]
+    ) {
+        guard PerformanceLoggingState.mode == .debug else { return }
+        let snapshotSummary = snapshot.prefix(16)
+            .map { "id=\($0.id),pid=\($0.pid),app=\(appIdentity(for: $0)),front=\($0.isFrontmostApp ? "F" : "-")" }
+            .joined(separator: ";")
+        let orderSummary = diagnostics.prefix(16).joined(separator: ";")
+        let skippedSummary = skippedRanks.prefix(16).joined(separator: ";")
+        Logger.switcher.debug(
+            "MRU order context=\(context, privacy: .public) snapshotCount=\(snapshot.count, privacy: .public) ranks=\(self.recentRanks.count, privacy: .public) bundles=\(self.recentBundleIDs.count, privacy: .public) snapshot=[\(snapshotSummary, privacy: .public)] order=[\(orderSummary, privacy: .public)] skipped=[\(skippedSummary, privacy: .public)]"
+        )
+    }
+
+    private func logRememberSelection(_ item: WindowItem, liveItems: [WindowItem], context: String) {
+        guard PerformanceLoggingState.mode == .debug else { return }
+        let selectedIndex = liveItems.firstIndex(where: { $0.id == item.id }) ?? -1
+        let itemSummary = diagnosticEntry(for: item, rank: selectedIndex, reason: "selected")
+        let orderSummary = liveItems.prefix(16)
+            .enumerated()
+            .map { index, item in diagnosticEntry(for: item, rank: index, reason: "input") }
+            .joined(separator: ";")
+        Logger.switcher.debug(
+            "MRU remember context=\(context, privacy: .public) selected=[\(itemSummary, privacy: .public)] liveCount=\(liveItems.count, privacy: .public) input=[\(orderSummary, privacy: .public)]"
+        )
+    }
+
+    private func logRememberSelectionMiss(id: CGWindowID, liveItems: [WindowItem], context: String) {
+        guard PerformanceLoggingState.mode == .debug else { return }
+        let orderSummary = liveItems.prefix(16)
+            .enumerated()
+            .map { index, item in diagnosticEntry(for: item, rank: index, reason: "input") }
+            .joined(separator: ";")
+        Logger.switcher.debug(
+            "MRU remember miss context=\(context, privacy: .public) selectedID=\(id, privacy: .public) liveCount=\(liveItems.count, privacy: .public) input=[\(orderSummary, privacy: .public)]"
+        )
     }
 
 }

@@ -151,7 +151,7 @@ final class SwitcherStore: ObservableObject {
 
         let visibleSnapshot = await snapshotVisibleOnlyOffMain()
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
-        let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
+        let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview"))
         updateCachedOpenItems(orderedItems)
         let windowIDs = orderedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
@@ -198,7 +198,7 @@ final class SwitcherStore: ObservableObject {
             let visibleSnapshot = catalog.snapshotVisibleOnly()
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
             let orderStart = Date()
-            let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "cycle-snapshot"))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             openFromOrderedItems(
                 orderedItems,
@@ -433,7 +433,7 @@ final class SwitcherStore: ObservableObject {
         let effectiveCurrentPID = orderedItems.first?.pid ?? currentAppPID
         if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
             lastSwitcherUse = Date()
-            mruTracker.rememberSelection(targetItem.id, in: orderedItems)
+            mruTracker.rememberSelection(targetItem.id, in: orderedItems, context: "double-modifier-window")
             if let effectiveCurrentPID, effectiveCurrentPID != switchBladePID, effectiveCurrentPID != targetItem.pid {
                 previousAppPID = effectiveCurrentPID
             }
@@ -473,7 +473,7 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func itemsForPreviousSwitchTarget() -> [WindowItem] {
-        mruTracker.orderedForDisplay(from: catalog.snapshotVisibleOnly())
+        mruTracker.orderedForDisplay(from: catalog.snapshotVisibleOnly(), context: "previous-switch-target")
     }
 
     private func previousApplicationPID(currentPID: pid_t?, orderedItems: [WindowItem]) -> pid_t? {
@@ -509,7 +509,11 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.info(
             "Schedule selection action=\(actionName, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
-        mruTracker.rememberSelection(item.id, in: items)
+        mruTracker.rememberSelection(
+            item.id,
+            in: items,
+            context: "selection-\(actionName)-stale=\(isShowingStaleCachedItems)"
+        )
         hide()
         // Give AppKit one frame to commit orderOut before WindowActivator starts
         // synchronous AX IPC to the target app.
@@ -605,6 +609,7 @@ final class SwitcherStore: ObservableObject {
             items = hydratedItems
             selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
         }
+        logOpenOrdering(source: source, orderedItems: orderedItems, selectedID: selectedID)
 
         let cachedHits = items.filter { $0.preview != nil }.count
         let coldMs = Date().timeIntervalSince(openStart) * 1000
@@ -660,7 +665,7 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
 
             let orderStart = Date()
-            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot"))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             self.openFromOrderedItems(
                 orderedItems,
@@ -690,7 +695,7 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             let orderStart = Date()
-            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "stale-heal"))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             guard !orderedItems.isEmpty else { return }
 
@@ -768,7 +773,7 @@ final class SwitcherStore: ObservableObject {
             let start = Date()
             let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
             guard !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
-            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot))
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "open-items-warmup:\(context)"))
             guard !Task.isCancelled, !orderedItems.isEmpty else { return }
             self.updateCachedOpenItems(orderedItems)
             let ms = Date().timeIntervalSince(start) * 1000
@@ -783,6 +788,22 @@ final class SwitcherStore: ObservableObject {
     private func updateCachedOpenItems(_ orderedItems: [WindowItem]) {
         cachedOpenItems = orderedItems
         cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
+    }
+
+    private func logOpenOrdering(source: String, orderedItems: [WindowItem], selectedID: WindowItem.ID?) {
+        guard PerformanceLoggingState.mode == .debug else { return }
+        let orderSummary = orderedItems.prefix(16)
+            .enumerated()
+            .map { index, item in
+                let selected = item.id == selectedID ? "S" : "-"
+                let frontmost = item.isFrontmostApp ? "F" : "-"
+                let appIdentity = item.bundleIdentifier ?? item.appName
+                return "\(index):id=\(item.id),pid=\(item.pid),app=\(appIdentity),front=\(frontmost),selected=\(selected)"
+            }
+            .joined(separator: ";")
+        Logger.switcher.debug(
+            "Open order source=\(source, privacy: .public) count=\(orderedItems.count, privacy: .public) selectedID=\(selectedID ?? 0, privacy: .public) staleVisible=\(self.isShowingStaleCachedItems, privacy: .public) order=[\(orderSummary, privacy: .public)]"
+        )
     }
 
     private func isCachedOpenItemsFresh(now: Date = Date()) -> Bool {
