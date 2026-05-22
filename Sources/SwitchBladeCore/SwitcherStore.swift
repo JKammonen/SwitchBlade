@@ -659,7 +659,7 @@ final class SwitcherStore: ObservableObject {
             self.pendingOpenRequestedAt = nil
 
             let snapshotStart = Date()
-            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain(priority: .userInitiated)
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
 
             guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
@@ -689,7 +689,7 @@ final class SwitcherStore: ObservableObject {
             defer { self.staleCacheHealTask = nil }
 
             let snapshotStart = Date()
-            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain(priority: .userInitiated)
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
 
             guard !Task.isCancelled else { return }
@@ -811,9 +811,11 @@ final class SwitcherStore: ObservableObject {
         return now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge
     }
 
-    private func snapshotVisibleOnlyOffMain() async -> [WindowItem] {
+    private func snapshotVisibleOnlyOffMain(
+        priority: TaskPriority = .utility
+    ) async -> [WindowItem] {
         let catalog = self.catalog
-        return await Task.detached(priority: .utility) {
+        return await Task.detached(priority: priority) {
             catalog.snapshotVisibleOnly()
         }.value
     }
