@@ -259,11 +259,27 @@ final class HotkeyMonitor {
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
+        // NSEvent flag monitors fire independently of CGEventTap, so this is
+        // the earliest moment we know the user touched a modifier — including
+        // when the tap is silently disabled. Re-enable proactively before the
+        // upcoming Tab key event reaches the system, otherwise macOS's own
+        // Cmd+Tab switcher takes over until the 5s watchdog catches up.
+        reenableTapIfDisabled(reason: "flagsChanged")
         handleModifierFlagsChanged(
             flags: event.modifierFlags,
             timestamp: Date.timeIntervalSinceReferenceDate,
             shouldHandleConfiguredRelease: true
         )
+    }
+
+    private func reenableTapIfDisabled(reason: String) {
+        guard let eventTap else { return }
+        if !CGEvent.tapIsEnabled(tap: eventTap) {
+            Logger.hotkey.notice(
+                "Tap was disabled at \(reason, privacy: .public) — re-enabling before next key event"
+            )
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
     }
 
     private func handleModifierFlagsChanged(
