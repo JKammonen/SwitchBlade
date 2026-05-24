@@ -238,25 +238,27 @@ final class SwitcherStore: ObservableObject {
 
         if !cachedOpenItems.isEmpty {
             let cacheIsFresh = isCachedOpenItemsFresh()
-            let openStart = Date()
-            pendingOpenRequestedAt = nil
-            openFromOrderedItems(
-                cachedOpenItems,
-                openStart: openStart,
-                queueMs: nil,
-                permissionMs: 0,
-                snapshotMs: 0,
-                orderMs: 0,
-                source: cacheIsFresh ? "cached" : "stale-cached",
-                updateCachedItems: cacheIsFresh,
-                showingStaleCachedItems: !cacheIsFresh
-            )
-            if !cacheIsFresh {
-                scheduleStaleCacheHealingIfNeeded()
-            }
-            Task { @MainActor [weak self] in
-                await Task.yield()
-                self?.refreshPermissionState()
+            let cachedItems = cachedOpenItems
+            openRefreshTask = Task { @MainActor [weak self] in
+                guard let self, !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
+                let openStart = Date()
+                let queueMs = self.pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 }
+                self.pendingOpenRequestedAt = nil
+                self.openFromOrderedItems(
+                    cachedItems,
+                    openStart: openStart,
+                    queueMs: queueMs,
+                    permissionMs: 0,
+                    snapshotMs: 0,
+                    orderMs: 0,
+                    source: cacheIsFresh ? "cached" : "stale-cached",
+                    updateCachedItems: cacheIsFresh,
+                    showingStaleCachedItems: !cacheIsFresh
+                )
+                if !cacheIsFresh {
+                    self.scheduleStaleCacheHealingIfNeeded()
+                }
+                self.refreshPermissionState()
             }
             return
         }

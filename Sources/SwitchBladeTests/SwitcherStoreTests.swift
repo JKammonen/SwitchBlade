@@ -221,6 +221,12 @@ enum SwitcherStoreTests {
 
         store.requestCycle(forward: true)
 
+        try expect(store.isSwitching)
+        try expect(!store.isVisible, "cached request should defer panel work out of the hotkey callback")
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+
+        await runPendingMainTasks()
+
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
@@ -243,8 +249,8 @@ enum SwitcherStoreTests {
 
         store.requestCycle(forward: true)
 
-        try expect(store.isVisible)
-        try expectEqual(store.items.map(\.id), [1, 2])
+        try expect(store.isSwitching)
+        try expect(!store.isVisible, "stale cached request should defer panel work out of the hotkey callback")
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
 
         await runPendingMainTasks()
@@ -271,8 +277,8 @@ enum SwitcherStoreTests {
 
         store.requestCycle(forward: true)
 
-        try expect(store.isVisible)
-        try expectEqual(store.items.map(\.id), [1, 2])
+        try expect(store.isSwitching)
+        try expect(!store.isVisible, "stale cached request should still allow fast release before deferred open")
 
         store.commitSelection()
         await runPendingMainTasks()
@@ -285,6 +291,8 @@ enum SwitcherStoreTests {
         await runPendingMainTasks()
 
         store.requestCycle(forward: true)
+
+        await runPendingMainTasks()
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [3, 4])

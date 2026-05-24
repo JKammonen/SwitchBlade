@@ -18,6 +18,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController?
     private var lifecycleObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var appTerminationRefreshTask: Task<Void, Never>?
+    private var responsivenessActivity: NSObjectProtocol?
     private var lastPresentedMissingPermissions: [PermissionKind] = []
     private var isPresentingPermissionAlert = false
     /// Last observed Screen Recording grant. Used to detect the
@@ -37,6 +38,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = permissionService.currentState()
         Logger.permissions.info(
             "Permissions on launch: ax=\(state.hasAccessibility, privacy: .public), sr=\(state.hasScreenRecording, privacy: .public)"
+        )
+        responsivenessActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Keep SwitchBlade global hotkey responsive while the system is awake"
         )
 
         if state.hasScreenRecording {
@@ -123,6 +128,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_ notification: Notification) {
         appTerminationRefreshTask?.cancel()
         hotkeyMonitor?.stop()
+        if let responsivenessActivity {
+            ProcessInfo.processInfo.endActivity(responsivenessActivity)
+            self.responsivenessActivity = nil
+        }
         for (center, observer) in lifecycleObservers {
             center.removeObserver(observer)
         }
