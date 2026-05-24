@@ -65,6 +65,7 @@ Baba Yaga categories (must match exactly):
 - One-line fix to an already-known file, with no API, data model, behavioral contract, or test expectation change
 - Pure documentation edit with no code-behavior impact
 - User explicitly asks for analysis only, not implementation
+- Pure rename or i18n key change — no behavior change, no API surface change, no test expectation change
 
 Handoff/resume triggers (`lue handoff`, `jatka handoffista`, `continue from handoff`, `Claude jäi tähän`, `tee seuraava askel tästä`) run the 5-step resume path before any Edit/Write:
 
