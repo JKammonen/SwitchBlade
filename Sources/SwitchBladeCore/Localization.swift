@@ -304,6 +304,7 @@ public enum L10n {
         case menuQuit
         case menuSettingsWindowTitle
         case tooltipSettings
+        case aboutBuiltAt
     }
 
     public static func tr(_ key: Key) -> String {
@@ -417,7 +418,8 @@ public enum L10n {
         .menuAbout:                       "About SwitchBlade",
         .menuQuit:                        "Quit SwitchBlade",
         .menuSettingsWindowTitle:         "SwitchBlade Settings",
-        .tooltipSettings:                 "Settings"
+        .tooltipSettings:                 "Settings",
+        .aboutBuiltAt:                    "Built"
     ]
 
     nonisolated(unsafe) private static let finnishTable: [Key: String] = [
@@ -509,6 +511,7 @@ public enum L10n {
         .menuAbout:                       "Tietoja SwitchBladesta",
         .menuQuit:                        "Lopeta SwitchBlade",
         .menuSettingsWindowTitle:         "SwitchBlade-asetukset",
-        .tooltipSettings:                 "Asetukset"
+        .tooltipSettings:                 "Asetukset",
+        .aboutBuiltAt:                    "Buildattu"
     ]
 }

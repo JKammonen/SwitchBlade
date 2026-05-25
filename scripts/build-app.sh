@@ -7,6 +7,7 @@ app_name="SwitchBlade"
 bundle_id="${BUNDLE_ID:-com.jannekammonen.SwitchBlade}"
 version="${APP_VERSION:-0.1.0}"
 build_number="${APP_BUILD_NUMBER:-1}"
+build_timestamp="${APP_BUILD_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 
 source "$repo_root/scripts/signing-config.sh"
 
@@ -56,6 +57,8 @@ cat > "$plist_path" <<EOF
     <string>$version</string>
     <key>CFBundleVersion</key>
     <string>$build_number</string>
+    <key>SwitchBladeBuildTimestamp</key>
+    <string>$build_timestamp</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

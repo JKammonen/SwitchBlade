@@ -115,7 +115,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
     @objc private func openAbout() {
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.orderFrontStandardAboutPanel(nil)
+        NSApp.orderFrontStandardAboutPanel(options: Self.aboutPanelOptions(bundleInfo: Bundle.main.infoDictionary ?? [:]))
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -126,5 +126,46 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let colorPanel = NSColorPanel.shared
         colorPanel.orderOut(nil)
         colorPanel.close()
+    }
+
+    static func aboutPanelOptions(bundleInfo: [String: Any]) -> [NSApplication.AboutPanelOptionKey: Any] {
+        guard let versionString = aboutVersionString(bundleInfo: bundleInfo) else {
+            return [:]
+        }
+        return [.applicationVersion: versionString]
+    }
+
+    static func aboutVersionString(bundleInfo: [String: Any]) -> String? {
+        let version = bundleInfo["CFBundleShortVersionString"] as? String
+        let build = bundleInfo["CFBundleVersion"] as? String
+        let timestamp = bundleInfo["SwitchBladeBuildTimestamp"] as? String
+
+        let versionPart: String?
+        switch (version, build) {
+        case let (.some(version), .some(build)) where !version.isEmpty && !build.isEmpty:
+            versionPart = "\(version) (\(build))"
+        case let (.some(version), _) where !version.isEmpty:
+            versionPart = version
+        case let (_, .some(build)) where !build.isEmpty:
+            versionPart = build
+        default:
+            versionPart = nil
+        }
+
+        let timestampPart = timestamp.flatMap { rawTimestamp -> String? in
+            guard !rawTimestamp.isEmpty else { return nil }
+            return "\(L10n.tr(.aboutBuiltAt)) \(rawTimestamp)"
+        }
+
+        switch (versionPart, timestampPart) {
+        case let (.some(versionPart), .some(timestampPart)):
+            return "\(versionPart) - \(timestampPart)"
+        case let (.some(versionPart), nil):
+            return versionPart
+        case let (nil, .some(timestampPart)):
+            return timestampPart
+        case (nil, nil):
+            return nil
+        }
     }
 }
