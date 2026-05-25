@@ -2,10 +2,21 @@ import AppKit
 import ApplicationServices
 import os.log
 
-final class WindowActivator: WindowActivating, Sendable {
+final class WindowActivator: WindowActivating, @unchecked Sendable {
     struct ScreenGeometry: Equatable {
         let frame: CGRect
         let visibleFrame: CGRect
+    }
+
+    private let raiseWindowOverride: ((WindowItem) -> Bool)?
+    private let activateApplicationOverride: ((pid_t) -> Bool)?
+
+    init(
+        raiseWindowOverride: ((WindowItem) -> Bool)? = nil,
+        activateApplicationOverride: ((pid_t) -> Bool)? = nil
+    ) {
+        self.raiseWindowOverride = raiseWindowOverride
+        self.activateApplicationOverride = activateApplicationOverride
     }
 
     func activate(_ item: WindowItem) {
@@ -13,8 +24,10 @@ final class WindowActivator: WindowActivating, Sendable {
         // Select the target window first, then activate the app. AX raise/focus
         // alone does not make many apps frontmost, while app activation before
         // AX targeting can raise the app's previously-main sibling window.
-        let raised = raiseMatchingWindow(item)
-        let activated = activateRunningApplication(pid: item.pid)
+        let raised = raiseWindow(item)
+        let activated = Self.shouldActivateApplication(afterTargeting: item)
+            ? performApplicationActivation(pid: item.pid)
+            : false
         Logger.activator.info(
             "activate result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) raised=\(raised, privacy: .public) appActivated=\(activated, privacy: .public)"
         )
@@ -22,7 +35,7 @@ final class WindowActivator: WindowActivating, Sendable {
 
     func activateApplication(pid: pid_t) {
         Logger.activator.info("activate app pid=\(pid, privacy: .public)")
-        let activated = activateRunningApplication(pid: pid)
+        let activated = performApplicationActivation(pid: pid)
         Logger.activator.info("activate app result pid=\(pid, privacy: .public) appActivated=\(activated, privacy: .public)")
     }
 
@@ -58,7 +71,9 @@ final class WindowActivator: WindowActivating, Sendable {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        let activated = activateRunningApplication(pid: item.pid)
+        let activated = Self.shouldActivateApplication(afterTargeting: item)
+            ? performApplicationActivation(pid: item.pid)
+            : false
         Logger.activator.info(
             "snap result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appActivated=\(activated, privacy: .public)"
         )
@@ -112,6 +127,14 @@ final class WindowActivator: WindowActivating, Sendable {
     }
 
     @discardableResult
+    private func raiseWindow(_ item: WindowItem) -> Bool {
+        if let raiseWindowOverride {
+            return raiseWindowOverride(item)
+        }
+        return raiseMatchingWindow(item)
+    }
+
+    @discardableResult
     private func activateRunningApplication(pid: pid_t) -> Bool {
         guard pid != getpid(),
               let app = NSRunningApplication(processIdentifier: pid) else {
@@ -120,6 +143,21 @@ final class WindowActivator: WindowActivating, Sendable {
         }
 
         return app.activate(options: [])
+    }
+
+    @discardableResult
+    private func performApplicationActivation(pid: pid_t) -> Bool {
+        if let activateApplicationOverride {
+            return activateApplicationOverride(pid)
+        }
+        return activateRunningApplication(pid: pid)
+    }
+
+    static func shouldActivateApplication(afterTargeting item: WindowItem) -> Bool {
+        // Same-app window switches already target the frontmost app. Re-running
+        // app activation there can hand focus back to the app's previously-main
+        // sibling window and undo the AX-targeted selection we just made.
+        return !item.isFrontmostApp
     }
 
     private func closeMatchingWindow(_ item: WindowItem) -> Bool {

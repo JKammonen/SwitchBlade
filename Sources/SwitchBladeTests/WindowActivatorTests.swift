@@ -8,6 +8,11 @@ enum WindowActivatorTests {
         ("WindowActivator/framesAreClose_withinTolerance", framesWithinTolerance),
         ("WindowActivator/framesAreClose_outsideTolerance", framesOutsideTolerance),
         ("WindowActivator/framesAreClose_customTolerance", framesCustomTolerance),
+        ("WindowActivator/activate_frontmostWindow_skipsAppActivation", activateFrontmostWindowSkipsAppActivation),
+        ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
+        ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
+        ("WindowActivator/shouldActivateApplication_falseForFrontmostAppWindow", shouldSkipActivationForFrontmostAppWindow),
+        ("WindowActivator/shouldActivateApplication_trueForBackgroundAppWindow", shouldActivateForBackgroundAppWindow),
         ("WindowActivator/snapFrame_halvesVisibleFrame", snapFrame_halvesVisibleFrame),
         ("WindowActivator/bestVisibleFrame_prefersLargestIntersection", bestVisibleFrame_prefersLargestIntersection)
     ]
@@ -35,6 +40,70 @@ enum WindowActivatorTests {
         let b = CGRect(x: 30, y: 0, width: 100, height: 100)
         try expect(!WindowActivator.framesAreClose(a, b, tolerance: 10))
         try expect(WindowActivator.framesAreClose(a, b, tolerance: 50))
+    }
+
+    static func activateFrontmostWindowSkipsAppActivation() throws {
+        var raisedItems: [CGWindowID] = []
+        var activatedPIDs: [pid_t] = []
+        let activator = WindowActivator(
+            raiseWindowOverride: { item in
+                raisedItems.append(item.id)
+                return true
+            },
+            activateApplicationOverride: { pid in
+                activatedPIDs.append(pid)
+                return true
+            }
+        )
+
+        activator.activate(makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true))
+
+        try expectEqual(raisedItems, [2])
+        try expectEqual(activatedPIDs, [])
+    }
+
+    static func activateBackgroundWindowCallsAppActivation() throws {
+        var raisedItems: [CGWindowID] = []
+        var activatedPIDs: [pid_t] = []
+        let activator = WindowActivator(
+            raiseWindowOverride: { item in
+                raisedItems.append(item.id)
+                return true
+            },
+            activateApplicationOverride: { pid in
+                activatedPIDs.append(pid)
+                return true
+            }
+        )
+
+        activator.activate(makeItem(id: 3, pid: 200, title: "Background", isFrontmostApp: false))
+
+        try expectEqual(raisedItems, [3])
+        try expectEqual(activatedPIDs, [200])
+    }
+
+    static func activateApplicationCallsAppActivation() throws {
+        var activatedPIDs: [pid_t] = []
+        let activator = WindowActivator(
+            activateApplicationOverride: { pid in
+                activatedPIDs.append(pid)
+                return true
+            }
+        )
+
+        activator.activateApplication(pid: 300)
+
+        try expectEqual(activatedPIDs, [300])
+    }
+
+    static func shouldSkipActivationForFrontmostAppWindow() throws {
+        let item = makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true)
+        try expect(!WindowActivator.shouldActivateApplication(afterTargeting: item))
+    }
+
+    static func shouldActivateForBackgroundAppWindow() throws {
+        let item = makeItem(id: 2, pid: 100, title: "Background window", isFrontmostApp: false)
+        try expect(WindowActivator.shouldActivateApplication(afterTargeting: item))
     }
 
     static func snapFrame_halvesVisibleFrame() throws {
