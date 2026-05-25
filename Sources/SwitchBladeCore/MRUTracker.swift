@@ -75,8 +75,6 @@ final class MRUTracker {
         // move is the current frontmost window at position 0. CGWindowIDs can
         // change when AppKit recreates a window, so each rank also has a
         // same-launch app/title signature fallback.
-        let appIdentityCounts = Dictionary(grouping: snapshot, by: appIdentity(for:))
-            .mapValues(\.count)
         var remainingBySignature = Dictionary(grouping: snapshot.filter { !seen.contains($0.id) },
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
@@ -102,10 +100,16 @@ final class MRUTracker {
             }
 
             let identity = rank.appIdentity
-            guard appIdentityCounts[identity] == 1,
-                  let item = itemsByAppIdentity[identity]?.first,
+            let unseenIdentityMatches = itemsByAppIdentity[identity, default: []]
+                .filter { !seen.contains($0.id) }
+            guard unseenIdentityMatches.count == 1,
+                  let item = unseenIdentityMatches.first,
                   !seen.contains(item.id) else {
-                skippedRanks.append(diagnosticSkippedRank(rank, rankIndex: rankIndex, liveCount: appIdentityCounts[identity] ?? 0))
+                skippedRanks.append(diagnosticSkippedRank(
+                    rank,
+                    rankIndex: rankIndex,
+                    remainingCount: unseenIdentityMatches.count
+                ))
                 continue
             }
             seen.insert(item.id)
@@ -241,10 +245,10 @@ final class MRUTracker {
         return "\(rank):id=\(item.id),pid=\(item.pid),app=\(appIdentity(for: item)),front=\(frontmost),reason=\(reason)"
     }
 
-    private func diagnosticSkippedRank(_ rank: RankEntry, rankIndex: Int, liveCount: Int) -> String {
+    private func diagnosticSkippedRank(_ rank: RankEntry, rankIndex: Int, remainingCount: Int) -> String {
         let hasID = rank.windowID == nil ? "nil" : "set"
         let hasSignature = rank.signature == nil ? "nil" : "set"
-        return "\(rankIndex):app=\(rank.appIdentity),id=\(hasID),sig=\(hasSignature),liveCount=\(liveCount)"
+        return "\(rankIndex):app=\(rank.appIdentity),id=\(hasID),sig=\(hasSignature),remainingCount=\(remainingCount)"
     }
 
     private func logOrderingDiagnostics(

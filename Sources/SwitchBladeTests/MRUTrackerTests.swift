@@ -16,6 +16,7 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_transientMissingWindow_keepsRankWhenItReturns", transientMissingWindowKeepsRank),
         ("MRU/orderedForDisplay_recreatedWindow_keepsRankBySignature", recreatedWindowKeepsRankBySignature),
         ("MRU/orderedForDisplay_singleWindowTitleChange_keepsRankByAppIdentity", singleWindowTitleChangeKeepsRankByAppIdentity),
+        ("MRU/orderedForDisplay_sameAppSiblingSeen_recreatedOtherWindowKeepsRankByIdentity", sameAppSiblingSeenRecreatedOtherWindowKeepsRankByIdentity),
         ("MRU/orderedForDisplay_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowTitleChangeDoesNotGuessByAppIdentity),
         ("MRU/pruneToLive_singleWindowIdentityRank_survivesIDAndTitleChange", pruneSingleWindowIdentityRankSurvivesIDAndTitleChange),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
@@ -228,6 +229,28 @@ enum MRUTrackerTests {
 
         let recreatedSnapshot = [
             makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs"),
+            makeItem(id: 20, pid: 200, appName: "Ghostty", title: "vim")
+        ]
+
+        let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
+        try expectEqual(ordered.map(\.id), [1, 20, 3])
+    }
+
+    // Regression guard: when one window of a multi-window app is already
+    // frontmost/seen, the other window should still recover its old rank by
+    // app identity if it is the only remaining unseen candidate from that app.
+    @MainActor static func sameAppSiblingSeenRecreatedOtherWindowKeepsRankByIdentity() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 200, appName: "Ghostty", title: "shell A", isFrontmostApp: true),
+            makeItem(id: 2, pid: 200, appName: "Ghostty", title: "shell B"),
+            makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        let recreatedSnapshot = [
+            makeItem(id: 1, pid: 200, appName: "Ghostty", title: "shell A", isFrontmostApp: true),
             makeItem(id: 3, pid: 300, appName: "Browser", title: "Docs"),
             makeItem(id: 20, pid: 200, appName: "Ghostty", title: "vim")
         ]
