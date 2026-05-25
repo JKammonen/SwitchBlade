@@ -8,6 +8,7 @@ enum CaptureTimeoutTests {
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
         ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
+        ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation)
     ]
@@ -85,6 +86,45 @@ enum CaptureTimeoutTests {
         store.handleAppActivation(pid: 300)
         store.cycle(forward: true)
         try expectEqual(store.items.map(\.id), [1, 2, 3])
+    }
+
+    /// Regression guard: the post-activation open-items warmup is a background
+    /// cache refresh, not an authoritative reorder. If it sees the frontmost
+    /// app's sibling window later in the raw snapshot, it must not push that
+    /// sibling behind other apps in the next cached open.
+    @MainActor static func activation_warmupDoesNotPushSameAppSiblingToTail() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, title: "Ghostty B", isFrontmostApp: true),
+            makeItem(id: 2, pid: 100, title: "Ghostty A"),
+            makeItem(id: 3, pid: 200, title: "Other App")
+        ]
+        store.cycle(forward: true)
+        store.cancel()
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+
+        // Warmup snapshot drifts the sibling behind another app even though the
+        // cached order from the last real open was [1, 2, 3].
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, title: "Ghostty B", isFrontmostApp: true),
+            makeItem(id: 3, pid: 200, title: "Other App"),
+            makeItem(id: 2, pid: 100, title: "Ghostty A")
+        ]
+        store.handleAppActivation(pid: 100)
+
+        for _ in 0 ..< 80 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            if catalog.refreshIfStaleCallCount > 0 { break }
+        }
+
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 2, 3])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
     }
 
     @MainActor static func storeForwardsLifecycleInvalidation() async throws {

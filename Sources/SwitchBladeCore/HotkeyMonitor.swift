@@ -25,6 +25,7 @@ final class HotkeyMonitor {
     private var isTapModifierPressed = false
     private var lastTapModifierPressTimestamp: TimeInterval?
     private var tapWatchdogTask: Task<Void, Never>?
+    private var wasHotkeyModifierDown = false
 
     private static let modifierDoubleTapThreshold: TimeInterval = 0.35
 
@@ -162,7 +163,7 @@ final class HotkeyMonitor {
             handleModifierFlagsChanged(
                 flags: nsModifierFlags(from: event.flags),
                 timestamp: Date.timeIntervalSinceReferenceDate,
-                shouldHandleConfiguredRelease: false
+                shouldHandleConfiguredRelease: true
             )
             return Unmanaged.passUnretained(event)
         }
@@ -294,6 +295,7 @@ final class HotkeyMonitor {
                 SwitchBladeSettings.shared.doubleModifier.nsFlag
             )
         }
+        let isHotkeyModifierDown = flags.contains(hotkeyModifier)
         let isConfiguredModifierDown = flags.contains(doubleTapModifier)
         let companionFlags = flags.subtracting(doubleTapModifier)
         let isBareModifierPress = isConfiguredModifierDown && companionFlags.isEmpty
@@ -304,18 +306,33 @@ final class HotkeyMonitor {
             isTapModifierPressed = false
         }
 
-        guard shouldHandleConfiguredRelease else {
+        defer {
+            wasHotkeyModifierDown = isHotkeyModifierDown
+        }
+
+        guard shouldHandleConfiguredRelease,
+              shouldTrackModifierRelease?() == true else {
             return
         }
 
-        guard shouldTrackModifierRelease?() == true else {
-            return
-        }
-
-        // Use the configured modifier so release detection matches the active hotkey.
-        if !flags.contains(hotkeyModifier) {
+        // Both the event tap and NSEvent monitors can deliver the same modifier
+        // transition. Fire only on the actual down -> up edge so release
+        // handling survives either source going missing without double-commit.
+        if wasHotkeyModifierDown && !isHotkeyModifierDown {
             onCommandReleased?()
         }
+    }
+
+    func handleModifierFlagsChangedForTesting(
+        flags: NSEvent.ModifierFlags,
+        timestamp: TimeInterval = Date.timeIntervalSinceReferenceDate,
+        shouldHandleConfiguredRelease: Bool
+    ) {
+        handleModifierFlagsChanged(
+            flags: flags,
+            timestamp: timestamp,
+            shouldHandleConfiguredRelease: shouldHandleConfiguredRelease
+        )
     }
 
     private func handleTapModifierPress(timestamp: TimeInterval, isBareModifierPress: Bool) {

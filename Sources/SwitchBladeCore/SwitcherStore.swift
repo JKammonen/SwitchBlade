@@ -775,16 +775,66 @@ final class SwitcherStore: ObservableObject {
             let start = Date()
             let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
             guard !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
-            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "open-items-warmup:\(context)"))
+            let orderedItems = self.orderItems(
+                self.mruTracker.orderedForDisplay(
+                    from: visibleSnapshot,
+                    context: "open-items-warmup:\(context)"
+                )
+            )
             guard !Task.isCancelled, !orderedItems.isEmpty else { return }
-            self.updateCachedOpenItems(orderedItems)
+            let stabilizedItems = self.stabilizeBackgroundWarmupOrder(orderedItems, context: context)
+            self.updateCachedOpenItems(stabilizedItems)
             let ms = Date().timeIntervalSince(start) * 1000
             if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
-                    "Open-items cache warmup (\(context, privacy: .public)): \(orderedItems.count, privacy: .public) windows in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+                    "Open-items cache warmup (\(context, privacy: .public)): \(stabilizedItems.count, privacy: .public) windows in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
                 )
             }
         }
+    }
+
+    private func stabilizeBackgroundWarmupOrder(_ orderedItems: [WindowItem], context: String) -> [WindowItem] {
+        guard let frontmost = orderedItems.first else { return orderedItems }
+
+        let cachedSameAppCount = cachedOpenItems.filter { $0.pid == frontmost.pid }.count
+        guard cachedSameAppCount > 1 else { return orderedItems }
+
+        let freshByID = Dictionary(uniqueKeysWithValues: orderedItems.map { ($0.id, $0) })
+        var usedIDs: Set<WindowItem.ID> = [frontmost.id]
+        var stabilized: [WindowItem] = [frontmost]
+
+        for cachedItem in cachedOpenItems where cachedItem.id != frontmost.id {
+            if let fresh = freshByID[cachedItem.id] {
+                guard usedIDs.insert(fresh.id).inserted else { continue }
+                stabilized.append(fresh)
+                continue
+            }
+
+            guard cachedItem.pid == frontmost.pid,
+                  usedIDs.insert(cachedItem.id).inserted else { continue }
+            stabilized.append(cachedItem)
+        }
+
+        for item in orderedItems where usedIDs.insert(item.id).inserted {
+            stabilized.append(item)
+        }
+
+        logWarmupStabilization(context: context, original: orderedItems, stabilized: stabilized)
+        return stabilized
+    }
+
+    private func logWarmupStabilization(context: String, original: [WindowItem], stabilized: [WindowItem]) {
+        guard PerformanceLoggingState.mode == .debug, original != stabilized else { return }
+
+        let originalSummary = original.prefix(16)
+            .map { "id=\($0.id),pid=\($0.pid)" }
+            .joined(separator: ";")
+        let stabilizedSummary = stabilized.prefix(16)
+            .map { "id=\($0.id),pid=\($0.pid)" }
+            .joined(separator: ";")
+        Logger.switcher.debug(
+            "Warmup order stabilized context=\(context, privacy: .public) original=[\(originalSummary, privacy: .public)] stabilized=[\(stabilizedSummary, privacy: .public)]"
+        )
     }
 
     private func updateCachedOpenItems(_ orderedItems: [WindowItem]) {
