@@ -194,6 +194,7 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
+        armHotkeyModifierReleaseTrackingIfNeeded()
         let direction: Direction = flags.contains(.maskShift) ? .backward : .forward
         let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
         Logger.hotkey.notice(
@@ -323,6 +324,12 @@ final class HotkeyMonitor {
         }
     }
 
+    private func armHotkeyModifierReleaseTrackingIfNeeded() {
+        guard !wasHotkeyModifierDown else { return }
+        Logger.hotkey.notice("Hotkey keyDown arrived without tracked modifier-down — arming release fallback")
+        wasHotkeyModifierDown = true
+    }
+
     func handleModifierFlagsChangedForTesting(
         flags: NSEvent.ModifierFlags,
         timestamp: TimeInterval = Date.timeIntervalSinceReferenceDate,
@@ -333,6 +340,10 @@ final class HotkeyMonitor {
             timestamp: timestamp,
             shouldHandleConfiguredRelease: shouldHandleConfiguredRelease
         )
+    }
+
+    func armHotkeyModifierReleaseTrackingForTesting() {
+        armHotkeyModifierReleaseTrackingIfNeeded()
     }
 
     private func handleTapModifierPress(timestamp: TimeInterval, isBareModifierPress: Bool) {
