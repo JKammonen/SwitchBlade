@@ -38,6 +38,7 @@ final class SwitcherStore: ObservableObject {
     private var contentCacheWarmupTask: Task<Void, Never>?
     private var openItemsWarmupTask: Task<Void, Never>?
     private var previewWarmupTask: Task<Void, Never>?
+    private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
     private var commitWhenOpenCompletes = false
     private var pendingOpenRequestedAt: Date?
@@ -61,6 +62,14 @@ final class SwitcherStore: ObservableObject {
     /// Injectable so tests can shorten the window without sleeping for a minute.
     private let activationWarmupWindow: TimeInterval
     private let cachedOpenItemsMaxAge: TimeInterval
+
+    private final class InFlightVisibleSnapshot {
+        let task: Task<[WindowItem], Never>
+
+        init(task: Task<[WindowItem], Never>) {
+            self.task = task
+        }
+    }
 
     init(
         catalog: WindowSnapshotProviding,
@@ -866,10 +875,22 @@ final class SwitcherStore: ObservableObject {
     private func snapshotVisibleOnlyOffMain(
         priority: TaskPriority = .utility
     ) async -> [WindowItem] {
+        if let inFlightVisibleSnapshot {
+            return await inFlightVisibleSnapshot.task.value
+        }
+
         let catalog = self.catalog
-        return await Task.detached(priority: priority) {
-            catalog.snapshotVisibleOnly()
-        }.value
+        let inFlightVisibleSnapshot = InFlightVisibleSnapshot(
+            task: Task.detached(priority: priority) {
+                catalog.snapshotVisibleOnly()
+            }
+        )
+        self.inFlightVisibleSnapshot = inFlightVisibleSnapshot
+        let visibleItems = await inFlightVisibleSnapshot.task.value
+        if self.inFlightVisibleSnapshot === inFlightVisibleSnapshot {
+            self.inFlightVisibleSnapshot = nil
+        }
+        return visibleItems
     }
 
     private func showWithPreviews() {

@@ -17,6 +17,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_fastReleaseCommitsAfterOpen", requestCycle_fastReleaseCommitsAfterOpen),
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
+        ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         // ordering
@@ -230,6 +231,40 @@ enum SwitcherStoreTests {
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+    }
+
+    @MainActor static func requestCycle_reusesInFlightWarmupSnapshot() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        catalog.visibleSnapshotDelayNanoseconds = 150_000_000
+
+        store.scheduleOpenItemsCacheWarmup(context: "test warmup")
+        for _ in 0 ..< 6 {
+            await Task.yield()
+        }
+
+        try expectEqual(catalog.visibleSnapshotCount, 1)
+
+        store.requestCycle(forward: true)
+        for _ in 0 ..< 6 {
+            await Task.yield()
+        }
+
+        try expectEqual(catalog.visibleSnapshotCount, 1,
+                        "requestCycle should await the in-flight warmup snapshot instead of starting a second visible snapshot")
+
+        for _ in 0 ..< 40 {
+            if store.isVisible { break }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 2])
     }
 
     @MainActor static func requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes() async throws {
