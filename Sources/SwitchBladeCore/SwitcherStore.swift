@@ -155,11 +155,8 @@ final class SwitcherStore: ObservableObject {
         permissionState = permissionService.currentState()
     }
 
-    func invalidateCaptureCache(reason: String) {
-        let catalogRef = self.catalog
-        Task.detached(priority: .utility) {
-            await catalogRef.invalidateContentCache(reason: reason)
-        }
+    func invalidateCaptureCache(reason: String) async {
+        await catalog.invalidateContentCache(reason: reason)
     }
 
     func warmPreviewCache(context: String) async {

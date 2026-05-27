@@ -25,6 +25,7 @@ func runAll() async -> Int {
         ("MRUPersistence",          MRUPersistenceTests.all),
         ("PerformanceMetrics",      PerformanceMetricsTests.all),
         ("CaptureTimeout",          CaptureTimeoutTests.all),
+        ("CapturePermitPool",       CapturePermitPoolTests.all),
         ("PreviewScalingPolicy",    PreviewScalingPolicyTests.all)
     ]
 

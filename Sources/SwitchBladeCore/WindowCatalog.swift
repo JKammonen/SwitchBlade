@@ -102,9 +102,24 @@ actor SCContentCache {
     /// Swift Task and return `.timedOut` to the caller promptly, but if
     /// ScreenCaptureKit is blocked inside `captureImage`, that framework work
     /// may continue until Apple's API returns or notices cancellation.
-    static func captureWithSoftTimeout(window: SCWindow, maxDim: Int, timeoutMs: Int) async -> CaptureAttemptResult {
+    static func captureWithSoftTimeout(
+        window: SCWindow,
+        maxDim: Int,
+        timeoutMs: Int,
+        permitPool: CapturePermitPool? = nil
+    ) async -> CaptureAttemptResult {
+        if let permitPool {
+            await permitPool.acquire()
+        }
         nonisolated(unsafe) let capturedWindow = window
         let captureTask = Task.detached(priority: .userInitiated) { () -> CaptureAttemptResult in
+            defer {
+                if let permitPool {
+                    Task {
+                        await permitPool.release()
+                    }
+                }
+            }
             do {
                 return .success(try await SCContentCache.capture(window: capturedWindow, maxDim: maxDim))
             } catch {
@@ -125,6 +140,34 @@ actor SCContentCache {
                 captureTask.cancel()
                 box.resume(returning: .timedOut)
             }
+        }
+    }
+}
+
+actor CapturePermitPool {
+    private var availablePermits: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        self.availablePermits = max(1, limit)
+    }
+
+    func acquire() async {
+        if availablePermits > 0 {
+            availablePermits -= 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            availablePermits += 1
         }
     }
 }
@@ -249,6 +292,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        var applicationsByPID: [pid_t: NSRunningApplication?] = [:]
         var visibleWindowIDs = Set<CGWindowID>()
 
         let visibleItems = rawList.compactMap { entry -> WindowItem? in
@@ -289,7 +333,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             }
 
             let title = entry[kCGWindowName as String] as? String ?? ""
-            let application = NSRunningApplication(processIdentifier: ownerPID)
+            let application = applicationsByPID[ownerPID] ?? {
+                let application = NSRunningApplication(processIdentifier: ownerPID)
+                applicationsByPID[ownerPID] = application
+                return application
+            }()
             let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
 
             guard shouldIncludeWindow(
@@ -364,6 +412,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             return [:]
         }
         let captureStart = Date()
+        let permitPool = CapturePermitPool(limit: maxConcurrentCaptures)
 
         return await withTaskGroup(of: WindowCaptureOutcome.self) { group in
             var nextIndex = 0
@@ -385,7 +434,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     // .failed, and skipping the retry on timeout is what left
                     // post-idle Cmd+Tab showing empty tiles.
                     let first = await SCContentCache.captureWithSoftTimeout(
-                        window: capturedWindow, maxDim: maxDim, timeoutMs: 300
+                        window: capturedWindow,
+                        maxDim: maxDim,
+                        timeoutMs: 300,
+                        permitPool: permitPool
                     )
                     if case .success(let image) = first {
                         return WindowCaptureOutcome(
@@ -404,7 +456,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         "First capture \(reason, privacy: .public) for windowID=\(windowID, privacy: .public) — retrying"
                     )
                     let second = await SCContentCache.captureWithSoftTimeout(
-                        window: capturedWindow, maxDim: maxDim, timeoutMs: 300
+                        window: capturedWindow,
+                        maxDim: maxDim,
+                        timeoutMs: 300,
+                        permitPool: permitPool
                     )
                     if case .success(let image) = second {
                         return WindowCaptureOutcome(
@@ -414,9 +469,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             secondAttempt: second
                         )
                     }
-                    let fallback = await Task.detached(priority: .userInitiated) {
-                        WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
-                    }.value
+                    let fallback = await WindowCatalog.captureFallbackWithCGWindowList(
+                        windowID: windowID,
+                        maxDim: maxDim,
+                        permitPool: permitPool
+                    )
                     if let image = fallback {
                         Logger.capture.notice(
                             "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — SCKit retry also failed"
@@ -484,9 +541,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     for windowID in scMissingIDs {
                         let wid = windowID
                         fallbackGroup.addTask {
-                            let image = await Task.detached(priority: .userInitiated) {
-                                WindowCatalog.captureWithCGWindowList(windowID: wid, maxDim: maxDim)
-                            }.value
+                            let image = await WindowCatalog.captureFallbackWithCGWindowList(
+                                windowID: wid,
+                                maxDim: maxDim,
+                                permitPool: permitPool
+                            )
                             return (wid, image)
                         }
                     }
@@ -700,6 +759,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     // Used as a last-resort fallback when both SCKit capture attempts time out
     // or fail: SCKit can be flaky on off-screen / multi-Space / recently-created
     // windows, while the legacy API often succeeds where SCKit stalls.
+    private static func captureFallbackWithCGWindowList(
+        windowID: CGWindowID,
+        maxDim: Int,
+        permitPool: CapturePermitPool
+    ) async -> NSImage? {
+        await permitPool.acquire()
+        return await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            defer {
+                Task {
+                    await permitPool.release()
+                }
+            }
+            return WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
+        }.value
+    }
+
     private static func captureWithCGWindowList(windowID: CGWindowID, maxDim: Int) -> NSImage? {
         guard let cgImage = CGWindowListCreateImage(
             .null,

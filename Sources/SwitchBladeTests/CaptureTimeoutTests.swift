@@ -134,13 +134,7 @@ enum CaptureTimeoutTests {
     @MainActor static func storeForwardsLifecycleInvalidation() async throws {
         let (store, catalog, _, _) = makeStore()
 
-        store.invalidateCaptureCache(reason: "test display change")
-
-        for _ in 0 ..< 30 {
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 5_000_000)
-            if catalog.invalidateContentCacheCallCount > 0 { break }
-        }
+        await store.invalidateCaptureCache(reason: "test display change")
 
         try expectEqual(catalog.invalidateContentCacheCallCount, 1)
         try expectEqual(catalog.lastInvalidationReason, "test display change")
