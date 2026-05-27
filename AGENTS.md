@@ -12,6 +12,12 @@ the current task and verify live repo state before acting.
 - When shared workflow, architecture, or critical-decision facts change, update these
   repo files in the same change so Claude Code, Codex, and Copilot can all follow the
   same source.
+- Build scripts must never persistently modify the global user keychain search
+  list. If a temporary signing keychain is needed, save the original
+  `security list-keychains -d user` output, restore it before exit, and keep the
+  final guard check. Search-list pollution from a split `Application Support`
+  path caused a macOS Microsoft 365 / Office activation incident in May 2026;
+  see `~/Downloads/macos_m365_handoff_v2_2026-05-26.md` for context.
 
 ## Shared Skill Sources
 
