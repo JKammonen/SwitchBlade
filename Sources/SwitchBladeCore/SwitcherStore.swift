@@ -37,6 +37,7 @@ final class SwitcherStore: ObservableObject {
     private var staleCacheHealTask: Task<Void, Never>?
     private var contentCacheWarmupTask: Task<Void, Never>?
     private var openItemsWarmupTask: Task<Void, Never>?
+    private var panelShowTask: Task<Void, Never>?
     private var previewWarmupTask: Task<Void, Never>?
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
@@ -49,6 +50,9 @@ final class SwitcherStore: ObservableObject {
     private var hoverEnabled = false
     /// True while the visible switcher still shows a stale cached list.
     private var isShowingStaleCachedItems = false
+    /// True after the current Cmd+Tab cycle has resolved items/selection but is
+    /// still intentionally holding the panel hidden to allow fast release.
+    private var hasPreparedHiddenOpen = false
     private var currentAppPID: pid_t?
     private var previousAppPID: pid_t?
 
@@ -62,6 +66,7 @@ final class SwitcherStore: ObservableObject {
     /// Injectable so tests can shorten the window without sleeping for a minute.
     private let activationWarmupWindow: TimeInterval
     private let cachedOpenItemsMaxAge: TimeInterval
+    private let initialPanelShowDelayNanoseconds: UInt64
 
     private final class InFlightVisibleSnapshot {
         let task: Task<[WindowItem], Never>
@@ -81,6 +86,7 @@ final class SwitcherStore: ObservableObject {
         performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
         activationWarmupWindow: TimeInterval = 60,
         cachedOpenItemsMaxAge: TimeInterval = 30,
+        initialPanelShowDelayNanoseconds: UInt64 = 120_000_000,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
     ) {
@@ -93,6 +99,7 @@ final class SwitcherStore: ObservableObject {
         self.performanceMetrics = performanceMetrics
         self.activationWarmupWindow = activationWarmupWindow
         self.cachedOpenItemsMaxAge = cachedOpenItemsMaxAge
+        self.initialPanelShowDelayNanoseconds = initialPanelShowDelayNanoseconds
         self.currentAppPID = initialFrontmostAppPID
         self.switchBladePID = switchBladePID
 
@@ -136,6 +143,7 @@ final class SwitcherStore: ObservableObject {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
+        panelShowTask?.cancel()
         staleCacheHealTask?.cancel()
         previewWarmupTask?.cancel()
         if let activationObserver {
@@ -216,7 +224,8 @@ final class SwitcherStore: ObservableObject {
                 permissionMs: permissionMs,
                 snapshotMs: snapshotMs,
                 orderMs: orderMs,
-                source: "snapshot"
+                source: "snapshot",
+                delayPanelShow: false
             )
             return
         }
@@ -232,6 +241,10 @@ final class SwitcherStore: ObservableObject {
             cycle(forward: forward)
             return
         }
+        if isSwitching, hasPreparedHiddenOpen {
+            moveSelection(forward ? 1 : -1)
+            return
+        }
         // Two rapid Cmd+Tab events arrive before the async open completes: the
         // second call would post another cycle() task and double-fire the preview
         // load. Drop it — the in-flight open already covers this key-down.
@@ -241,9 +254,11 @@ final class SwitcherStore: ObservableObject {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
+        panelShowTask?.cancel()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
         isSwitching = true
+        hasPreparedHiddenOpen = false
 
         if !cachedOpenItems.isEmpty {
             let cacheIsFresh = isCachedOpenItemsFresh()
@@ -259,7 +274,8 @@ final class SwitcherStore: ObservableObject {
                 orderMs: 0,
                 source: cacheIsFresh ? "cached" : "stale-cached",
                 updateCachedItems: cacheIsFresh,
-                showingStaleCachedItems: !cacheIsFresh
+                showingStaleCachedItems: !cacheIsFresh,
+                delayPanelShow: true
             )
             if !cacheIsFresh {
                 scheduleStaleCacheHealingIfNeeded()
@@ -386,6 +402,15 @@ final class SwitcherStore: ObservableObject {
 
     func commitSelection() {
         if isSwitching, !isVisible {
+            if hasPreparedHiddenOpen, let item = selectedItem {
+                Logger.switcher.info(
+                    "Commit selection from prepared hidden open item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+                )
+                performSelectionAction(for: item, actionName: "activate") { activator, selectedItem in
+                    activator.activate(selectedItem)
+                }
+                return
+            }
             Logger.switcher.info("Commit selection deferred until open completes")
             commitWhenOpenCompletes = true
             return
@@ -513,15 +538,17 @@ final class SwitcherStore: ObservableObject {
 
     private func performSelectionAction(
         for item: WindowItem,
+        liveItems: [WindowItem]? = nil,
         actionName: String,
         action: @escaping (WindowActivating, WindowItem) -> Void
     ) {
+        let liveItems = liveItems ?? items
         Logger.switcher.info(
             "Schedule selection action=\(actionName, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
         mruTracker.rememberSelection(
             item.id,
-            in: items,
+            in: liveItems,
             context: "selection-\(actionName)-stale=\(isShowingStaleCachedItems)"
         )
         hide()
@@ -542,6 +569,10 @@ final class SwitcherStore: ObservableObject {
             return sourceItems
         }
         return sourceItems.map { previewCache.hydrated($0, liveItems: sourceItems) }
+    }
+
+    private func defaultSelectedID(in orderedItems: [WindowItem]) -> WindowItem.ID? {
+        orderedItems.indices.contains(1) ? orderedItems[1].id : orderedItems.first?.id
     }
 
     private func orderItems(_ sourceItems: [WindowItem]) -> [WindowItem] {
@@ -571,11 +602,14 @@ final class SwitcherStore: ObservableObject {
         previewLoadTask = nil
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
+        panelShowTask?.cancel()
+        panelShowTask = nil
         previewWarmupTask?.cancel()
         isVisible = false
         isSwitching = false
         hoverEnabled = false
         isShowingStaleCachedItems = false
+        hasPreparedHiddenOpen = false
         commitWhenOpenCompletes = false
         pendingOpenRequestedAt = nil
         onHide?()
@@ -592,7 +626,8 @@ final class SwitcherStore: ObservableObject {
         orderMs: Double,
         source: String,
         updateCachedItems: Bool = true,
-        showingStaleCachedItems: Bool = false
+        showingStaleCachedItems: Bool = false,
+        delayPanelShow: Bool = false
     ) {
         guard !orderedItems.isEmpty else {
             isSwitching = false
@@ -605,6 +640,43 @@ final class SwitcherStore: ObservableObject {
             updateCachedOpenItems(orderedItems)
         }
         isShowingStaleCachedItems = showingStaleCachedItems
+        let preselectedID = defaultSelectedID(in: orderedItems)
+
+        // Quick Cmd+Tab release should not pay the panel show or preview path
+        // once the target window has already been resolved off-main.
+        if commitWhenOpenCompletes {
+            logOpenOrdering(source: "\(source)-quick-release", orderedItems: orderedItems, selectedID: preselectedID)
+            let quickSwitchMs = Date().timeIntervalSince(openStart) * 1000
+            if PerformanceLoggingState.mode != .off {
+                if let queueMs {
+                    Logger.switcher.info(
+                        "Quick release before panel show: \(orderedItems.count, privacy: .public) windows ready in \(quickSwitchMs, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+                    )
+                } else {
+                    Logger.switcher.info(
+                        "Quick release before panel show: \(orderedItems.count, privacy: .public) windows ready in \(quickSwitchMs, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), queue=n/a, permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+                    )
+                }
+            }
+
+            commitWhenOpenCompletes = false
+            guard let preselectedID,
+                  let item = orderedItems.first(where: { $0.id == preselectedID }) else {
+                Logger.switcher.notice("Quick release aborted: no selected item after snapshot")
+                hide()
+                return
+            }
+
+            performSelectionAction(
+                for: item,
+                liveItems: orderedItems,
+                actionName: "activate"
+            ) { activator, selectedItem in
+                activator.activate(selectedItem)
+            }
+            return
+        }
+
         let hydrateStart = Date()
         let hydratedItems = hydratedForDisplay(orderedItems)
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
@@ -617,7 +689,7 @@ final class SwitcherStore: ObservableObject {
         t.disablesAnimations = true
         withTransaction(t) {
             items = hydratedItems
-            selectedID = items.indices.contains(1) ? items[1].id : items.first?.id
+            selectedID = preselectedID
         }
         logOpenOrdering(source: source, orderedItems: orderedItems, selectedID: selectedID)
 
@@ -635,14 +707,12 @@ final class SwitcherStore: ObservableObject {
                 )
             }
         }
-        showWithPreviews()
-
-        if commitWhenOpenCompletes {
-            // Clear before the delegate call — commitSelection() must not
-            // re-enter this branch if it somehow triggers another cycle.
-            commitWhenOpenCompletes = false
-            commitSelection()
-            return
+        if delayPanelShow {
+            hasPreparedHiddenOpen = true
+            schedulePreparedPanelShow()
+        } else {
+            hasPreparedHiddenOpen = false
+            showWithPreviews()
         }
 
         // Lazily fetch minimized windows off the main thread and merge them in.
@@ -684,7 +754,8 @@ final class SwitcherStore: ObservableObject {
                 permissionMs: permissionMs,
                 snapshotMs: snapshotMs,
                 orderMs: orderMs,
-                source: "snapshot"
+                source: "snapshot",
+                delayPanelShow: true
             )
         }
     }
@@ -711,8 +782,11 @@ final class SwitcherStore: ObservableObject {
 
             self.updateCachedOpenItems(orderedItems)
 
-            if self.isVisible, self.isShowingStaleCachedItems {
-                let hydrateMs = self.applyStaleCacheRefresh(orderedItems)
+            if self.isShowingStaleCachedItems {
+                let hydrateMs = self.applyStaleCacheRefresh(
+                    orderedItems,
+                    showAfterRefresh: self.isVisible
+                )
                 if PerformanceLoggingState.mode != .off {
                     Logger.switcher.info(
                         "Open-items refresh after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public)"
@@ -726,7 +800,10 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func applyStaleCacheRefresh(_ orderedItems: [WindowItem]) -> Double {
+    private func applyStaleCacheRefresh(
+        _ orderedItems: [WindowItem],
+        showAfterRefresh: Bool
+    ) -> Double {
         isShowingStaleCachedItems = false
         let previousSelectedID = selectedID
         let hydrateStart = Date()
@@ -745,8 +822,34 @@ final class SwitcherStore: ObservableObject {
         }
 
         previewLoadTask?.cancel()
-        showWithPreviews()
+        if showAfterRefresh {
+            showWithPreviews()
+        }
         return hydrateMs
+    }
+
+    private func schedulePreparedPanelShow() {
+        panelShowTask?.cancel()
+        let delayNanoseconds = initialPanelShowDelayNanoseconds
+
+        guard delayNanoseconds > 0 else {
+            showPreparedPanelIfNeeded()
+            return
+        }
+
+        panelShowTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard let self, !Task.isCancelled else { return }
+            self.showPreparedPanelIfNeeded()
+        }
+    }
+
+    private func showPreparedPanelIfNeeded() {
+        guard isSwitching, !isVisible, hasPreparedHiddenOpen else { return }
+        panelShowTask?.cancel()
+        panelShowTask = nil
+        hasPreparedHiddenOpen = false
+        showWithPreviews()
     }
 
     func schedulePreviewCacheWarmup(context: String) {
@@ -893,6 +996,9 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func showWithPreviews() {
+        panelShowTask?.cancel()
+        panelShowTask = nil
+        hasPreparedHiddenOpen = false
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
             previewGeneration += 1
             let generation = previewGeneration

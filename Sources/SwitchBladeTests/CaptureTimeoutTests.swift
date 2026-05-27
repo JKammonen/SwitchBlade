@@ -122,6 +122,10 @@ enum CaptureTimeoutTests {
         store.requestCycle(forward: true)
         await runPendingMainTasks()
 
+        try expect(!store.isVisible)
+        try? await Task.sleep(nanoseconds: 130_000_000)
+        await runPendingMainTasks()
+
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2, 3])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)

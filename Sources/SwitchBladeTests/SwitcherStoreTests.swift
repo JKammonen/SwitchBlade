@@ -14,9 +14,10 @@ enum SwitcherStoreTests {
         ("Store/cycle_whenVisible_movesBackward_wraps", cycle_visibleBackwardWraps),
         ("Store/cycle_selectionWrapsAtEnd", cycle_selectionWraps),
         ("Store/requestCycle_marksSwitchingSynchronously", requestCycle_marksSwitchingSynchronously),
-        ("Store/requestCycle_fastReleaseCommitsAfterOpen", requestCycle_fastReleaseCommitsAfterOpen),
+        ("Store/requestCycle_fastReleaseCommitsWithoutShowingPanel", requestCycle_fastReleaseCommitsWithoutShowingPanel),
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
+        ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
@@ -172,12 +173,14 @@ enum SwitcherStoreTests {
         await runPendingMainTasks()
     }
 
-    @MainActor static func requestCycle_fastReleaseCommitsAfterOpen() async throws {
+    @MainActor static func requestCycle_fastReleaseCommitsWithoutShowingPanel() async throws {
         let (store, catalog, activator, _) = makeStore()
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
+        var onShowCalls = 0
+        store.onShow = { onShowCalls += 1 }
 
         store.requestCycle(forward: true)
         store.commitSelection()
@@ -185,6 +188,8 @@ enum SwitcherStoreTests {
 
         try expectEqual(activator.activatedItems.map(\.id), [2])
         try expect(!store.isVisible)
+        try expectEqual(onShowCalls, 0)
+        try expectEqual(catalog.captureCallCount, 0)
     }
 
     @MainActor static func requestCycle_doubleCallDropped() async throws {
@@ -198,6 +203,8 @@ enum SwitcherStoreTests {
         // Second call while isSwitching=true should be dropped — only one cycle() task fires.
         store.requestCycle(forward: true)
 
+        await runPendingMainTasks()
+        try? await Task.sleep(nanoseconds: 130_000_000)
         await runPendingMainTasks()
 
         // Panel opened exactly once: one items load, one show.
@@ -223,12 +230,44 @@ enum SwitcherStoreTests {
         store.requestCycle(forward: true)
 
         try expect(store.isSwitching)
-        try expect(store.isVisible, "cached request should reuse the warmed item list immediately")
+        try expect(!store.isVisible, "cached request should prepare the warmed item list before the delayed panel show")
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+
+        try expectEqual(store.items.map(\.id), [1, 2])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+
+        try? await Task.sleep(nanoseconds: 130_000_000)
+        await runPendingMainTasks()
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2])
+    }
+
+    @MainActor static func requestCycle_cachedSecondTabMovesSelectionBeforePanelShows() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        store.cycle(forward: true)
+        store.cancel()
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+
+        store.requestCycle(forward: true)
+        try expect(!store.isVisible)
+        try expectEqual(store.selectedID, 2)
+
+        store.requestCycle(forward: true)
+        try expectEqual(store.selectedID, 3)
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+
+        try? await Task.sleep(nanoseconds: 130_000_000)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.selectedID, 3)
     }
 
     @MainActor static func requestCycle_reusesInFlightWarmupSnapshot() async throws {
@@ -259,6 +298,9 @@ enum SwitcherStoreTests {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        if !store.isVisible {
+            try? await Task.sleep(nanoseconds: 130_000_000)
+        }
         await runPendingMainTasks()
 
         try expect(store.isVisible)
@@ -282,9 +324,10 @@ enum SwitcherStoreTests {
 
         store.requestCycle(forward: true)
 
-        try expect(store.isVisible, "stale cached request should still show immediately, then heal in background")
+        try expect(!store.isVisible, "stale cached request should prepare hidden items first so quick release can bypass the panel")
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
 
+        try? await Task.sleep(nanoseconds: 130_000_000)
         await runPendingMainTasks()
 
         try expect(store.isVisible)
@@ -310,7 +353,7 @@ enum SwitcherStoreTests {
         store.requestCycle(forward: true)
 
         try expect(store.isSwitching)
-        try expect(store.isVisible, "stale cached request should still show immediately before the background heal")
+        try expect(!store.isVisible, "stale cached request should stay hidden long enough for quick release to commit directly")
 
         store.commitSelection()
         await runPendingMainTasks()
@@ -323,6 +366,10 @@ enum SwitcherStoreTests {
         await runPendingMainTasks()
 
         store.requestCycle(forward: true)
+
+        try expect(!store.isVisible)
+        try? await Task.sleep(nanoseconds: 130_000_000)
+        await runPendingMainTasks()
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [3, 4])

@@ -151,6 +151,7 @@ func makeStore(
     userDefaults: UserDefaults = makeIsolatedUserDefaults(),
     activationWarmupWindow: TimeInterval = 60,
     cachedOpenItemsMaxAge: TimeInterval = 30,
+    initialPanelShowDelayNanoseconds: UInt64 = 120_000_000,
     initialFrontmostAppPID: pid_t? = nil,
     switchBladePID: pid_t = getpid()
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
@@ -161,6 +162,7 @@ func makeStore(
         userDefaults: userDefaults,
         activationWarmupWindow: activationWarmupWindow,
         cachedOpenItemsMaxAge: cachedOpenItemsMaxAge,
+        initialPanelShowDelayNanoseconds: initialPanelShowDelayNanoseconds,
         initialFrontmostAppPID: initialFrontmostAppPID,
         switchBladePID: switchBladePID
     )
