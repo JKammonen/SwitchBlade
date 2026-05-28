@@ -377,7 +377,18 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     ) async -> [CGWindowID: NSImage] {
         guard !Task.isCancelled else { return [:] }
         // Single preflight syscall instead of currentState() which does three.
-        guard CGPreflightScreenCaptureAccess() else { return [:] }
+        guard CGPreflightScreenCaptureAccess() else {
+            PerformanceDiagnostics.record(
+                "capture_previews",
+                fields: [
+                    "captured": .int(0),
+                    "max_concurrent": .int(maxConcurrentCaptures),
+                    "requested": .int(maxCount.map { min(windowIDs.count, $0) } ?? windowIDs.count),
+                    "screen_recording": .bool(false)
+                ]
+            )
+            return [:]
+        }
 
         // Refresh inline when the cache is missing OR stale: stale SCWindow refs
         // lose their warm capture-pipeline link, and proceeding with them costs
@@ -560,6 +571,21 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 }
             }
             let ms = Date().timeIntervalSince(captureStart) * 1000
+            PerformanceDiagnostics.record(
+                "capture_previews",
+                fields: [
+                    "captured": .int(result.count),
+                    "first_failures": .int(firstAttemptFailures),
+                    "first_timeouts": .int(firstAttemptTimeouts),
+                    "max_concurrent": .int(maxConcurrentCaptures),
+                    "milliseconds": .double(ms),
+                    "requested": .int(requestedIDs.count),
+                    "sc_missing": .int(scMissingIDs.count),
+                    "screen_recording": .bool(true),
+                    "second_failures": .int(secondAttemptFailures),
+                    "second_timeouts": .int(secondAttemptTimeouts)
+                ]
+            )
             if PerformanceLoggingState.mode == .debug {
                 Logger.capture.info(
                     "Captured \(result.count, privacy: .public)/\(requestedIDs.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"

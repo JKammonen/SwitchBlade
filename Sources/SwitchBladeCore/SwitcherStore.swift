@@ -67,6 +67,7 @@ final class SwitcherStore: ObservableObject {
     private let activationWarmupWindow: TimeInterval
     private let cachedOpenItemsMaxAge: TimeInterval
     private let initialPanelShowDelayNanoseconds: UInt64
+    private let deferredPreviewCaptureBudget: Int
 
     private final class InFlightVisibleSnapshot {
         let task: Task<[WindowItem], Never>
@@ -87,6 +88,7 @@ final class SwitcherStore: ObservableObject {
         activationWarmupWindow: TimeInterval = 60,
         cachedOpenItemsMaxAge: TimeInterval = 30,
         initialPanelShowDelayNanoseconds: UInt64 = 120_000_000,
+        deferredPreviewCaptureBudget: Int = 12,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
     ) {
@@ -100,6 +102,7 @@ final class SwitcherStore: ObservableObject {
         self.activationWarmupWindow = activationWarmupWindow
         self.cachedOpenItemsMaxAge = cachedOpenItemsMaxAge
         self.initialPanelShowDelayNanoseconds = initialPanelShowDelayNanoseconds
+        self.deferredPreviewCaptureBudget = max(0, deferredPreviewCaptureBudget)
         self.currentAppPID = initialFrontmostAppPID
         self.switchBladePID = switchBladePID
 
@@ -693,6 +696,20 @@ final class SwitcherStore: ObservableObject {
         let cachedHits = items.filter { $0.preview != nil }.count
         let coldMs = Date().timeIntervalSince(openStart) * 1000
         let coldSummary = performanceMetrics.recordColdOpen(milliseconds: coldMs)
+        var coldFields: [String: PerformanceMetricValue] = [
+            "cached_hits": .int(cachedHits),
+            "hydrate_ms": .double(hydrateMs),
+            "milliseconds": .double(coldMs),
+            "order_ms": .double(orderMs),
+            "permission_ms": .double(permissionMs),
+            "source": .string(source),
+            "window_count": .int(orderedItems.count)
+        ]
+        if let queueMs {
+            coldFields["queue_ms"] = .double(queueMs)
+        }
+        coldFields["snapshot_ms"] = .double(snapshotMs)
+        PerformanceDiagnostics.record("cold_open", fields: coldFields)
         if PerformanceLoggingState.mode != .off {
             if let queueMs {
                 Logger.switcher.info(
@@ -1056,13 +1073,46 @@ final class SwitcherStore: ObservableObject {
             let successRate = windowIDs.isEmpty ? 0
                 : Double(previews.count) / Double(initialWindowIDs.count)
             let batchSummary = self.performanceMetrics.recordFirstPreviewBatch(milliseconds: firstBatchMs)
+            PerformanceDiagnostics.record(
+                "first_preview_batch",
+                fields: [
+                    "captured": .int(previews.count),
+                    "initial_requested": .int(initialWindowIDs.count),
+                    "milliseconds": .double(firstBatchMs),
+                    "success_rate": .double(successRate),
+                    "total_capturable": .int(windowIDs.count)
+                ]
+            )
             if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
                     "First preview batch: \(previews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(firstBatchMs, format: .fixed(precision: 1), privacy: .public) ms (rate \(successRate, format: .fixed(precision: 2), privacy: .public)); rolling n=\(batchSummary.count, privacy: .public), avg=\(batchSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(batchSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(batchSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(batchSummary.max, format: .fixed(precision: 1), privacy: .public)"
                 )
             }
 
-            let deferredWindowIDs = windowIDs.filter { previews[$0] == nil }
+            let firstBatchWindowIDSet = Set(firstBatchWindowIDs)
+            let failedInitialWindowIDs = firstBatchWindowIDs.filter { previews[$0] == nil }
+            let uncachedDeferredWindowIDs = self.items.compactMap { item -> CGWindowID? in
+                guard !item.isMinimized,
+                      item.canCapturePreview,
+                      item.preview == nil,
+                      !firstBatchWindowIDSet.contains(item.windowID) else {
+                    return nil
+                }
+                return item.windowID
+            }
+            let deferredCandidates = failedInitialWindowIDs + uncachedDeferredWindowIDs
+            let deferredWindowIDs = Array(deferredCandidates.prefix(self.deferredPreviewCaptureBudget))
+            if PerformanceLoggingState.mode == .debug, !deferredCandidates.isEmpty {
+                PerformanceDiagnostics.record(
+                    "deferred_preview_selection",
+                    fields: [
+                        "budget": .int(self.deferredPreviewCaptureBudget),
+                        "candidates": .int(deferredCandidates.count),
+                        "scheduled": .int(deferredWindowIDs.count),
+                        "total_capturable": .int(windowIDs.count)
+                    ]
+                )
+            }
             if !deferredWindowIDs.isEmpty {
                 let allPreviews = await catalog.capturePreviews(
                     for: deferredWindowIDs,

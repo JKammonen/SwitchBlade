@@ -102,6 +102,16 @@ final class SwitcherPanelController {
         let sizeMs = sizeEnd.timeIntervalSince(sizeStart) * 1000
         let layoutMs = layoutEnd.timeIntervalSince(layoutStart) * 1000
         let orderMs = orderEnd.timeIntervalSince(orderStart) * 1000
+        PerformanceDiagnostics.record(
+            "panel_show",
+            fields: [
+                "item_count": .int(itemCount),
+                "layout_ms": .double(layoutMs),
+                "milliseconds": .double(ms),
+                "order_ms": .double(orderMs),
+                "size_ms": .double(sizeMs)
+            ]
+        )
         Logger.switcher.notice(
             "Panel show: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items; size=\(sizeMs, format: .fixed(precision: 1), privacy: .public), layout=\(layoutMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
         )
