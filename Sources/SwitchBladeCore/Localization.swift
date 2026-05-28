@@ -309,6 +309,17 @@ public enum L10n {
 
     public static func tr(_ key: Key) -> String {
         let lang = LocalizationState.effectiveLanguage
+        return tr(key, language: lang)
+    }
+
+    public static func tr(_ key: Key, language: AppLanguage) -> String {
+        let lang: AppLanguage
+        switch language {
+        case .system:
+            lang = LocalizationState.effectiveLanguage
+        case .english, .finnish:
+            lang = language
+        }
         return table(for: lang)[key] ?? L10nTables.english[key] ?? key.rawValue
     }
 

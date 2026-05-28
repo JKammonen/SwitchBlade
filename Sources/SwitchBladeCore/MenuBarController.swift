@@ -129,43 +129,61 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     static func aboutPanelOptions(bundleInfo: [String: Any]) -> [NSApplication.AboutPanelOptionKey: Any] {
-        guard let versionString = aboutVersionString(bundleInfo: bundleInfo) else {
-            return [:]
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+        if let versionString = aboutVersionString(bundleInfo: bundleInfo) {
+            options[.applicationVersion] = versionString
         }
-        return [.applicationVersion: versionString]
+        if let timestampString = aboutTimestampString(bundleInfo: bundleInfo) {
+            options[.credits] = NSAttributedString(string: timestampString)
+        }
+        return options
     }
 
     static func aboutVersionString(bundleInfo: [String: Any]) -> String? {
         let version = bundleInfo["CFBundleShortVersionString"] as? String
-        let build = bundleInfo["CFBundleVersion"] as? String
-        let timestamp = bundleInfo["SwitchBladeBuildTimestamp"] as? String
 
-        let versionPart: String?
-        switch (version, build) {
-        case let (.some(version), .some(build)) where !version.isEmpty && !build.isEmpty:
-            versionPart = "\(version) (\(build))"
-        case let (.some(version), _) where !version.isEmpty:
-            versionPart = version
-        case let (_, .some(build)) where !build.isEmpty:
-            versionPart = build
-        default:
-            versionPart = nil
+        return version.flatMap { value -> String? in
+            guard !value.isEmpty else { return nil }
+            return value
         }
+    }
 
+    static func aboutTimestampString(
+        bundleInfo: [String: Any],
+        timeZone: TimeZone = .autoupdatingCurrent,
+        language: AppLanguage = LocalizationState.effectiveLanguage
+    ) -> String? {
+        let timestamp = bundleInfo["SwitchBladeBuildTimestamp"] as? String
         let timestampPart = timestamp.flatMap { rawTimestamp -> String? in
             guard !rawTimestamp.isEmpty else { return nil }
-            return "\(L10n.tr(.aboutBuiltAt)) \(rawTimestamp)"
+            let formattedTimestamp = formattedBuildTimestamp(
+                from: rawTimestamp,
+                timeZone: timeZone,
+                language: language
+            ) ?? rawTimestamp
+            return "\(L10n.tr(.aboutBuiltAt, language: language)) \(formattedTimestamp)"
         }
+        return timestampPart
+    }
 
-        switch (versionPart, timestampPart) {
-        case let (.some(versionPart), .some(timestampPart)):
-            return "\(versionPart) - \(timestampPart)"
-        case let (.some(versionPart), nil):
-            return versionPart
-        case let (nil, .some(timestampPart)):
-            return timestampPart
-        case (nil, nil):
-            return nil
+    static func formattedBuildTimestamp(
+        from rawTimestamp: String,
+        timeZone: TimeZone = .autoupdatingCurrent,
+        language: AppLanguage = LocalizationState.effectiveLanguage
+    ) -> String? {
+        let parser = ISO8601DateFormatter()
+        guard let date = parser.date(from: rawTimestamp) else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.timeZone = timeZone
+        switch language {
+        case .finnish:
+            formatter.locale = Locale(identifier: "fi_FI")
+            formatter.dateFormat = "d.M.yyyy 'klo' HH.mm"
+        case .english, .system:
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH:mm"
         }
+        return formatter.string(from: date)
     }
 }
