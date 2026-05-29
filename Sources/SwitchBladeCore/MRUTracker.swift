@@ -201,7 +201,38 @@ final class MRUTracker {
         // known-live state; activation notifications are app-level only.
     }
 
+    /// Drops the rank for one specific window. Use this when you KNOW the
+    /// window is gone (close/quit) — do not infer "missing means dead" from
+    /// the displayed `items` list. The displayed list may be a stale cached
+    /// snapshot or may not yet include minimized windows, so a sweep-style
+    /// `pruneToLive(items)` would wrongly drop ranks for windows that are
+    /// alive but absent from the UI's view.
+    func dropRank(forID id: CGWindowID) {
+        recentRanks.removeAll { $0.windowID == id }
+    }
+
+    /// Drops every rank tied to a single app identity. Use this when the user
+    /// quits the entire app — every window of that pid is gone, regardless of
+    /// which ones the switcher happened to display. Also clears the persisted
+    /// bundle entry so the app doesn't seed back at the top of a fresh launch.
+    func dropAllRanks(forAppIdentity identity: String, bundleIdentifier: String?) {
+        recentRanks.removeAll { $0.appIdentity == identity }
+        if let bundleIdentifier {
+            recentBundleIDs.removeAll { $0 == bundleIdentifier }
+            userDefaults.set(recentBundleIDs, forKey: storageKey)
+        }
+    }
+
     /// Removes IDs that no longer correspond to live items.
+    ///
+    /// **Caller contract**: `liveItems` MUST be an authoritative list of every
+    /// live window — visible AND minimized AND any other off-screen windows.
+    /// Passing a partial list (e.g. the switcher's displayed `items` while
+    /// minimized merge is pending) will wrongly drop ranks of windows that
+    /// are alive but missing from the view, causing them to fall to the
+    /// snapshot-fallback tail on the next open. Today no production caller
+    /// can guarantee this — prefer `dropRank(forID:)` or
+    /// `dropAllRanks(forAppIdentity:)`.
     func pruneToLive(_ liveItems: [WindowItem]) {
         let liveIDs = Set(liveItems.map(\.id))
         let liveSignatures = Set(liveItems.map(signature(for:)))

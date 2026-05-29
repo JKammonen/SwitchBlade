@@ -384,7 +384,10 @@ final class SwitcherStore: ObservableObject {
         guard let selected = selectedItem else { return }
         activator.quit(selected)
         items.removeAll { $0.pid == selected.pid }
-        mruTracker.pruneToLive(items)
+        mruTracker.dropAllRanks(
+            forAppIdentity: selected.bundleIdentifier ?? selected.appName,
+            bundleIdentifier: selected.bundleIdentifier
+        )
         if items.isEmpty {
             cancel()
         } else {
@@ -728,16 +731,12 @@ final class SwitcherStore: ObservableObject {
             hasPreparedHiddenOpen = false
             showWithPreviews()
         }
-
-        // Lazily fetch minimized windows off the main thread and merge them in.
-        // The AX walk is ~150–500ms with many apps — running it here would block
-        // the panel from appearing.
-        let mergeGeneration = previewGeneration
-        let catalog = self.catalog
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let minimized = await catalog.snapshotMinimized()
-            await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
-        }
+        // Minimized merge is now scheduled inside showWithPreviews so it
+        // captures the post-increment previewGeneration. Capturing here would
+        // race the delay-path: schedulePreparedPanelShow defers showWithPreviews
+        // by initialPanelShowDelayNanoseconds, so previewGeneration would
+        // still be the pre-show value, and the eventual merge-guard
+        // `previewGeneration == generation` would always fail.
     }
 
     private func openFromFreshSnapshotOffMain() {
@@ -1020,6 +1019,7 @@ final class SwitcherStore: ObservableObject {
             isVisible = true
             schedulePanelShow(generation: generation)
             scheduleHoverEnable(generation: previewGeneration)
+            scheduleMinimizedMerge()
             return
         }
 
@@ -1033,6 +1033,7 @@ final class SwitcherStore: ObservableObject {
             isVisible = true
             schedulePanelShow(generation: generation)
             scheduleHoverEnable(generation: generation)
+            scheduleMinimizedMerge()
             return
         }
 
@@ -1052,6 +1053,7 @@ final class SwitcherStore: ObservableObject {
         isVisible = true
         schedulePanelShow(generation: generation)
         scheduleHoverEnable(generation: generation)
+        scheduleMinimizedMerge()
 
         previewLoadTask = Task {
             let batchStart = Date()
@@ -1139,6 +1141,20 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
+    /// Lazily fetch minimized windows off the main thread and merge them in.
+    /// The AX walk is ~150–500 ms with many apps — running it inline would
+    /// block the panel from appearing. Called from `showWithPreviews` so the
+    /// captured `previewGeneration` matches the just-incremented value the
+    /// eventual merge-guard checks against.
+    private func scheduleMinimizedMerge() {
+        let mergeGeneration = previewGeneration
+        let catalog = self.catalog
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let minimized = await catalog.snapshotMinimized()
+            await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+        }
+    }
+
     private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) {
         guard isVisible, previewGeneration == generation, !minimized.isEmpty else { return }
         let existingIDs = Set(items.map(\.id))
@@ -1169,7 +1185,7 @@ final class SwitcherStore: ObservableObject {
     private func removeItem(withID id: WindowItem.ID) {
         let removedIndex = items.firstIndex(where: { $0.id == id })
         items.removeAll { $0.id == id }
-        mruTracker.pruneToLive(items)
+        mruTracker.dropRank(forID: id)
 
         guard !items.isEmpty else {
             cancel()

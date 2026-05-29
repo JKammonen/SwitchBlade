@@ -21,6 +21,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
+        ("Store/cachedDelayPath_mergesMinimizedAfterPanelShow", cachedDelayPath_mergesMinimized),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -243,6 +244,41 @@ enum SwitcherStoreTests {
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2])
+    }
+
+    // Regression guard for "minimized windows do not appear in the switcher":
+    // the cached open path delays panel show by initialPanelShowDelayNanoseconds.
+    // Previously, mergeGeneration was captured BEFORE showWithPreviews ran
+    // (in the delay path), so the eventual merge-guard `previewGeneration ==
+    // generation` always failed and minimized never merged. Now the merge is
+    // scheduled inside showWithPreviews so the captured generation matches.
+    @MainActor static func cachedDelayPath_mergesMinimized() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        catalog.minimizedItems = [
+            makeItem(id: 99, isMinimized: true)
+        ]
+        // Prime cachedOpenItems via a full open + cancel cycle.
+        store.cycle(forward: true)
+        store.cancel()
+        await runPendingMainTasks()
+
+        // requestCycle now uses the cached path with delayPanelShow=true.
+        store.requestCycle(forward: true)
+
+        // Wait past the panel-show delay so showWithPreviews has fired and
+        // scheduleMinimizedMerge has captured the post-increment generation.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expect(
+            store.items.contains(where: { $0.id == 99 }),
+            "minimized window must merge into items after the delayed cached open"
+        )
     }
 
     @MainActor static func requestCycle_cachedSecondTabMovesSelectionBeforePanelShows() async throws {

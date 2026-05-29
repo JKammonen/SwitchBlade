@@ -25,6 +25,8 @@ enum MRUTrackerTests {
         ("MRU/pruneToLive_emptyList_clearsAllRankData", pruneToLiveEmpty),
         ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
         ("MRU/rememberSelection_capsAtMaxBundles", capsBundles),
+        ("MRU/dropRank_removesOnlySpecifiedWindowKeepsOthers", dropRankSpecificOnly),
+        ("MRU/dropAllRanksForApp_clearsRanksAndBundle", dropAllRanksForApp),
         ("MRU/rememberSelection_nilBundleID_writesRanksSkipsBundleList", rememberSelectionNilBundle),
         ("MRU/rememberSelection_preservesRanksForWindowsMissingFromStaleLiveItems", rememberSelectionPreservesMissing),
         ("MRU/orderedForDisplay_emptySnapshot_returnsEmpty", orderedForDisplayEmpty),
@@ -504,6 +506,56 @@ enum MRUTrackerTests {
         let ordered = tracker.orderedForDisplay(from: snapshot)
         // No isFrontmostApp flag → snapshot[0] used as frontmost.
         try expectEqual(ordered.first?.id, 1)
+    }
+
+    // Regression guard for the "random tail" bug: closing one window from the
+    // switcher used to call `pruneToLive(items)` against the displayed list,
+    // which would also drop ranks for any live window absent from that view
+    // (e.g. minimized windows that hadn't merged in yet). Those windows then
+    // fell to the snapshot-fallback tail on the next open. Targeted dropRank
+    // touches only the actually-closed window's rank.
+    @MainActor static func dropRankSpecificOnly() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300),
+            makeItem(id: 4, pid: 400)
+        ]
+        tracker.rememberSelection(3, in: snapshot)
+        // recentRanks now: [3, 1, 2, 4]
+
+        // User closes window 2 from the switcher. Only its rank should go.
+        tracker.dropRank(forID: 2)
+
+        let liveItemsAfterClose = snapshot.filter { $0.id != 2 }
+        let ordered = tracker.orderedForDisplay(from: liveItemsAfterClose)
+        // 1 frontmost, then 3 (rank-leading), then 4 (preserved tail rank).
+        try expectEqual(ordered.map(\.id), [1, 3, 4])
+    }
+
+    @MainActor static func dropAllRanksForApp() throws {
+        let ud = makeIsolatedUserDefaults()
+        let tracker = MRUTracker(userDefaults: ud)
+        let snapshot = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 200, bundleIdentifier: "com.example.terminal"),
+            makeItem(id: 3, pid: 200, bundleIdentifier: "com.example.terminal"),
+            makeItem(id: 4, pid: 300, bundleIdentifier: "com.example.browser")
+        ]
+        tracker.rememberSelection(2, in: snapshot)
+        try expect(tracker.recentBundleIDs.contains("com.example.terminal"))
+
+        // User quits Terminal entirely. Both windows + bundle entry should clear.
+        tracker.dropAllRanks(
+            forAppIdentity: "com.example.terminal",
+            bundleIdentifier: "com.example.terminal"
+        )
+
+        let live = snapshot.filter { $0.bundleIdentifier != "com.example.terminal" }
+        let ordered = tracker.orderedForDisplay(from: live)
+        try expectEqual(ordered.map(\.id), [1, 4])
+        try expect(!tracker.recentBundleIDs.contains("com.example.terminal"))
     }
 
     @MainActor static func capsBundles() throws {
