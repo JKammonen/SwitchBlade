@@ -46,6 +46,7 @@ enum L10nTables {
         .actionSnapRight:                 "Right",
         .actionSnapTop:                   "Up",
         .actionSnapBottom:                "Down",
+        .windowStateMinimized:            "Minimized",
 
         .permissionMessageAccessibility:  "Enable Accessibility for exact window focus.",
         .permissionMessageScreenRecording:"Enable Screen Recording for live window previews.",
@@ -139,6 +140,7 @@ enum L10nTables {
         .actionSnapRight:                 "Oikea",
         .actionSnapTop:                   "Ylös",
         .actionSnapBottom:                "Alas",
+        .windowStateMinimized:            "Minimoitu",
 
         .permissionMessageAccessibility:  "Salli Accessibility tarkkaa ikkunafokusta varten.",
         .permissionMessageScreenRecording:"Salli Screen Recording elävien esikatselujen näyttämiseksi.",

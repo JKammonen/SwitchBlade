@@ -1,7 +1,7 @@
 import AppKit
 import CoreGraphics
 
-/// Two-level preview cache:
+/// Multi-key preview cache:
 /// 1. Primary key — CGWindowID. Hits when the window is still alive and its
 ///    bounds haven't drifted from the cached snapshot.
 /// 2. Fallback key — "pid::displayTitle" signature. Hits when the windowID
@@ -10,6 +10,9 @@ import CoreGraphics
 /// 3. Narrow app-identity fallback. If an app currently has exactly one live
 ///    window, a recreated window can reuse that app's last preview even when
 ///    both ID and title changed.
+/// 4. Retained exact signature for minimized AX rows. Visible-only snapshots
+///    prune normal live keys once a window is minimized, but a recent
+///    pid+bundle/title match can still safely show the last real preview.
 ///
 /// Kept off SwitcherStore so the storage logic can be reasoned about in
 /// isolation; the store just feeds it the live items + fresh captures and
@@ -19,16 +22,27 @@ final class PreviewCacheStore {
     private var byID: LRUDictionary<CGWindowID, CachedPreview>
     private var bySignature: LRUDictionary<String, CachedPreview>
     private var byAppIdentity: LRUDictionary<String, CachedPreview>
+    private var byRecentlySeenSignature: LRUDictionary<String, CachedPreview>
+    private let retainedPreviewMaxAge: TimeInterval
+    private let now: () -> Date
 
-    init(capacity: Int = 40) {
+    init(
+        capacity: Int = 40,
+        retainedPreviewMaxAge: TimeInterval = 300,
+        now: @escaping () -> Date = Date.init
+    ) {
         byID = LRUDictionary(capacity: capacity)
         bySignature = LRUDictionary(capacity: capacity)
         byAppIdentity = LRUDictionary(capacity: capacity)
+        byRecentlySeenSignature = LRUDictionary(capacity: capacity)
+        self.retainedPreviewMaxAge = retainedPreviewMaxAge
+        self.now = now
     }
 
     struct CachedPreview {
         let image: NSImage
         let bounds: CGRect
+        let capturedAt: Date
     }
 
     /// Returns a hydrated copy of `item` if we have any usable preview,
@@ -44,7 +58,16 @@ final class PreviewCacheStore {
         if let cached = byID[item.windowID] {
             return item.withPreview(cached.image)
         }
-        if let cached = bySignature[signature(for: item)] {
+        let itemSignature = signature(for: item)
+        if liveItems.filter({ signature(for: $0) == itemSignature }).count == 1,
+           let cached = bySignature[itemSignature] {
+            return item.withPreview(cached.image)
+        }
+        let exactSignature = recentSignature(for: item)
+        if item.isMinimized,
+           liveItems.filter({ recentSignature(for: $0) == exactSignature }).count == 1,
+           let cached = byRecentlySeenSignature[exactSignature],
+           isFreshEnough(cached) {
             return item.withPreview(cached.image)
         }
         let identity = appIdentity(for: item)
@@ -69,16 +92,16 @@ final class PreviewCacheStore {
         }
         let itemsByID = Dictionary(uniqueKeysWithValues: liveItems.map { ($0.windowID, $0) })
         let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: liveItems, appIdentity: appIdentity(for:))
-        let isBlankStorm = Self.isBlankStorm(previews)
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
             guard let item = itemsByID[windowID] else { continue }
-            if shouldRejectTransientBlankCapture(image, for: item, isBlankStorm: isBlankStorm) {
+            if shouldRejectTransientBlankCapture(image) {
                 continue
             }
-            let cached = CachedPreview(image: image, bounds: item.bounds)
+            let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
             bySignature[signature(for: item)] = cached
+            byRecentlySeenSignature[recentSignature(for: item)] = cached
             if singleWindowAppIdentities.contains(appIdentity(for: item)) {
                 byAppIdentity[appIdentity(for: item)] = cached
             }
@@ -98,27 +121,23 @@ final class PreviewCacheStore {
         "\(item.pid)::\(item.displayTitle)"
     }
 
+    private func recentSignature(for item: WindowItem) -> String {
+        "\(item.pid)::\(appIdentity(for: item))::\(item.displayTitle)"
+    }
+
     private func appIdentity(for item: WindowItem) -> String {
         item.bundleIdentifier ?? item.appName
     }
 
-    private func shouldRejectTransientBlankCapture(
-        _ image: NSImage,
-        for item: WindowItem,
-        isBlankStorm: Bool
-    ) -> Bool {
+    private func isFreshEnough(_ cached: CachedPreview) -> Bool {
+        now().timeIntervalSince(cached.capturedAt) <= retainedPreviewMaxAge
+    }
+
+    private func shouldRejectTransientBlankCapture(_ image: NSImage) -> Bool {
         guard Self.isMostlyWhite(image) else {
             return false
         }
-        return isBlankStorm || isSafariLike(item)
-    }
-
-    private func isSafariLike(_ item: WindowItem) -> Bool {
-        let bundle = (item.bundleIdentifier ?? "").lowercased()
-        let appName = item.appName.lowercased()
-        return bundle == "com.apple.safari"
-            || bundle == "com.apple.safaritechnologypreview"
-            || appName == "safari"
+        return true
     }
 
     static func isMostlyWhite(_ image: NSImage) -> Bool {
@@ -160,14 +179,6 @@ final class PreviewCacheStore {
 
         guard opaqueSamples > 0 else { return false }
         return Double(whiteSamples) / Double(opaqueSamples) > 0.97
-    }
-
-    private static func isBlankStorm(_ previews: [CGWindowID: NSImage]) -> Bool {
-        guard previews.count >= 3 else { return false }
-        let whiteCount = previews.values.reduce(0) { count, image in
-            count + (isMostlyWhite(image) ? 1 : 0)
-        }
-        return Double(whiteCount) / Double(previews.count) >= 0.75
     }
 
     private static func singleWindowAppIdentities(

@@ -15,6 +15,8 @@ actor DominantColorCache {
 enum PreviewScalingPolicy {
     static let containedPreviewInset: CGFloat = 12
     static let minimumVisibleFractionForFill: CGFloat = 0.78
+    static let placeholderIconFraction: CGFloat = 0.42
+    static let minimizedPlaceholderIconFraction: CGFloat = 0.24
 
     /// Small windows like Calculator look wrong when forced to fill the whole
     /// tile: the preview gets enlarged and cropped as if it were a large
@@ -32,6 +34,10 @@ enum PreviewScalingPolicy {
         let tileAspectRatio = max(tileSize.width, 1) / max(tileSize.height, 1)
         let visibleFractionWhenFilled = min(windowAspectRatio, tileAspectRatio) / max(windowAspectRatio, tileAspectRatio)
         return visibleFractionWhenFilled < minimumVisibleFractionForFill
+    }
+
+    static func placeholderIconSide(tileSize: CGSize, isMinimized: Bool) -> CGFloat {
+        min(tileSize.width, tileSize.height) * (isMinimized ? minimizedPlaceholderIconFraction : placeholderIconFraction)
     }
 }
 
@@ -256,6 +262,9 @@ private struct WindowTile: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .blur(radius: settings.previewMode == .blurredPreviews ? 10 : 0)
                         .clipped()
+                } else if item.isMinimized {
+                    minimizedPlaceholderFill
+                        .frame(width: geo.size.width, height: geo.size.height)
                 } else {
                     placeholderFill
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -434,7 +443,7 @@ private struct WindowTile: View {
 
     private var placeholderFill: some View {
         GeometryReader { geo in
-            let iconSide = min(geo.size.width, geo.size.height) * 0.42
+            let iconSide = PreviewScalingPolicy.placeholderIconSide(tileSize: geo.size, isMinimized: false)
             ZStack {
                 // Soft gradient base so even icon-less items still look intentional.
                 previewBackdrop
@@ -457,6 +466,49 @@ private struct WindowTile: View {
                         .clipShape(RoundedRectangle(cornerRadius: iconSide * 0.22, style: .continuous))
                         .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 2)
                 }
+            }
+        }
+    }
+
+    private var minimizedPlaceholderFill: some View {
+        GeometryReader { geo in
+            let iconSide = PreviewScalingPolicy.placeholderIconSide(tileSize: geo.size, isMinimized: true)
+            ZStack {
+                previewBackdrop
+                if let icon = item.icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFill()
+                        .opacity(0.12)
+                        .blur(radius: 28)
+                        .clipped()
+                }
+
+                VStack(spacing: 10) {
+                    ZStack(alignment: .bottomTrailing) {
+                        if let icon = item.icon {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: iconSide, height: iconSide)
+                                .clipShape(RoundedRectangle(cornerRadius: iconSide * 0.22, style: .continuous))
+                        }
+                        Image(systemName: "dock.rectangle")
+                            .font(.system(size: max(10, iconSide * 0.22), weight: .bold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .padding(5)
+                            .background(Color.black.opacity(0.62), in: Circle())
+                            .offset(x: iconSide * 0.14, y: iconSide * 0.14)
+                    }
+                    Text(L10n.tr(.windowStateMinimized))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.74))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.38), in: Capsule())
+                }
+                .padding(.top, settings.badgePosition == .top ? 26 : 0)
+                .padding(.bottom, settings.badgePosition == .bottom ? 26 : 0)
             }
         }
     }

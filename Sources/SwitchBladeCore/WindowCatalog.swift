@@ -216,6 +216,22 @@ enum WindowSharingPolicy {
     }
 }
 
+/// SwiftUI's `Image(nsImage:)` caches its rendered bitmap keyed by the
+/// NSImage's `name`. `NSRunningApplication.icon` hands back name-less images,
+/// so inside a recycling container (the switcher's `LazyVGrid`) SwiftUI can
+/// serve a previously-cached bitmap for a different app when a tile view is
+/// reused — e.g. Finder's tile showing Codex's icon after the minimized merge
+/// mutates the displayed list. Returning a uniquely-named copy (keyed by bundle
+/// id, falling back to app name) gives each app its own cache entry so reuse
+/// resolves the right icon. Copy first so the shared app icon is never mutated.
+enum IconNaming {
+    static func named(_ icon: NSImage?, bundleIdentifier: String?, appName: String) -> NSImage? {
+        guard let icon, let copy = icon.copy() as? NSImage else { return icon }
+        copy.setName(bundleIdentifier ?? appName)
+        return copy
+    }
+}
+
 final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let excludedBundleIdentifiers: Set<String> = [
         "com.apple.PasswordsUIAgent",
@@ -359,7 +375,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 isMinimized: false,
                 canCapturePreview: sharingState != 0,
                 preview: nil,
-                icon: application?.icon,
+                icon: IconNaming.named(application?.icon, bundleIdentifier: application?.bundleIdentifier, appName: appName),
                 bundleIdentifier: application?.bundleIdentifier
             )
         }
@@ -694,7 +710,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     isMinimized: true,
                     canCapturePreview: false,
                     preview: nil,
-                    icon: application.icon,
+                    icon: IconNaming.named(application.icon, bundleIdentifier: application.bundleIdentifier, appName: appName),
                     bundleIdentifier: application.bundleIdentifier
                 ))
             }

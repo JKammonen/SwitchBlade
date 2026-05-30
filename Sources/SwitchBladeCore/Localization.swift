@@ -241,6 +241,7 @@ public enum L10n {
         case actionSnapRight
         case actionSnapTop
         case actionSnapBottom
+        case windowStateMinimized
 
         // Permission messages
         case permissionMessageAccessibility

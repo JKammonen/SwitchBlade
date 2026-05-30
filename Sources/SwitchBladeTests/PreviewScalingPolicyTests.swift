@@ -6,7 +6,8 @@ enum PreviewScalingPolicyTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("PreviewScalingPolicy/containsPreview_whenWindowSmallerThanTile", containsPreview_whenWindowSmallerThanTile),
         ("PreviewScalingPolicy/containsPreview_whenAspectMismatchWouldCropTooMuch", containsPreview_whenAspectMismatchWouldCropTooMuch),
-        ("PreviewScalingPolicy/fillsPreview_whenWindowLargerThanTile", fillsPreview_whenWindowLargerThanTile)
+        ("PreviewScalingPolicy/fillsPreview_whenWindowLargerThanTile", fillsPreview_whenWindowLargerThanTile),
+        ("PreviewScalingPolicy/minimizedPlaceholderUsesSmallerIcon", minimizedPlaceholderUsesSmallerIcon)
     ]
 
     @MainActor static func containsPreview_whenWindowSmallerThanTile() throws {
@@ -34,5 +35,14 @@ enum PreviewScalingPolicyTests {
         )
 
         try expect(!shouldContain, "expected large document window to keep fill behavior")
+    }
+
+    @MainActor static func minimizedPlaceholderUsesSmallerIcon() throws {
+        let tileSize = CGSize(width: 420, height: 255)
+        let normal = PreviewScalingPolicy.placeholderIconSide(tileSize: tileSize, isMinimized: false)
+        let minimized = PreviewScalingPolicy.placeholderIconSide(tileSize: tileSize, isMinimized: true)
+
+        try expect(minimized < normal, "minimized fallback must not look like a large fake preview")
+        try expect(abs(minimized - 61.2) < 0.001, "expected minimized fallback icon to stay compact")
     }
 }

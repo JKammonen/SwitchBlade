@@ -8,15 +8,19 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/record_then_hydrated_returnsImage_byWindowID", roundTrip_byWindowID),
         ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
         ("PreviewCache/hydrated_fallsBackTo_signature_whenBoundsChange", signatureFallback),
+        ("PreviewCache/minimizedExactSignatureSurvivesVisiblePrune", minimizedExactSignatureSurvivesVisiblePrune),
+        ("PreviewCache/nonMinimizedDoesNotUseRetainedPrunedPreview", nonMinimizedDoesNotUseRetainedPrunedPreview),
+        ("PreviewCache/minimizedDuplicateExactSignatureDoesNotGuess", minimizedDuplicateExactSignatureDoesNotGuess),
+        ("PreviewCache/minimizedRetainedPreviewExpires", minimizedRetainedPreviewExpires),
         ("PreviewCache/hydrated_singleWindowTitleChange_fallsBackToAppIdentity", singleWindowAppIdentityFallback),
         ("PreviewCache/hydrated_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowNoAppIdentityGuess),
         ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
         ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate),
         ("PreviewCache/mostlyWhiteDetection", mostlyWhiteDetection),
-        ("PreviewCache/safariBlankCapture_isRejectedWithoutExistingPreview", safariBlankCaptureIsRejectedWithoutExistingPreview),
-        ("PreviewCache/safariBlankCapture_doesNotReplaceExistingPreview", safariBlankCaptureDoesNotReplaceExistingPreview),
+        ("PreviewCache/blankCapture_isRejectedWithoutExistingPreview", blankCaptureIsRejectedWithoutExistingPreview),
+        ("PreviewCache/blankCapture_doesNotReplaceExistingPreview", blankCaptureDoesNotReplaceExistingPreview),
         ("PreviewCache/blankStorm_rejectsMostlyWhiteBatch", blankStormRejectsMostlyWhiteBatch),
-        ("PreviewCache/singleWhiteNonSafariCapture_isAccepted", singleWhiteNonSafariCaptureIsAccepted)
+        ("PreviewCache/singleWhiteNonSafariCapture_isRejected", singleWhiteNonSafariCaptureIsRejected)
     ]
 
     @MainActor static func hydrated_noMatch() throws {
@@ -61,6 +65,127 @@ enum PreviewCacheStoreTests {
         let respawned = makeItem(id: 2, pid: 100, appName: "App", title: "Doc")
         let result = store.hydrated(respawned, liveItems: [respawned])
         try expect(result.preview === img)
+    }
+
+    @MainActor static func minimizedExactSignatureSurvivesVisiblePrune() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Claude",
+            title: "Chat",
+            bundleIdentifier: "com.anthropic.claude"
+        )
+        let other = makeItem(id: 2, pid: 200, appName: "Notes", title: "Note")
+        let img = NSImage(size: .init(width: 4, height: 4))
+        let otherImg = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: img], liveItems: [original])
+
+        // A later visible-only capture no longer contains the minimized window.
+        // The normal live caches prune it, but the exact recent signature remains
+        // available for the AX-minimized row.
+        store.record([2: otherImg], liveItems: [other])
+
+        let minimized = makeItem(
+            id: 99,
+            pid: 100,
+            appName: "Claude",
+            title: "Chat",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.anthropic.claude"
+        )
+        let result = store.hydrated(minimized, liveItems: [other, minimized])
+        try expect(result.preview === img)
+    }
+
+    @MainActor static func nonMinimizedDoesNotUseRetainedPrunedPreview() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Claude",
+            title: "Chat",
+            bundleIdentifier: "com.anthropic.claude"
+        )
+        let other = makeItem(id: 2, pid: 200, appName: "Notes", title: "Note")
+        store.record([1: NSImage(size: .init(width: 4, height: 4))], liveItems: [original])
+        store.record([2: NSImage(size: .init(width: 4, height: 4))], liveItems: [other])
+
+        let recreatedVisible = makeItem(
+            id: 99,
+            pid: 100,
+            appName: "Claude",
+            title: "Chat",
+            isMinimized: false,
+            bundleIdentifier: "com.anthropic.claude"
+        )
+        let result = store.hydrated(recreatedVisible, liveItems: [other, recreatedVisible])
+        try expectNil(result.preview)
+    }
+
+    @MainActor static func minimizedDuplicateExactSignatureDoesNotGuess() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Terminal",
+            title: "shell",
+            bundleIdentifier: "com.apple.Terminal"
+        )
+        let img = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: img], liveItems: [original])
+
+        let firstMinimized = makeItem(
+            id: 99,
+            pid: 100,
+            appName: "Terminal",
+            title: "shell",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.apple.Terminal"
+        )
+        let secondMinimized = makeItem(
+            id: 100,
+            pid: 100,
+            appName: "Terminal",
+            title: "shell",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.apple.Terminal"
+        )
+
+        let liveItems = [firstMinimized, secondMinimized]
+        try expectNil(store.hydrated(firstMinimized, liveItems: liveItems).preview)
+        try expectNil(store.hydrated(secondMinimized, liveItems: liveItems).preview)
+    }
+
+    @MainActor static func minimizedRetainedPreviewExpires() throws {
+        var currentDate = Date(timeIntervalSince1970: 0)
+        let store = PreviewCacheStore(retainedPreviewMaxAge: 10, now: { currentDate })
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Claude",
+            title: "Chat",
+            bundleIdentifier: "com.anthropic.claude"
+        )
+        let other = makeItem(id: 2, pid: 200, appName: "Notes", title: "Note")
+        store.record([1: NSImage(size: .init(width: 4, height: 4))], liveItems: [original])
+        store.record([2: NSImage(size: .init(width: 4, height: 4))], liveItems: [other])
+
+        currentDate = Date(timeIntervalSince1970: 11)
+        let minimized = makeItem(
+            id: 99,
+            pid: 100,
+            appName: "Claude",
+            title: "Chat",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.anthropic.claude"
+        )
+
+        try expectNil(store.hydrated(minimized, liveItems: [other, minimized]).preview)
     }
 
     @MainActor static func singleWindowAppIdentityFallback() throws {
@@ -153,9 +278,9 @@ enum PreviewCacheStoreTests {
         try expect(!PreviewCacheStore.isMostlyWhite(solidImage(color: .systemBlue)))
     }
 
-    @MainActor static func safariBlankCaptureDoesNotReplaceExistingPreview() throws {
+    @MainActor static func blankCaptureDoesNotReplaceExistingPreview() throws {
         let store = PreviewCacheStore()
-        let item = makeItem(id: 1, appName: "Safari", bundleIdentifier: "com.apple.Safari")
+        let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
         let good = solidImage(color: .systemBlue)
         let blank = solidImage(color: .white)
 
@@ -167,9 +292,9 @@ enum PreviewCacheStoreTests {
         try expect(store.hydrated(item, liveItems: [item]).preview === good)
     }
 
-    @MainActor static func safariBlankCaptureIsRejectedWithoutExistingPreview() throws {
+    @MainActor static func blankCaptureIsRejectedWithoutExistingPreview() throws {
         let store = PreviewCacheStore()
-        let item = makeItem(id: 1, appName: "Safari", bundleIdentifier: "com.apple.Safari")
+        let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
         let blank = solidImage(color: .white)
 
         let accepted = store.record([1: blank], liveItems: [item])
@@ -199,15 +324,15 @@ enum PreviewCacheStoreTests {
         try expectNil(store.hydrated(c, liveItems: [a, b, c]).preview)
     }
 
-    @MainActor static func singleWhiteNonSafariCaptureIsAccepted() throws {
+    @MainActor static func singleWhiteNonSafariCaptureIsRejected() throws {
         let store = PreviewCacheStore()
         let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
         let blank = solidImage(color: .white)
 
         let accepted = store.record([1: blank], liveItems: [item])
 
-        try expect(accepted[1] === blank)
-        try expect(store.hydrated(item, liveItems: [item]).preview === blank)
+        try expectNil(accepted[1])
+        try expectNil(store.hydrated(item, liveItems: [item]).preview)
     }
 
     private static func solidImage(color: NSColor) -> NSImage {
