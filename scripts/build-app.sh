@@ -32,59 +32,67 @@ sign_with_local_identity() {
     local keychain_password
     keychain_password="$(<"$SWITCHBLADE_CODESIGN_PASSWORD_FILE")"
 
-    local temp_dir temp_keychain identity_hash
-    temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/switchblade-codesign.XXXXXX")"
-    temp_keychain="$temp_dir/SwitchBladeCodesign.keychain"
-    local original_keychains=()
-    while IFS= read -r keychain; do
-        [[ -n "$keychain" ]] && original_keychains+=("$keychain")
-    done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//')
+    (
+        set +e
 
-    local had_errexit=0
-    [[ -o errexit ]] && had_errexit=1
-    set +e
+        local temp_dir temp_keychain identity_hash
+        temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/switchblade-codesign.XXXXXX")"
+        temp_keychain="$temp_dir/SwitchBladeCodesign.keychain"
+        local original_keychains=()
+        while IFS= read -r keychain; do
+            [[ -n "$keychain" ]] && original_keychains+=("$keychain")
+        done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//')
 
-    security create-keychain -p "$keychain_password" "$temp_keychain" >/dev/null
-    local sign_status=$?
-    if (( sign_status == 0 )); then
-        security unlock-keychain -p "$keychain_password" "$temp_keychain" >/dev/null
-        sign_status=$?
-    fi
-    if (( sign_status == 0 )); then
-        security set-keychain-settings -lut 21600 "$temp_keychain" >/dev/null
-        sign_status=$?
-    fi
-    if (( sign_status == 0 )); then
-        security list-keychains -d user -s "$temp_keychain" "${original_keychains[@]}" >/dev/null
-        sign_status=$?
-    fi
-    if (( sign_status == 0 )); then
-        security import "$SWITCHBLADE_CODESIGN_ARCHIVE" \
-        -k "$temp_keychain" \
-        -P "$keychain_password" \
-        -T /usr/bin/codesign \
-        -T /usr/bin/security >/dev/null
-        sign_status=$?
-    fi
-    if (( sign_status == 0 )); then
-        security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$temp_keychain" >/dev/null
-        sign_status=$?
-    fi
+        cleanup_signing_state() {
+            security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
+            rm -rf "$temp_dir"
+        }
 
-    if (( sign_status == 0 )); then
-        identity_hash="$(security find-identity -v -p codesigning "$temp_keychain" | awk -v name="$identity_name" '$0 ~ name { print $2; exit }')"
-        [[ -n "$identity_hash" ]]
-        sign_status=$?
-    fi
-    if (( sign_status == 0 )); then
-        codesign --force --deep --sign "$identity_hash" --keychain "$temp_keychain" "$app_bundle"
-        sign_status=$?
-    fi
+        # EXIT trap makes the restore path run even when signing is interrupted.
+        trap cleanup_signing_state EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
 
-    security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
-    rm -rf "$temp_dir"
-    (( had_errexit )) && set -e
-    return "$sign_status"
+        security create-keychain -p "$keychain_password" "$temp_keychain" >/dev/null
+        local sign_status=$?
+        if (( sign_status == 0 )); then
+            security unlock-keychain -p "$keychain_password" "$temp_keychain" >/dev/null
+            sign_status=$?
+        fi
+        if (( sign_status == 0 )); then
+            security set-keychain-settings -lut 21600 "$temp_keychain" >/dev/null
+            sign_status=$?
+        fi
+        if (( sign_status == 0 )); then
+            security list-keychains -d user -s "$temp_keychain" "${original_keychains[@]}" >/dev/null
+            sign_status=$?
+        fi
+        if (( sign_status == 0 )); then
+            security import "$SWITCHBLADE_CODESIGN_ARCHIVE" \
+            -k "$temp_keychain" \
+            -P "$keychain_password" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security >/dev/null
+            sign_status=$?
+        fi
+        if (( sign_status == 0 )); then
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$temp_keychain" >/dev/null
+            sign_status=$?
+        fi
+
+        if (( sign_status == 0 )); then
+            identity_hash="$(security find-identity -v -p codesigning "$temp_keychain" | awk -v name="$identity_name" '$0 ~ name { print $2; exit }')"
+            [[ -n "$identity_hash" ]]
+            sign_status=$?
+        fi
+        if (( sign_status == 0 )); then
+            codesign --force --deep --sign "$identity_hash" --keychain "$temp_keychain" "$app_bundle"
+            sign_status=$?
+        fi
+
+        exit "$sign_status"
+    )
 }
 
 output_dir="$repo_root/dist"
