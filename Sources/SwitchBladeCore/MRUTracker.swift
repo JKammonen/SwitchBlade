@@ -78,7 +78,11 @@ final class MRUTracker {
         var remainingBySignature = Dictionary(grouping: snapshot.filter { !seen.contains($0.id) },
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
-        for (rankIndex, rank) in recentRanks.enumerated() {
+        let currentFrontmostIdentity = appIdentity(for: currentFrontmost)
+        let replayRanks = frontmostConcreteRanksFirst(
+            currentFrontmostIdentity: currentFrontmostIdentity
+        )
+        for (rankIndex, rank) in replayRanks {
             if let windowID = rank.windowID,
                let item = itemsByID[windowID] {
                 if seen.insert(item.id).inserted {
@@ -291,6 +295,24 @@ final class MRUTracker {
 
     private func appIdentity(for item: WindowItem) -> String {
         item.bundleIdentifier ?? item.appName
+    }
+
+    private func frontmostConcreteRanksFirst(
+        currentFrontmostIdentity: String
+    ) -> [(offset: Int, element: RankEntry)] {
+        let concreteSameAppRanks = recentRanks.enumerated().filter { _, rank in
+            rank.appIdentity == currentFrontmostIdentity
+                && (rank.windowID != nil || rank.signature != nil)
+        }
+        guard !concreteSameAppRanks.isEmpty else {
+            return Array(recentRanks.enumerated())
+        }
+
+        let concreteSameAppRankIndexes = Set(concreteSameAppRanks.map(\.offset))
+        let remainingRanks = recentRanks.enumerated().filter { index, _ in
+            !concreteSameAppRankIndexes.contains(index)
+        }
+        return concreteSameAppRanks + remainingRanks
     }
 
     private func diagnosticEntry(for item: WindowItem, rank: Int, reason: String) -> String {

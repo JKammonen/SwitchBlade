@@ -23,6 +23,7 @@ enum MRUTrackerTests {
         ("MRU/trackSystemActivation_doesNotPruneFromStaleStoreSnapshot", systemActivationDoesNotPrune),
         ("MRU/trackSystemActivation_singleWindowAppGetsIdentityRank", systemActivationSingleWindowAppGetsIdentityRank),
         ("MRU/trackSystemActivation_multiWindowAppIsNotGuessed", systemActivationMultiWindowAppIsNotGuessed),
+        ("MRU/orderedForDisplay_sameAppConcreteRankBeatsOtherAppIdentityRank", sameAppConcreteRankBeatsOtherAppIdentityRank),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
         ("MRU/pruneToLive_emptyList_clearsAllRankData", pruneToLiveEmpty),
         ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
@@ -441,6 +442,27 @@ enum MRUTrackerTests {
         let ordered = tracker.orderedForDisplay(from: nextSnapshot)
 
         try expectEqual(ordered.map(\.id), [1, 2, 30, 31])
+    }
+
+    @MainActor static func sameAppConcreteRankBeatsOtherAppIdentityRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Mail", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser")
+        ]
+        tracker.rememberSelection(10, in: initialSnapshot)
+
+        tracker.trackSystemActivation(200, in: [], bundleIdentifier: "com.example.browser")
+
+        let nextSnapshot = [
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Mail", bundleIdentifier: "com.microsoft.Outlook")
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+
+        try expectEqual(ordered.map(\.id), [11, 10, 20])
     }
 
     @MainActor static func pruneDeadIDs() throws {
