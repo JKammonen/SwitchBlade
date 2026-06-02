@@ -133,7 +133,8 @@ final class SwitcherStore: ObservableObject {
                 previousAppPID = currentAppPID
                 currentAppPID = pid
             }
-            mruTracker.trackSystemActivation(pid, in: items)
+            let bundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+            mruTracker.trackSystemActivation(pid, in: items, bundleIdentifier: bundleIdentifier)
         }
         // Opportunistic cache warmup — gated on recent-use so we don't burn
         // cycles for users who haven't touched the switcher in a while.

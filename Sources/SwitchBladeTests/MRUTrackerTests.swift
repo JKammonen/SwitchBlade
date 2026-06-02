@@ -21,6 +21,8 @@ enum MRUTrackerTests {
         ("MRU/pruneToLive_singleWindowIdentityRank_survivesIDAndTitleChange", pruneSingleWindowIdentityRankSurvivesIDAndTitleChange),
         ("MRU/trackSystemActivation_doesNotMovePidWindowsToFront", systemActivation),
         ("MRU/trackSystemActivation_doesNotPruneFromStaleStoreSnapshot", systemActivationDoesNotPrune),
+        ("MRU/trackSystemActivation_singleWindowAppGetsIdentityRank", systemActivationSingleWindowAppGetsIdentityRank),
+        ("MRU/trackSystemActivation_multiWindowAppIsNotGuessed", systemActivationMultiWindowAppIsNotGuessed),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
         ("MRU/pruneToLive_emptyList_clearsAllRankData", pruneToLiveEmpty),
         ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
@@ -398,6 +400,47 @@ enum MRUTrackerTests {
         ])
 
         try expectEqual(tracker.recentWindowIDs, before)
+    }
+
+    @MainActor static func systemActivationSingleWindowAppGetsIdentityRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        tracker.trackSystemActivation(300, in: [], bundleIdentifier: "com.openai.codex")
+
+        let nextSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser"),
+            makeItem(id: 30, pid: 300, appName: "Codex", title: "Codex", bundleIdentifier: "com.openai.codex")
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+
+        try expectEqual(ordered.map(\.id), [1, 30, 2])
+    }
+
+    @MainActor static func systemActivationMultiWindowAppIsNotGuessed() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        tracker.trackSystemActivation(300, in: [], bundleIdentifier: "com.example.multi")
+
+        let nextSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser"),
+            makeItem(id: 30, pid: 300, appName: "Multi", title: "A", bundleIdentifier: "com.example.multi"),
+            makeItem(id: 31, pid: 300, appName: "Multi", title: "B", bundleIdentifier: "com.example.multi")
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+
+        try expectEqual(ordered.map(\.id), [1, 2, 30, 31])
     }
 
     @MainActor static func pruneDeadIDs() throws {

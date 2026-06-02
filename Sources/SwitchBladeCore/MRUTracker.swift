@@ -192,13 +192,35 @@ final class MRUTracker {
         userDefaults.set(recentBundleIDs, forKey: storageKey)
     }
 
-    /// System activation only tells us the app PID, not the specific window.
-    /// Do not reshuffle or prune per-window MRU from that coarse signal: the
-    /// live item list may be a stale switcher snapshot, not an authoritative
-    /// window inventory.
-    func trackSystemActivation(_ pid: pid_t, in liveItems: [WindowItem]) {
-        // Intentionally no-op. Explicit selections, closes, and quits update
-        // known-live state; activation notifications are app-level only.
+    /// System activation only tells us the app, not the specific window.
+    /// Record an identity-only rank so single-window apps activated outside
+    /// SwitchBlade do not fall to the snapshot tail. Multi-window apps are not
+    /// guessed: `orderedForDisplay` uses this rank only when there is exactly
+    /// one unseen live window for the app identity.
+    func trackSystemActivation(
+        _ pid: pid_t,
+        in liveItems: [WindowItem],
+        bundleIdentifier: String? = nil
+    ) {
+        let identity = bundleIdentifier.flatMap { $0.isEmpty ? nil : $0 }
+            ?? liveItems.first(where: { $0.pid == pid }).map(appIdentity(for:))
+        guard let identity else { return }
+
+        recentRanks.removeAll { rank in
+            rank.appIdentity == identity && rank.windowID == nil && rank.signature == nil
+        }
+        recentRanks.insert(
+            RankEntry(windowID: nil, signature: nil, appIdentity: identity),
+            at: 0
+        )
+
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return }
+        recentBundleIDs.removeAll { $0 == bundleIdentifier }
+        recentBundleIDs.insert(bundleIdentifier, at: 0)
+        if recentBundleIDs.count > maxBundles {
+            recentBundleIDs.removeLast(recentBundleIDs.count - maxBundles)
+        }
+        userDefaults.set(recentBundleIDs, forKey: storageKey)
     }
 
     /// Drops the rank for one specific window. Use this when you KNOW the
