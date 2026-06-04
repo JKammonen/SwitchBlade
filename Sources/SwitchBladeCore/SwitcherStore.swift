@@ -45,6 +45,10 @@ final class SwitcherStore: ObservableObject {
     private var pendingOpenRequestedAt: Date?
     private var cachedOpenItems: [WindowItem] = []
     private var cachedOpenItemsUpdatedAt: Date?
+    /// Set when app focus changes outside the switcher after the cache was
+    /// built. The cached list may still be young by timestamp, but its first
+    /// item can now point at the wrong frontmost app for a fast Cmd+Tab.
+    private var cachedOpenItemsNeedResnapshot = false
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
@@ -132,6 +136,7 @@ final class SwitcherStore: ObservableObject {
             if currentAppPID != pid {
                 previousAppPID = currentAppPID
                 currentAppPID = pid
+                cachedOpenItemsNeedResnapshot = true
             }
             let bundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
             mruTracker.trackSystemActivation(pid, in: items, bundleIdentifier: bundleIdentifier)
@@ -262,6 +267,13 @@ final class SwitcherStore: ObservableObject {
         hasPreparedHiddenOpen = false
 
         if !cachedOpenItems.isEmpty {
+            if cachedOpenItemsNeedResnapshot {
+                Logger.switcher.info(
+                    "Bypassing cached open items after external activation changed the frontmost app"
+                )
+                openFromFreshSnapshotOffMain()
+                return
+            }
             let cacheIsFresh = isCachedOpenItemsFresh()
             let openStart = Date()
             let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
@@ -965,6 +977,7 @@ final class SwitcherStore: ObservableObject {
     private func updateCachedOpenItems(_ orderedItems: [WindowItem]) {
         cachedOpenItems = orderedItems
         cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
+        cachedOpenItemsNeedResnapshot = false
     }
 
     private func logOpenOrdering(source: String, orderedItems: [WindowItem], selectedID: WindowItem.ID?) {

@@ -17,6 +17,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_fastReleaseCommitsWithoutShowingPanel", requestCycle_fastReleaseCommitsWithoutShowingPanel),
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
+        ("Store/requestCycle_bypassesFreshCacheAfterExternalActivation", requestCycle_bypassesFreshCacheAfterExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
@@ -244,6 +245,35 @@ enum SwitcherStoreTests {
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2])
+    }
+
+    @MainActor static func requestCycle_bypassesFreshCacheAfterExternalActivation() async throws {
+        let (store, catalog, _, _) = makeStore(activationWarmupWindow: -1)
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        store.cycle(forward: true)
+        store.cancel()
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        catalog.visibleItems = [
+            makeItem(id: 3, pid: 300, isFrontmostApp: true),
+            makeItem(id: 4, pid: 100)
+        ]
+        store.handleAppActivation(pid: 300)
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isSwitching)
+        try expect(!store.isVisible, "fresh snapshot path should still keep the quick-release window hidden at first")
+
+        try? await Task.sleep(nanoseconds: 130_000_000)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [3, 4])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
     }
 
     // Regression guard for "minimized windows do not appear in the switcher":
