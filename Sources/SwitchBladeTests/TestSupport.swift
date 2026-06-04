@@ -192,6 +192,32 @@ func runPendingMainTasks(_ iterations: Int = 8) async {
     }
 }
 
+/// Opens the switcher through the production async path (`requestCycle`) and
+/// waits for the panel to become visible. Replaces the old synchronous
+/// `cycle()`-to-open shortcut, which exercised a code path production never hits.
+/// Polls so it works whether the store defers the panel show or not.
+@MainActor
+func openSwitcher(_ store: SwitcherStore, forward: Bool = true) async {
+    store.requestCycle(forward: forward)
+    await runPendingMainTasks()
+    for _ in 0 ..< 60 where !store.isVisible {
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        await Task.yield()
+    }
+    await runPendingMainTasks()
+}
+
+/// Populates `cachedOpenItems` the way a real open + dismiss would (one visible
+/// snapshot), then hides — without waiting for the panel to show. Use to seed the
+/// cache before a requestCycle test. Replaces the old `cycle(); cancel()` seed.
+@MainActor
+func seedOpenItemsCache(_ store: SwitcherStore, forward: Bool = true) async {
+    store.requestCycle(forward: forward)
+    await runPendingMainTasks()
+    store.cancel()
+    await runPendingMainTasks()
+}
+
 // MARK: - NSEvent factory
 
 @MainActor

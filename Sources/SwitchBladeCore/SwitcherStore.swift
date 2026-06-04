@@ -22,7 +22,28 @@ final class SwitcherStore: ObservableObject {
 
     /// True from the moment the first Cmd+Tab fires until the panel is hidden.
     /// Used so Command-release is detected even when the async show is still in flight.
-    private(set) var isSwitching = false
+    /// Derived from `phase` (anything but `.idle`); kept as public surface for
+    /// `AppDelegate`'s modifier-release tracking and the test suite.
+    var isSwitching: Bool { phase != .idle }
+
+    /// Single source of truth for the open lifecycle. Folded in the formerly
+    /// interacting booleans `hasPreparedHiddenOpen` / `commitWhenOpenCompletes` /
+    /// `isShowingStaleCachedItems`. `isSwitching` is derived from this (above) and
+    /// `isVisible` is mirrored into a `@Published` (below) for surface stability.
+    private enum OpenPhase: Equatable {
+        case idle                                  // not switching, not visible
+        case resolving(commitWhenReady: Bool)      // off-main items resolution in flight
+        case previewHidden(showingStale: Bool)     // items resolved, panel deferred for fast release
+        case visible(showingStale: Bool)           // panel on screen
+    }
+
+    private var phase: OpenPhase = .idle {
+        didSet {
+            let nowVisible: Bool
+            if case .visible = phase { nowVisible = true } else { nowVisible = false }
+            if isVisible != nowVisible { isVisible = nowVisible }
+        }
+    }
 
     private let catalog: WindowSnapshotProviding
     private let activator: WindowActivating
@@ -41,7 +62,6 @@ final class SwitcherStore: ObservableObject {
     private var previewWarmupTask: Task<Void, Never>?
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
-    private var commitWhenOpenCompletes = false
     private var pendingOpenRequestedAt: Date?
     private var cachedOpenItems: [WindowItem] = []
     private var cachedOpenItemsUpdatedAt: Date?
@@ -52,11 +72,6 @@ final class SwitcherStore: ObservableObject {
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
-    /// True while the visible switcher still shows a stale cached list.
-    private var isShowingStaleCachedItems = false
-    /// True after the current Cmd+Tab cycle has resolved items/selection but is
-    /// still intentionally holding the panel hidden to allow fast release.
-    private var hasPreparedHiddenOpen = false
     private var currentAppPID: pid_t?
     private var previousAppPID: pid_t?
     /// True while a previous-app switch is resolving its off-main snapshot.
@@ -203,6 +218,9 @@ final class SwitcherStore: ObservableObject {
         )
     }
 
+    /// Moves the selection while the panel is visible. The cold-open path lives
+    /// in `requestCycle`; `requestCycle` only calls this once `isVisible` is true,
+    /// so there is no synchronous-open branch here anymore.
     func cycle(forward: Bool) {
         Logger.switcher.notice("cycle: enter isVisible=\(self.isVisible, privacy: .public)")
         // Mark "the user is using the switcher right now" so handleAppActivation
@@ -212,35 +230,7 @@ final class SwitcherStore: ObservableObject {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
         previewWarmupTask?.cancel()
-        let permissionStart = Date()
         permissionState = permissionService.currentState()
-        let permissionMs = Date().timeIntervalSince(permissionStart) * 1000
-
-        if !isVisible {
-            openRefreshTask?.cancel()
-            let openStart = Date()
-            let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
-            pendingOpenRequestedAt = nil
-            isSwitching = true
-            previewLoadTask?.cancel()
-            let snapshotStart = Date()
-            let visibleSnapshot = catalog.snapshotVisibleOnly()
-            let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
-            let orderStart = Date()
-            let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "cycle-snapshot"))
-            let orderMs = Date().timeIntervalSince(orderStart) * 1000
-            openFromOrderedItems(
-                orderedItems,
-                openStart: openStart,
-                queueMs: queueMs,
-                permissionMs: permissionMs,
-                snapshotMs: snapshotMs,
-                orderMs: orderMs,
-                source: "snapshot",
-                delayPanelShow: false
-            )
-            return
-        }
 
         moveSelection(forward ? 1 : -1)
     }
@@ -253,7 +243,7 @@ final class SwitcherStore: ObservableObject {
             cycle(forward: forward)
             return
         }
-        if isSwitching, hasPreparedHiddenOpen {
+        if case .previewHidden = phase {
             moveSelection(forward ? 1 : -1)
             return
         }
@@ -269,8 +259,7 @@ final class SwitcherStore: ObservableObject {
         panelShowTask?.cancel()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
-        isSwitching = true
-        hasPreparedHiddenOpen = false
+        enterResolving(commitWhenReady: false)
 
         if !cachedOpenItems.isEmpty {
             if cachedOpenItemsNeedResnapshot {
@@ -424,7 +413,7 @@ final class SwitcherStore: ObservableObject {
 
     func commitSelection() {
         if isSwitching, !isVisible {
-            if hasPreparedHiddenOpen, let item = selectedItem {
+            if case .previewHidden = phase, let item = selectedItem {
                 Logger.switcher.info(
                     "Commit selection from prepared hidden open item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
                 )
@@ -434,7 +423,7 @@ final class SwitcherStore: ObservableObject {
                 return
             }
             Logger.switcher.info("Commit selection deferred until open completes")
-            commitWhenOpenCompletes = true
+            setCommitWhenReady()
             return
         }
 
@@ -599,7 +588,7 @@ final class SwitcherStore: ObservableObject {
         mruTracker.rememberSelection(
             item.id,
             in: liveItems,
-            context: "selection-\(actionName)-stale=\(isShowingStaleCachedItems)"
+            context: "selection-\(actionName)-stale=\(currentShowingStale)"
         )
         hide()
         // Give AppKit one frame to commit orderOut before WindowActivator starts
@@ -646,6 +635,55 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
+    // MARK: - Open-phase mutators
+    //
+    // `phase` is the single source of truth for the open lifecycle. Every
+    // transition routes through one of these so the lifecycle reads as a state
+    // machine, not a soup of interacting flags. `isVisible` is mirrored from
+    // `phase` in its didSet; `isSwitching` is derived (`phase != .idle`).
+
+    private func enterIdle() {
+        phase = .idle
+    }
+
+    private func enterResolving(commitWhenReady: Bool) {
+        phase = .resolving(commitWhenReady: commitWhenReady)
+    }
+
+    private func setCommitWhenReady() {
+        guard case .resolving = phase else { return }
+        phase = .resolving(commitWhenReady: true)
+    }
+
+    private func enterPreviewHidden(stale: Bool) {
+        phase = .previewHidden(showingStale: stale)
+    }
+
+    private func enterVisible(stale: Bool) {
+        phase = .visible(showingStale: stale) // didSet mirrors isVisible = true
+    }
+
+    private func setShowingStale(_ stale: Bool) {
+        switch phase {
+        case .previewHidden:
+            phase = .previewHidden(showingStale: stale)
+        case .visible:
+            phase = .visible(showingStale: stale)
+        case .idle, .resolving:
+            break
+        }
+    }
+
+    /// Stale flag carried by the current display phase (false while idle/resolving).
+    private var currentShowingStale: Bool {
+        switch phase {
+        case .previewHidden(let stale), .visible(let stale):
+            return stale
+        case .idle, .resolving:
+            return false
+        }
+    }
+
     private func hide() {
         previewGeneration += 1
         previewLoadTask?.cancel()
@@ -655,12 +693,8 @@ final class SwitcherStore: ObservableObject {
         panelShowTask?.cancel()
         panelShowTask = nil
         previewWarmupTask?.cancel()
-        isVisible = false
-        isSwitching = false
+        enterIdle()
         hoverEnabled = false
-        isShowingStaleCachedItems = false
-        hasPreparedHiddenOpen = false
-        commitWhenOpenCompletes = false
         pendingOpenRequestedAt = nil
         onHide?()
         scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
@@ -680,8 +714,7 @@ final class SwitcherStore: ObservableObject {
         delayPanelShow: Bool = false
     ) {
         guard !orderedItems.isEmpty else {
-            isSwitching = false
-            commitWhenOpenCompletes = false
+            enterIdle()
             Logger.switcher.notice("Cycle aborted: snapshot is empty")
             return
         }
@@ -689,12 +722,13 @@ final class SwitcherStore: ObservableObject {
         if updateCachedItems {
             updateCachedOpenItems(orderedItems)
         }
-        isShowingStaleCachedItems = showingStaleCachedItems
+        // Display staleness is carried into the visible/previewHidden phase by the
+        // mutators at the end of this method (enterPreviewHidden / enterVisible).
         let preselectedID = defaultSelectedID(in: orderedItems)
 
         // Quick Cmd+Tab release should not pay the panel show or preview path
         // once the target window has already been resolved off-main.
-        if commitWhenOpenCompletes {
+        if case .resolving(let commitWhenReady) = phase, commitWhenReady {
             logOpenOrdering(source: "\(source)-quick-release", orderedItems: orderedItems, selectedID: preselectedID)
             let quickSwitchMs = Date().timeIntervalSince(openStart) * 1000
             if PerformanceLoggingState.mode != .off {
@@ -709,7 +743,8 @@ final class SwitcherStore: ObservableObject {
                 }
             }
 
-            commitWhenOpenCompletes = false
+            // commitWhenReady is cleared by the hide() → enterIdle() that follows
+            // this activation (or the guard-fail hide() below).
             guard let preselectedID,
                   let item = orderedItems.first(where: { $0.id == preselectedID }) else {
                 Logger.switcher.notice("Quick release aborted: no selected item after snapshot")
@@ -772,10 +807,9 @@ final class SwitcherStore: ObservableObject {
             }
         }
         if delayPanelShow {
-            hasPreparedHiddenOpen = true
+            enterPreviewHidden(stale: showingStaleCachedItems)
             schedulePreparedPanelShow()
         } else {
-            hasPreparedHiddenOpen = false
             showWithPreviews()
         }
         // Minimized merge is now scheduled inside showWithPreviews so it
@@ -842,7 +876,7 @@ final class SwitcherStore: ObservableObject {
 
             self.updateCachedOpenItems(orderedItems)
 
-            if self.isShowingStaleCachedItems {
+            if self.currentShowingStale {
                 let hydrateMs = self.applyStaleCacheRefresh(
                     orderedItems,
                     showAfterRefresh: self.isVisible
@@ -864,7 +898,7 @@ final class SwitcherStore: ObservableObject {
         _ orderedItems: [WindowItem],
         showAfterRefresh: Bool
     ) -> Double {
-        isShowingStaleCachedItems = false
+        setShowingStale(false)
         let previousSelectedID = selectedID
         let hydrateStart = Date()
         let hydratedItems = hydratedForDisplay(orderedItems)
@@ -905,10 +939,9 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func showPreparedPanelIfNeeded() {
-        guard isSwitching, !isVisible, hasPreparedHiddenOpen else { return }
+        guard case .previewHidden = phase else { return }
         panelShowTask?.cancel()
         panelShowTask = nil
-        hasPreparedHiddenOpen = false
         showWithPreviews()
     }
 
@@ -1026,7 +1059,7 @@ final class SwitcherStore: ObservableObject {
             }
             .joined(separator: ";")
         Logger.switcher.debug(
-            "Open order source=\(source, privacy: .public) count=\(orderedItems.count, privacy: .public) selectedID=\(selectedID ?? 0, privacy: .public) staleVisible=\(self.isShowingStaleCachedItems, privacy: .public) order=[\(orderSummary, privacy: .public)]"
+            "Open order source=\(source, privacy: .public) count=\(orderedItems.count, privacy: .public) selectedID=\(selectedID ?? 0, privacy: .public) staleVisible=\(self.currentShowingStale, privacy: .public) order=[\(orderSummary, privacy: .public)]"
         )
     }
 
@@ -1059,12 +1092,14 @@ final class SwitcherStore: ObservableObject {
     private func showWithPreviews() {
         panelShowTask?.cancel()
         panelShowTask = nil
-        hasPreparedHiddenOpen = false
+        // Carry the incoming display staleness (from .previewHidden / .resolving)
+        // into the visible phase below.
+        let stale = currentShowingStale
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
             previewGeneration += 1
             let generation = previewGeneration
             hoverEnabled = false
-            isVisible = true
+            enterVisible(stale: stale)
             schedulePanelShow(generation: generation)
             scheduleHoverEnable(generation: previewGeneration)
             scheduleMinimizedMerge()
@@ -1078,7 +1113,7 @@ final class SwitcherStore: ObservableObject {
 
         guard !windowIDs.isEmpty else {
             hoverEnabled = false
-            isVisible = true
+            enterVisible(stale: stale)
             schedulePanelShow(generation: generation)
             scheduleHoverEnable(generation: generation)
             scheduleMinimizedMerge()
@@ -1098,7 +1133,7 @@ final class SwitcherStore: ObservableObject {
         let catalog = self.catalog
 
         hoverEnabled = false
-        isVisible = true
+        enterVisible(stale: stale)
         schedulePanelShow(generation: generation)
         scheduleHoverEnable(generation: generation)
         scheduleMinimizedMerge()

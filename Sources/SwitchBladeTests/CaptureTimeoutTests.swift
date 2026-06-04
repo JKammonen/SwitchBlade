@@ -77,14 +77,15 @@ enum CaptureTimeoutTests {
             makeItem(id: 2, pid: 200),
             makeItem(id: 3, pid: 300)
         ]
-        store.cycle(forward: true)        // becomes visible
+        await openSwitcher(store)         // becomes visible
         store.selectedID = 2
         store.commitSelection()
         await runPendingMainTasks()       // hidden again, MRU now [2, ...]
 
-        // App activation alone should not move pid=300 ahead of id=2.
+        // App activation alone should not move pid=300 ahead of id=2. It marks
+        // the cache for resnapshot, so the next open re-reads fresh.
         store.handleAppActivation(pid: 300)
-        store.cycle(forward: true)
+        await openSwitcher(store)
         try expectEqual(store.items.map(\.id), [1, 2, 3])
     }
 
@@ -99,8 +100,7 @@ enum CaptureTimeoutTests {
             makeItem(id: 2, pid: 100, title: "Ghostty A"),
             makeItem(id: 3, pid: 200, title: "Other App")
         ]
-        store.cycle(forward: true)
-        store.cancel()
+        await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
 

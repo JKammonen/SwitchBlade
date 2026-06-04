@@ -85,8 +85,7 @@ enum SwitcherStoreTests {
         var onShowCalls = 0
         store.onShow = { onShowCalls += 1 }
 
-        store.cycle(forward: true)
-        await runPendingMainTasks()
+        await openSwitcher(store)
 
         try expect(store.isVisible)
         try expectEqual(store.items.count, 3)
@@ -100,7 +99,8 @@ enum SwitcherStoreTests {
         var onShowCalls = 0
         store.onShow = { onShowCalls += 1 }
 
-        store.cycle(forward: true)
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
 
         try expect(!store.isVisible)
         try expect(store.items.isEmpty)
@@ -114,14 +114,14 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         try expectEqual(store.selectedID, 2)
     }
 
     @MainActor static func cycle_singleItem() async throws {
         let (store, catalog, _, _) = makeStore()
         catalog.visibleItems = [makeItem(id: 1, isFrontmostApp: true)]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         try expectEqual(store.selectedID, 1)
     }
 
@@ -132,7 +132,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)              // selected = 2
+        await openSwitcher(store)               // selected = 2
         store.cycle(forward: true)
         try expectEqual(store.selectedID, 3)
     }
@@ -144,7 +144,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)              // selected = 2
+        await openSwitcher(store)               // selected = 2
         store.cycle(forward: false)             // → 1
         store.cycle(forward: false)             // wraps → 3
         try expectEqual(store.selectedID, 3)
@@ -156,7 +156,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)              // selected = 2
+        await openSwitcher(store)               // selected = 2
         store.cycle(forward: true)              // wraps → 1
         try expectEqual(store.selectedID, 1)
         store.cycle(forward: true)              // → 2
@@ -223,8 +223,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
-        store.cancel()
+        await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -254,8 +253,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
         ]
-        store.cycle(forward: true)
-        store.cancel()
+        await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -293,9 +291,7 @@ enum SwitcherStoreTests {
             makeItem(id: 99, isMinimized: true)
         ]
         // Prime cachedOpenItems via a full open + cancel cycle.
-        store.cycle(forward: true)
-        store.cancel()
-        await runPendingMainTasks()
+        await seedOpenItemsCache(store)
 
         // requestCycle now uses the cached path with delayPanelShow=true.
         store.requestCycle(forward: true)
@@ -319,8 +315,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
-        store.cancel()
+        await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
 
@@ -348,8 +343,13 @@ enum SwitcherStoreTests {
         catalog.visibleSnapshotDelayNanoseconds = 150_000_000
 
         store.scheduleOpenItemsCacheWarmup(context: "test warmup")
-        for _ in 0 ..< 6 {
+        // Wait until the warmup's off-main snapshot has actually begun (it bumps
+        // the count, then sleeps 150 ms inside snapshotVisibleOnly). A fixed yield
+        // count raced the detached task's start under suite load; poll instead so
+        // the in-flight task is live when requestCycle below tries to reuse it.
+        for _ in 0 ..< 100 where catalog.visibleSnapshotCount == 0 {
             await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
         }
 
         try expectEqual(catalog.visibleSnapshotCount, 1)
@@ -382,8 +382,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
-        store.cancel()
+        await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -410,8 +409,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
-        store.cancel()
+        await seedOpenItemsCache(store)
 
         catalog.visibleItems = [
             makeItem(id: 3, isFrontmostApp: true),
@@ -453,7 +451,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2, appName: "Front", isFrontmostApp: true),
             makeItem(id: 3, appName: "Another")
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         try expectEqual(store.items.first?.id, 2)
     }
 
@@ -464,7 +462,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2, pid: 2),
             makeItem(id: 3, pid: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 3
         store.commitSelection()
         await runPendingMainTasks()
@@ -475,7 +473,11 @@ enum SwitcherStoreTests {
             makeItem(id: 2, pid: 2),
             makeItem(id: 3, pid: 3)
         ]
-        store.cycle(forward: true)
+        // Activating window 3 above fires a real app activation; that marks the
+        // cached open list for resnapshot so the next open re-reads the world
+        // (and applies the updated MRU order) instead of replaying the cache.
+        store.handleAppActivation(pid: 3)
+        await openSwitcher(store)
         try expectEqual(store.items.map(\.id), [1, 3, 2])
     }
 
@@ -493,7 +495,7 @@ enum SwitcherStoreTests {
             makeItem(id: 4, appName: "Gamma", title: "Alpha")
         ]
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         try expectEqual(store.items.map(\.id), [1, 4, 3, 2])
     }
@@ -512,7 +514,7 @@ enum SwitcherStoreTests {
             makeItem(id: 4, appName: "Alpha", title: "Window A")
         ]
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         try expectEqual(store.items.map(\.id), [1, 4, 3, 2])
     }
@@ -532,7 +534,7 @@ enum SwitcherStoreTests {
             makeItem(id: 3)
         ]
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
         await runPendingMainTasks()
 
         try expect(store.isVisible)
@@ -553,7 +555,7 @@ enum SwitcherStoreTests {
             makeItem(id: 3)
         ]
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
         await runPendingMainTasks()
 
         let capturedIDs = catalog.captureWindowIDCalls.flatMap { $0 }
@@ -574,7 +576,7 @@ enum SwitcherStoreTests {
         }
         catalog.previewsToReturn = Dictionary(uniqueKeysWithValues: (1...10).map { (CGWindowID($0), image) })
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
         await runPendingMainTasks(20)
 
         try expectEqual(catalog.captureWindowIDCalls.count, 2)
@@ -601,7 +603,11 @@ enum SwitcherStoreTests {
         catalog.visibleItems = (1...14).map { index in
             makeItem(id: CGWindowID(index), title: "Window \(index)", isFrontmostApp: index == 1)
         }
-        store.cycle(forward: true)
+        // The window list changed after the warm pass; an app activation marks the
+        // cache for resnapshot so the open re-reads fresh instead of replaying the
+        // warmed [11, 12] list — while still reusing their warmed previews.
+        store.handleAppActivation(pid: 1)
+        await openSwitcher(store)
         await runPendingMainTasks(20)
 
         try expectEqual(catalog.captureWindowIDCalls.count, 3)
@@ -625,7 +631,10 @@ enum SwitcherStoreTests {
         catalog.previewsToReturn = [1: preview]
 
         await store.warmPreviewCache(context: "test")
-        store.cycle(forward: true)
+        // The warm pass populated the cache, so requestCycle takes the cached
+        // path synchronously: items hydrate from the cache (no new capture yet —
+        // the preview pass is deferred until the panel shows).
+        store.requestCycle(forward: true)
 
         try expectEqual(catalog.captureCallCount, 1)
         try expect(store.items.first(where: { $0.id == 1 })?.preview === preview)
@@ -662,7 +671,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Tab))
         try expect(handled)
         try expectEqual(store.selectedID, 3)
@@ -675,7 +684,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Tab, modifiers: .shift))
         try expect(handled)
         try expectEqual(store.selectedID, 1)
@@ -688,7 +697,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_RightArrow))
         try expectEqual(store.selectedID, 3)
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_LeftArrow))
@@ -706,7 +715,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Return))
         try expect(handled)
         try expect(!store.isVisible)
@@ -720,7 +729,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Escape))
         try expect(handled)
         try expect(!store.isVisible)
@@ -733,7 +742,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         try expect(store.handleKeyDown(makeKeyDownEvent(keyCode: 0)) == false)
     }
 
@@ -744,7 +753,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)              // selected = 2
+        await openSwitcher(store)              // selected = 2
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Home))
         try expect(handled)
         try expectEqual(store.selectedID, store.items.first?.id)
@@ -757,7 +766,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)              // selected = 2
+        await openSwitcher(store)              // selected = 2
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_End))
         try expect(handled)
         try expectEqual(store.selectedID, store.items.last?.id)
@@ -769,7 +778,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 2
 
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
@@ -784,7 +793,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 2
 
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_H, modifiers: .command))
@@ -801,7 +810,7 @@ enum SwitcherStoreTests {
         ]
         var openSettingsCalls = 0
         store.onOpenSettings = { openSettingsCalls += 1 }
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Comma, modifiers: .command))
 
@@ -817,7 +826,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_LeftArrow, modifiers: .option))
 
@@ -836,7 +845,7 @@ enum SwitcherStoreTests {
             makeItem(id: 3, pid: 200, title: "Other window"),
             makeItem(id: 4, pid: 300)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 2
 
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
@@ -1058,7 +1067,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2, pid: 200),
             makeItem(id: 3, pid: 300)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         try expect(store.isVisible)
         try expectEqual(store.selectedID, 2)
@@ -1077,7 +1086,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         store.snap(makeItem(id: 3), to: .bottom)
 
@@ -1094,7 +1103,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 1
 
         store.commitSelection()
@@ -1117,7 +1126,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         var onHideCalls = 0
         store.onHide = { onHideCalls += 1 }
 
@@ -1138,7 +1147,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let toClose = store.items.first(where: { $0.id == 2 })!
 
         store.close(toClose)
@@ -1150,7 +1159,7 @@ enum SwitcherStoreTests {
     @MainActor static func close_lastItem() async throws {
         let (store, catalog, _, _) = makeStore()
         catalog.visibleItems = [makeItem(id: 1, isFrontmostApp: true)]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.close(store.items[0])
         try expect(store.items.isEmpty)
         try expect(!store.isVisible)
@@ -1163,7 +1172,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 2
         let toClose = store.items.first(where: { $0.id == 2 })!
         store.close(toClose)
@@ -1179,7 +1188,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let originalSelection = store.selectedID
 
         // hoverEnabled is false until scheduleHoverEnable fires after 200 ms.
@@ -1196,7 +1205,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        store.cycle(forward: true)
+        await openSwitcher(store)
         let target = store.items.first(where: { $0.id == 3 })!
 
         store.choose(target)

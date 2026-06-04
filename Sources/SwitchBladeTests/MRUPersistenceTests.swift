@@ -20,7 +20,7 @@ enum MRUPersistenceTests {
         ]
         let (store, _, activator, _) = makeStore(catalog: catalog, userDefaults: ud)
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 3
         store.commitSelection()
         await runPendingMainTasks()
@@ -43,7 +43,7 @@ enum MRUPersistenceTests {
         ]
         let (store, _, _, _) = makeStore(catalog: catalog, userDefaults: ud)
 
-        store.cycle(forward: true)
+        await openSwitcher(store)
 
         // Frontmost comes first, then the persisted-MRU bundle (b → id 3),
         // then the rest in snapshot order.
@@ -61,7 +61,7 @@ enum MRUPersistenceTests {
             makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "com.example.new")
         ]
         let (store, _, _, _) = makeStore(catalog: catalog, userDefaults: ud)
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 1
         store.commitSelection()
         await runPendingMainTasks()
@@ -79,7 +79,7 @@ enum MRUPersistenceTests {
             makeItem(id: 2, pid: 200, bundleIdentifier: nil)
         ]
         let (store, _, _, _) = makeStore(catalog: catalog, userDefaults: ud)
-        store.cycle(forward: true)
+        await openSwitcher(store)
         store.selectedID = 2  // no bundleIdentifier
         store.commitSelection()
         await runPendingMainTasks()
