@@ -194,7 +194,9 @@ final class SwitcherStore: ObservableObject {
             maxConcurrentCaptures: min(4, initialWindowIDs.count)
         )
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
-        let acceptedPreviews = previewCache.record(previews, liveItems: orderedItems)
+        let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
+        guard !Task.isCancelled, !isVisible, !isSwitching else { return }
+        let acceptedPreviews = previewCache.record(previews, liveItems: orderedItems, mostlyWhiteIDs: whiteIDs)
         let ms = Date().timeIntervalSince(start) * 1000
         Logger.switcher.info(
             "Preview cache warmup (\(context, privacy: .public)): \(acceptedPreviews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
@@ -1113,7 +1115,7 @@ final class SwitcherStore: ObservableObject {
                 )
                 guard !Task.isCancelled else { return }
                 previews.merge(batchPreviews) { _, fresh in fresh }
-                self.applyPreviews(batchPreviews, generation: generation)
+                await self.applyPreviews(batchPreviews, generation: generation)
             }
 
             guard !Task.isCancelled else { return }
@@ -1168,7 +1170,7 @@ final class SwitcherStore: ObservableObject {
                     maxConcurrentCaptures: 6
                 )
                 guard !Task.isCancelled else { return }
-                self.applyPreviews(allPreviews, generation: generation)
+                await self.applyPreviews(allPreviews, generation: generation)
             }
 
             // Refresh SC content cache after a full preview pass. Fast
@@ -1179,9 +1181,13 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func applyPreviews(_ previews: [CGWindowID: NSImage], generation: Int) {
+    private func applyPreviews(_ previews: [CGWindowID: NSImage], generation: Int) async {
         guard isVisible, previewGeneration == generation else { return }
-        let acceptedPreviews = previewCache.record(previews, liveItems: items)
+        // Classify blank/white frames off the main thread, then re-check the
+        // generation: the panel may have hidden or reopened during the decode.
+        let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
+        guard isVisible, previewGeneration == generation else { return }
+        let acceptedPreviews = previewCache.record(previews, liveItems: items, mostlyWhiteIDs: whiteIDs)
         items = items.map { item in
             acceptedPreviews[item.windowID].map { item.withPreview($0) } ?? item
         }

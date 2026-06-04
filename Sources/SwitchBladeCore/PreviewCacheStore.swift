@@ -88,8 +88,17 @@ final class PreviewCacheStore {
     ///
     /// The prune step is what keeps the cache from growing past `capacity`
     /// even when an app spawns many short-lived windows.
+    /// `mostlyWhiteIDs`, when supplied, is the set of window IDs already
+    /// classified as mostly-white off the main thread (see
+    /// `mostlyWhiteWindowIDs`). Production passes it so the pixel decode doesn't
+    /// run on @MainActor during first paint; callers that omit it (tests) fall
+    /// back to an inline classification.
     @discardableResult
-    func record(_ previews: [CGWindowID: NSImage], liveItems: [WindowItem]) -> [CGWindowID: NSImage] {
+    func record(
+        _ previews: [CGWindowID: NSImage],
+        liveItems: [WindowItem],
+        mostlyWhiteIDs: Set<CGWindowID>? = nil
+    ) -> [CGWindowID: NSImage] {
         guard !previews.isEmpty else {
             keepOnlyLive(liveItems)
             return [:]
@@ -99,7 +108,8 @@ final class PreviewCacheStore {
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
             guard let item = itemsByID[windowID] else { continue }
-            if Self.isMostlyWhite(image) {
+            let imageIsMostlyWhite = mostlyWhiteIDs?.contains(windowID) ?? Self.isMostlyWhite(image)
+            if imageIsMostlyWhite {
                 // A mostly-white frame is usually a transient blank: a window
                 // still loading, or a cold SCKit pipeline returning an empty
                 // frame. But it can also be genuinely white content (a blank
@@ -155,7 +165,21 @@ final class PreviewCacheStore {
         now().timeIntervalSince(cached.capturedAt) <= retainedPreviewMaxAge
     }
 
-    static func isMostlyWhite(_ image: NSImage) -> Bool {
+    /// Classifies which captured frames are mostly white, off the main thread.
+    /// The pixel decode is the part worth moving off @MainActor; `record`'s LRU
+    /// bookkeeping stays on the main actor where that state lives.
+    nonisolated static func mostlyWhiteWindowIDs(in previews: [CGWindowID: NSImage]) async -> Set<CGWindowID> {
+        guard !previews.isEmpty else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            var whiteIDs: Set<CGWindowID> = []
+            for (windowID, image) in previews where isMostlyWhite(image) {
+                whiteIDs.insert(windowID)
+            }
+            return whiteIDs
+        }.value
+    }
+
+    nonisolated static func isMostlyWhite(_ image: NSImage) -> Bool {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return false
         }

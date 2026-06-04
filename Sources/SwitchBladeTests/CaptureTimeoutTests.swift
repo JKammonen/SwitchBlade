@@ -113,11 +113,17 @@ enum CaptureTimeoutTests {
         ]
         store.handleAppActivation(pid: 100)
 
-        for _ in 0 ..< 80 {
+        // Wait on the open-items warmup's own snapshot — the event that actually
+        // stabilizes cachedOpenItems — not the content-cache refresh, which is a
+        // separate task that can finish first and leave the cache un-stabilized.
+        for _ in 0 ..< 120 {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 5_000_000)
-            if catalog.refreshIfStaleCallCount > 0 { break }
+            if catalog.visibleSnapshotCount > baselineSnapshots { break }
         }
+        // Let the warmup task's continuation (order + stabilize + cache update)
+        // run after its snapshot returned, before the open reads the cache.
+        await runPendingMainTasks()
 
         store.requestCycle(forward: true)
         await runPendingMainTasks()

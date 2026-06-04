@@ -1,15 +1,18 @@
 import AppKit
 import SwiftUI
 
-/// Per-PID cache for dominant icon colors. One app may produce many tiles
-/// (e.g. ten Safari windows), and the sampling work is identical for each
+/// Per-app-identity cache for dominant icon colors. One app may produce many
+/// tiles (e.g. ten Safari windows), and the sampling work is identical for each
 /// window of the same app — compute once, share across tiles and invocations.
 actor DominantColorCache {
     static let shared = DominantColorCache()
-    private var cache: [pid_t: Color] = [:]
+    // Keyed by app identity (bundle id, else app name) rather than pid: the OS
+    // recycles pids, so a pid key could hand a freshly-launched app the dead
+    // app's tint. Bounded so a long session can't grow the cache without limit.
+    private var cache = LRUDictionary<String, Color>(capacity: 64)
 
-    func color(for pid: pid_t) -> Color? { cache[pid] }
-    func set(_ color: Color, for pid: pid_t) { cache[pid] = color }
+    func color(for identity: String) -> Color? { cache[identity] }
+    func set(_ color: Color, for identity: String) { cache[identity] = color }
 }
 
 enum PreviewScalingPolicy {
@@ -376,12 +379,16 @@ private struct WindowTile: View {
                 selectionPulse = false
             }
         }
-        .task(id: settings.badgeUseAppColor ? Int(item.pid) : 0) {
+        // Re-run keyed on the same identity the cache uses, so a tile reused for
+        // a different app (or the same app after a relaunch) resolves the right
+        // entry instead of missing on a stale pid key.
+        .task(id: settings.badgeUseAppColor ? (item.bundleIdentifier ?? item.appName) : "") {
             guard settings.badgeUseAppColor, let icon = item.icon else {
                 appDominantColor = nil
                 return
             }
-            if let cached = await DominantColorCache.shared.color(for: item.pid) {
+            let identity = item.bundleIdentifier ?? item.appName
+            if let cached = await DominantColorCache.shared.color(for: identity) {
                 appDominantColor = cached
                 return
             }
@@ -390,7 +397,7 @@ private struct WindowTile: View {
                 Self.dominantColor(from: icon)
             }.value
             if let color {
-                await DominantColorCache.shared.set(color, for: item.pid)
+                await DominantColorCache.shared.set(color, for: identity)
             }
             appDominantColor = color
         }
