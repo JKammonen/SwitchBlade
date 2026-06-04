@@ -112,14 +112,21 @@ actor SCContentCache {
             await permitPool.acquire()
         }
         nonisolated(unsafe) let capturedWindow = window
+        // Release the concurrency permit when we STOP WAITING — capture success,
+        // failure, OR soft timeout, whichever comes first. The old code released
+        // only when SCKit's `captureImage` actually returned, so a stalled capture
+        // kept its slot. Because the retry's `acquire()` has no timeout, a fully
+        // stalled initial wave then blocked every retry behind the wedged first
+        // attempts and froze the whole batch despite the 300 ms "soft timeout".
+        // A capture still running after the timeout is left to finish in the
+        // background (orphaned); its slot is already freed for a fresh attempt.
+        // Acquire/release stays 1:1 per call, so the pool count never drifts.
+        let permitReleased = OneShotFlag()
+        let releasePermit: @Sendable () -> Void = {
+            guard let permitPool, permitReleased.consume() else { return }
+            Task { await permitPool.release() }
+        }
         let captureTask = Task.detached(priority: .userInitiated) { () -> CaptureAttemptResult in
-            defer {
-                if let permitPool {
-                    Task {
-                        await permitPool.release()
-                    }
-                }
-            }
             do {
                 return .success(try await SCContentCache.capture(window: capturedWindow, maxDim: maxDim))
             } catch {
@@ -132,12 +139,14 @@ actor SCContentCache {
 
             Task {
                 let result = await captureTask.value
+                releasePermit()
                 box.resume(returning: result)
             }
 
             Task {
                 try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
                 captureTask.cancel()
+                releasePermit()
                 box.resume(returning: .timedOut)
             }
         }
@@ -186,6 +195,23 @@ private final class OneShotContinuation<Value: Sendable>: @unchecked Sendable {
         self.continuation = nil
         lock.unlock()
         continuation?.resume(returning: value)
+    }
+}
+
+/// Single-shot latch. `consume()` returns true exactly once — the first caller
+/// wins, every later caller gets false. Used to release a capture permit on
+/// whichever of (capture finished / soft timeout fired) happens first, without
+/// double-releasing.
+private final class OneShotFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var consumed = false
+
+    func consume() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if consumed { return false }
+        consumed = true
+        return true
     }
 }
 

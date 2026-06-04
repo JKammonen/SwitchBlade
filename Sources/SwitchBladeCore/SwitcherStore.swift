@@ -59,6 +59,10 @@ final class SwitcherStore: ObservableObject {
     private var hasPreparedHiddenOpen = false
     private var currentAppPID: pid_t?
     private var previousAppPID: pid_t?
+    /// True while a previous-app switch is resolving its off-main snapshot.
+    /// Serializes the gesture so a second rapid double-tap can't run against the
+    /// PID the first one is about to mutate.
+    private var isResolvingPreviousSwitch = false
 
     /// Timestamp of the most recent Cmd+Tab cycle. Used by handleAppActivation
     /// to decide whether the user is actively switcher-using and therefore
@@ -479,8 +483,35 @@ final class SwitcherStore: ObservableObject {
             Logger.switcher.info("Double modifier switch ignored: switcher is visible or opening")
             return
         }
+        // Drop a second gesture that arrives while the first is still resolving
+        // its off-main snapshot. The switch path doesn't set isVisible/isSwitching,
+        // so without this guard two rapid double-taps would both run and the
+        // second would read the currentAppPID the first just mutated — an extra,
+        // unintended switch. The synchronous predecessor couldn't interleave.
+        guard !isResolvingPreviousSwitch else {
+            Logger.switcher.info("Double modifier switch ignored: previous-app switch already resolving")
+            return
+        }
 
-        let orderedItems = itemsForPreviousSwitchTarget()
+        // Enumerate windows off the main thread. The previous-app switch is a
+        // user-facing gesture (double-tap modifier / modifier+click); doing the
+        // CGWindowList walk + NSRunningApplication lookups + icon copies inline
+        // on @MainActor hitched the gesture with many windows open. Every other
+        // open path already snapshots off-main — this one was the holdout.
+        isResolvingPreviousSwitch = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isResolvingPreviousSwitch = false }
+            let orderedItems = await self.itemsForPreviousSwitchTarget()
+            guard !self.isVisible, !self.isSwitching else {
+                Logger.switcher.info("Double modifier switch aborted: switcher opened during snapshot")
+                return
+            }
+            self.performPreviousApplicationSwitch(orderedItems: orderedItems)
+        }
+    }
+
+    private func performPreviousApplicationSwitch(orderedItems: [WindowItem]) {
         let effectiveCurrentPID = orderedItems.first?.pid ?? currentAppPID
         if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
             lastSwitcherUse = Date()
@@ -523,8 +554,9 @@ final class SwitcherStore: ObservableObject {
         return candidate
     }
 
-    private func itemsForPreviousSwitchTarget() -> [WindowItem] {
-        mruTracker.orderedForDisplay(from: catalog.snapshotVisibleOnly(), context: "previous-switch-target")
+    private func itemsForPreviousSwitchTarget() async -> [WindowItem] {
+        let snapshot = await snapshotVisibleOnlyOffMain(priority: .userInitiated)
+        return mruTracker.orderedForDisplay(from: snapshot, context: "previous-switch-target")
     }
 
     private func previousApplicationPID(currentPID: pid_t?, orderedItems: [WindowItem]) -> pid_t? {

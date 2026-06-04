@@ -28,6 +28,7 @@ enum MRUTrackerTests {
         ("MRU/pruneToLive_emptyList_clearsAllRankData", pruneToLiveEmpty),
         ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
         ("MRU/rememberSelection_capsAtMaxBundles", capsBundles),
+        ("MRU/recentRanks_cappedAtMaxRanks", recentRanksCapped),
         ("MRU/dropRank_removesOnlySpecifiedWindowKeepsOthers", dropRankSpecificOnly),
         ("MRU/dropAllRanksForApp_clearsRanksAndBundle", dropAllRanksForApp),
         ("MRU/rememberSelection_nilBundleID_writesRanksSkipsBundleList", rememberSelectionNilBundle),
@@ -635,5 +636,18 @@ enum MRUTrackerTests {
         }
         try expectEqual(tracker.recentBundleIDs.count, 3)
         try expectEqual(tracker.recentBundleIDs.first, "bundle.9")
+    }
+
+    /// Each selection has only its own window live, so prior ranks are preserved
+    /// rather than rebuilt — without the cap, ranks would grow unbounded over a
+    /// long session and slow every `orderedForDisplay` scan.
+    @MainActor static func recentRanksCapped() throws {
+        let ud = makeIsolatedUserDefaults()
+        let tracker = MRUTracker(userDefaults: ud, maxRanks: 3)
+        for i in 1...8 {
+            let item = makeItem(id: CGWindowID(i), pid: pid_t(100 + i), bundleIdentifier: "bundle.\(i)")
+            tracker.rememberSelection(item.id, in: [item])
+        }
+        try expectEqual(tracker.recentWindowIDs, [8, 7, 6])
     }
 }

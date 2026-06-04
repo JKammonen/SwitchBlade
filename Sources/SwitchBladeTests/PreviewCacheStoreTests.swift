@@ -20,7 +20,9 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/blankCapture_isRejectedWithoutExistingPreview", blankCaptureIsRejectedWithoutExistingPreview),
         ("PreviewCache/blankCapture_doesNotReplaceExistingPreview", blankCaptureDoesNotReplaceExistingPreview),
         ("PreviewCache/blankStorm_rejectsMostlyWhiteBatch", blankStormRejectsMostlyWhiteBatch),
-        ("PreviewCache/singleWhiteNonSafariCapture_isRejected", singleWhiteNonSafariCaptureIsRejected)
+        ("PreviewCache/singleWhiteNonSafariCapture_isRejected", singleWhiteNonSafariCaptureIsRejected),
+        ("PreviewCache/whiteCapture_acceptedOnSecondConsecutiveSighting", whiteCaptureAcceptedOnSecondSighting),
+        ("PreviewCache/whiteCapture_deferralResetsAfterGoodCapture", whiteDeferralResetsAfterGoodCapture)
     ]
 
     @MainActor static func hydrated_noMatch() throws {
@@ -333,6 +335,40 @@ enum PreviewCacheStoreTests {
 
         try expectNil(accepted[1])
         try expectNil(store.hydrated(item, liveItems: [item]).preview)
+    }
+
+    /// A window that is genuinely white reproduces white on every capture, so
+    /// the second consecutive white frame is accepted as real content rather
+    /// than re-deferred forever.
+    @MainActor static func whiteCaptureAcceptedOnSecondSighting() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
+        let white = solidImage(color: .white)
+
+        let first = store.record([1: white], liveItems: [item])
+        try expectNil(first[1])
+        try expectNil(store.hydrated(item, liveItems: [item]).preview)
+
+        let second = store.record([1: white], liveItems: [item])
+        try expect(second[1] === white)
+        try expect(store.hydrated(item, liveItems: [item]).preview === white)
+    }
+
+    /// A good capture between two white frames resets the deferral, so a later
+    /// white frame is treated as a fresh transient blank (and the good preview
+    /// is never overwritten).
+    @MainActor static func whiteDeferralResetsAfterGoodCapture() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
+        let white = solidImage(color: .white)
+        let good = solidImage(color: .systemBlue)
+
+        _ = store.record([1: white], liveItems: [item])      // first white deferred
+        _ = store.record([1: good], liveItems: [item])       // good preview cached, deferral cleared
+        let afterGood = store.record([1: white], liveItems: [item])  // white must not replace good
+
+        try expectNil(afterGood[1])
+        try expect(store.hydrated(item, liveItems: [item]).preview === good)
     }
 
     private static func solidImage(color: NSColor) -> NSImage {

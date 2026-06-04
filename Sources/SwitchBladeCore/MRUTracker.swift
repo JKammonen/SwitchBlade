@@ -34,17 +34,20 @@ final class MRUTracker {
     private(set) var recentBundleIDs: [String]
 
     private let maxBundles: Int
+    private let maxRanks: Int
     private let userDefaults: UserDefaults
     private let storageKey: String
 
     init(
         userDefaults: UserDefaults = .standard,
         storageKey: String = "sb_recentBundleIDs",
-        maxBundles: Int = 30
+        maxBundles: Int = 30,
+        maxRanks: Int = 200
     ) {
         self.userDefaults = userDefaults
         self.storageKey = storageKey
         self.maxBundles = maxBundles
+        self.maxRanks = max(1, maxRanks)
         self.recentBundleIDs = (userDefaults.array(forKey: storageKey) as? [String]) ?? []
     }
 
@@ -183,17 +186,11 @@ final class MRUTracker {
             return !liveAppIdentities.contains(rank.appIdentity)
         }
         recentRanks = freshRanks + preservedRanks
+        trimRanksToCapacity()
         logRememberSelection(item, liveItems: liveItems, context: context)
 
-        guard let bundleID = item.bundleIdentifier,
-              !bundleID.isEmpty else { return }
-
-        recentBundleIDs.removeAll { $0 == bundleID }
-        recentBundleIDs.insert(bundleID, at: 0)
-        if recentBundleIDs.count > maxBundles {
-            recentBundleIDs.removeLast(recentBundleIDs.count - maxBundles)
-        }
-        userDefaults.set(recentBundleIDs, forKey: storageKey)
+        guard let bundleID = item.bundleIdentifier else { return }
+        promoteRecentBundle(bundleID)
     }
 
     /// System activation only tells us the app, not the specific window.
@@ -217,14 +214,33 @@ final class MRUTracker {
             RankEntry(windowID: nil, signature: nil, appIdentity: identity),
             at: 0
         )
+        trimRanksToCapacity()
 
-        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return }
+        guard let bundleIdentifier else { return }
+        promoteRecentBundle(bundleIdentifier)
+    }
+
+    /// Moves a bundle id to the front of the persisted recents and writes it
+    /// back. No-op — and no UserDefaults write — when it's already at the front.
+    /// `trackSystemActivation` runs on every foreground app switch, so the
+    /// already-front skip keeps that hot path from rewriting UserDefaults on
+    /// every click between apps.
+    private func promoteRecentBundle(_ bundleIdentifier: String) {
+        guard !bundleIdentifier.isEmpty, recentBundleIDs.first != bundleIdentifier else { return }
         recentBundleIDs.removeAll { $0 == bundleIdentifier }
         recentBundleIDs.insert(bundleIdentifier, at: 0)
         if recentBundleIDs.count > maxBundles {
             recentBundleIDs.removeLast(recentBundleIDs.count - maxBundles)
         }
         userDefaults.set(recentBundleIDs, forKey: storageKey)
+    }
+
+    /// Bounds the in-memory rank list so a long session can't grow
+    /// `orderedForDisplay`'s per-open scan without limit. Newest ranks sit at
+    /// the front, so the least-recently-touched tail is dropped first.
+    private func trimRanksToCapacity() {
+        guard recentRanks.count > maxRanks else { return }
+        recentRanks.removeLast(recentRanks.count - maxRanks)
     }
 
     /// Drops the rank for one specific window. Use this when you KNOW the

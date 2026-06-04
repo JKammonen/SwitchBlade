@@ -23,6 +23,10 @@ final class PreviewCacheStore {
     private var bySignature: LRUDictionary<String, CachedPreview>
     private var byAppIdentity: LRUDictionary<String, CachedPreview>
     private var byRecentlySeenSignature: LRUDictionary<String, CachedPreview>
+    /// Window IDs whose last capture was mostly-white and was deferred once.
+    /// A second consecutive white capture for the same window is then accepted
+    /// as genuine content. Pruned to live windows on every `record`.
+    private var whiteDeferredIDs: Set<CGWindowID> = []
     private let retainedPreviewMaxAge: TimeInterval
     private let now: () -> Date
 
@@ -95,9 +99,25 @@ final class PreviewCacheStore {
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
             guard let item = itemsByID[windowID] else { continue }
-            if shouldRejectTransientBlankCapture(image) {
-                continue
+            if Self.isMostlyWhite(image) {
+                // A mostly-white frame is usually a transient blank: a window
+                // still loading, or a cold SCKit pipeline returning an empty
+                // frame. But it can also be genuinely white content (a blank
+                // doc, a light web page). Distinguish the two by persistence —
+                // never overwrite an existing good preview, defer the FIRST
+                // white sighting, and accept the SECOND consecutive white
+                // capture as real content. A glitch rarely repeats identically;
+                // real white content reproduces every capture, so a white window
+                // stops being a permanent icon placeholder after one extra open
+                // instead of re-capturing forever.
+                if byID[windowID] != nil {
+                    continue
+                }
+                if whiteDeferredIDs.insert(windowID).inserted {
+                    continue
+                }
             }
+            whiteDeferredIDs.remove(windowID)
             let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
             bySignature[signature(for: item)] = cached
@@ -112,9 +132,11 @@ final class PreviewCacheStore {
     }
 
     private func keepOnlyLive(_ items: [WindowItem]) {
-        byID.keepOnly(Set(items.map(\.windowID)))
+        let liveWindowIDs = Set(items.map(\.windowID))
+        byID.keepOnly(liveWindowIDs)
         bySignature.keepOnly(Set(items.map(signature(for:))))
         byAppIdentity.keepOnly(Self.singleWindowAppIdentities(in: items, appIdentity: appIdentity(for:)))
+        whiteDeferredIDs.formIntersection(liveWindowIDs)
     }
 
     private func signature(for item: WindowItem) -> String {
@@ -131,13 +153,6 @@ final class PreviewCacheStore {
 
     private func isFreshEnough(_ cached: CachedPreview) -> Bool {
         now().timeIntervalSince(cached.capturedAt) <= retainedPreviewMaxAge
-    }
-
-    private func shouldRejectTransientBlankCapture(_ image: NSImage) -> Bool {
-        guard Self.isMostlyWhite(image) else {
-            return false
-        }
-        return true
     }
 
     static func isMostlyWhite(_ image: NSImage) -> Bool {

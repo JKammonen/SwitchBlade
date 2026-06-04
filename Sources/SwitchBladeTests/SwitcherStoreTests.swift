@@ -56,6 +56,7 @@ enum SwitcherStoreTests {
         ("Store/switchToPreviousApplication_sameAppWindowsBounceInsteadOfPickingOtherApp", switchToPreviousApplication_sameAppWindowsBounceInsteadOfPickingOtherApp),
         ("Store/switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale", switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale),
         ("Store/switchToPreviousApplication_repeatedCallsCanBounceBetweenTwoApps", switchToPreviousApplication_bouncesBetweenTwoApps),
+        ("Store/switchToPreviousApplication_concurrentGestureDropped", switchToPreviousApplication_concurrentGestureDropped),
         ("Store/handleModifierMouseSwitch_visible_commitsSelection", handleModifierMouseSwitch_visibleCommitsSelection),
         ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
         // commit / cancel
@@ -855,6 +856,7 @@ enum SwitcherStoreTests {
         store.handleAppActivation(pid: 202)
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         try expectEqual(activator.activatedApplicationPIDs, [101])
     }
@@ -887,6 +889,7 @@ enum SwitcherStoreTests {
         let (store, _, activator, _) = makeStore(catalog: catalog, initialFrontmostAppPID: 202, switchBladePID: 999)
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         try expectEqual(activator.activatedApplicationPIDs, [101])
         try expectEqual(catalog.visibleSnapshotCount, 1)
@@ -927,6 +930,7 @@ enum SwitcherStoreTests {
         ]
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         // Position 1 = A (same pid 100) → window-level switch to A.
         try expectEqual(activator.activatedItems.map(\.id), [1])
@@ -939,6 +943,7 @@ enum SwitcherStoreTests {
         ]
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         // Position 1 = B (same pid 100) → window-level bounce back to B.
         try expectEqual(activator.activatedItems.map(\.id), [1, 2])
@@ -951,6 +956,7 @@ enum SwitcherStoreTests {
         ]
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         // Third press: still bouncing within the same-app pair (A↔B cycling is sticky).
         // Cross-app fallback is not triggered while a same-app sibling sits at position 1.
@@ -997,6 +1003,7 @@ enum SwitcherStoreTests {
         ]
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         try expectEqual(activator.activatedItems.map(\.id), [1])
         try expect(activator.activatedApplicationPIDs.isEmpty)
@@ -1012,10 +1019,31 @@ enum SwitcherStoreTests {
         store.handleAppActivation(pid: 202)
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
         store.handleAppActivation(pid: 101)
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         try expectEqual(activator.activatedApplicationPIDs, [101, 202])
+    }
+
+    /// Two gestures before the first's off-main snapshot resolves: the second
+    /// is dropped, so the PID the first mutates can't drive a second unintended
+    /// switch. Exactly one activation results.
+    @MainActor static func switchToPreviousApplication_concurrentGestureDropped() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
+
+        let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
+        store.handleAppActivation(pid: 202)
+
+        store.switchToPreviousApplication()
+        store.switchToPreviousApplication()
+        await runPendingMainTasks()
+
+        try expectEqual(activator.activatedApplicationPIDs, [101])
     }
 
     @MainActor static func handleModifierMouseSwitch_visibleCommitsSelection() async throws {
