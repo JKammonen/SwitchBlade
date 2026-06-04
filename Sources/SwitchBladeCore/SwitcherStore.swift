@@ -247,9 +247,11 @@ final class SwitcherStore: ObservableObject {
             moveSelection(forward ? 1 : -1)
             return
         }
-        // Two rapid Cmd+Tab events arrive before the async open completes: the
-        // second call would post another cycle() task and double-fire the preview
-        // load. Drop it — the in-flight open already covers this key-down.
+        // Two rapid Cmd+Tab events arrive before the async open completes: we are
+        // already switching but not yet visible or in the previewHidden phase. The
+        // second call would start a second open and double-fire the preview load.
+        // Drop it — the in-flight open (openFromFreshSnapshotOffMain, or the cached
+        // openFromOrderedItems path) already covers this key-down.
         guard !isSwitching else { return }
 
         lastSwitcherUse = Date()
@@ -282,8 +284,7 @@ final class SwitcherStore: ObservableObject {
                 orderMs: 0,
                 source: cacheIsFresh ? "cached" : "stale-cached",
                 updateCachedItems: cacheIsFresh,
-                showingStaleCachedItems: !cacheIsFresh,
-                delayPanelShow: true
+                showingStaleCachedItems: !cacheIsFresh
             )
             if !cacheIsFresh {
                 scheduleStaleCacheHealingIfNeeded()
@@ -710,8 +711,7 @@ final class SwitcherStore: ObservableObject {
         orderMs: Double,
         source: String,
         updateCachedItems: Bool = true,
-        showingStaleCachedItems: Bool = false,
-        delayPanelShow: Bool = false
+        showingStaleCachedItems: Bool = false
     ) {
         guard !orderedItems.isEmpty else {
             enterIdle()
@@ -806,12 +806,8 @@ final class SwitcherStore: ObservableObject {
                 )
             }
         }
-        if delayPanelShow {
-            enterPreviewHidden(stale: showingStaleCachedItems)
-            schedulePreparedPanelShow()
-        } else {
-            showWithPreviews()
-        }
+        enterPreviewHidden(stale: showingStaleCachedItems)
+        schedulePreparedPanelShow()
         // Minimized merge is now scheduled inside showWithPreviews so it
         // captures the post-increment previewGeneration. Capturing here would
         // race the delay-path: schedulePreparedPanelShow defers showWithPreviews
@@ -848,8 +844,7 @@ final class SwitcherStore: ObservableObject {
                 permissionMs: permissionMs,
                 snapshotMs: snapshotMs,
                 orderMs: orderMs,
-                source: "snapshot",
-                delayPanelShow: true
+                source: "snapshot"
             )
         }
     }
