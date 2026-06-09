@@ -8,6 +8,10 @@ enum WindowActivatorTests {
         ("WindowActivator/framesAreClose_withinTolerance", framesWithinTolerance),
         ("WindowActivator/framesAreClose_outsideTolerance", framesOutsideTolerance),
         ("WindowActivator/framesAreClose_customTolerance", framesCustomTolerance),
+        ("WindowActivator/bestMatchIndex_prefersClosestFrameAmongTitleMatches", bestMatchPrefersClosestFrameAmongTitleMatches),
+        ("WindowActivator/bestMatchIndex_defaultTieKeepsFirstCandidate", bestMatchDefaultTieKeepsFirstCandidate),
+        ("WindowActivator/bestMatchIndex_sameAppTiePrefersNonMainWindow", bestMatchSameAppTiePrefersNonMainWindow),
+        ("WindowActivator/bestMatchIndex_fallsBackToClosestFrameWhenTitleDrifts", bestMatchFallsBackToClosestFrameWhenTitleDrifts),
         ("WindowActivator/activate_frontmostWindow_skipsAppActivation", activateFrontmostWindowSkipsAppActivation),
         ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
@@ -40,6 +44,108 @@ enum WindowActivatorTests {
         let b = CGRect(x: 30, y: 0, width: 100, height: 100)
         try expect(!WindowActivator.framesAreClose(a, b, tolerance: 10))
         try expect(WindowActivator.framesAreClose(a, b, tolerance: 50))
+    }
+
+    static func bestMatchPrefersClosestFrameAmongTitleMatches() throws {
+        let item = makeItem(
+            id: 55,
+            pid: 100,
+            title: "Untitled",
+            bounds: CGRect(x: 200, y: 120, width: 900, height: 700)
+        )
+
+        let candidates = [
+            matchCandidate(
+                title: "Untitled",
+                frame: CGRect(x: 194, y: 118, width: 900, height: 700),
+                isMain: true
+            ),
+            matchCandidate(
+                title: "Untitled",
+                frame: CGRect(x: 200, y: 120, width: 900, height: 700)
+            )
+        ]
+
+        try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 1)
+    }
+
+    static func bestMatchDefaultTieKeepsFirstCandidate() throws {
+        let item = makeItem(
+            id: 66,
+            pid: 100,
+            title: "Untitled",
+            isFrontmostApp: true,
+            bounds: CGRect(x: 300, y: 160, width: 840, height: 620)
+        )
+
+        let candidates = [
+            matchCandidate(
+                title: "Untitled",
+                frame: CGRect(x: 300, y: 160, width: 840, height: 620),
+                isMain: true,
+                isFocused: true
+            ),
+            matchCandidate(
+                title: "Untitled",
+                frame: CGRect(x: 300, y: 160, width: 840, height: 620)
+            )
+        ]
+
+        try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 0)
+    }
+
+    static func bestMatchSameAppTiePrefersNonMainWindow() throws {
+        let item = makeItem(
+            id: 77,
+            pid: 100,
+            title: "Untitled",
+            isFrontmostApp: true,
+            bounds: CGRect(x: 300, y: 160, width: 840, height: 620)
+        )
+
+        let candidates = [
+            matchCandidate(
+                title: "Untitled",
+                frame: CGRect(x: 300, y: 160, width: 840, height: 620),
+                isMain: true,
+                isFocused: true
+            ),
+            matchCandidate(
+                title: "Untitled",
+                frame: CGRect(x: 300, y: 160, width: 840, height: 620)
+            )
+        ]
+
+        try expectEqual(
+            WindowActivator.bestMatchIndex(
+                for: item,
+                candidates: candidates,
+                preferNonMainOnTies: true
+            ),
+            1
+        )
+    }
+
+    static func bestMatchFallsBackToClosestFrameWhenTitleDrifts() throws {
+        let item = makeItem(
+            id: 88,
+            pid: 200,
+            title: "Old title",
+            bounds: CGRect(x: 40, y: 60, width: 1000, height: 720)
+        )
+
+        let candidates = [
+            matchCandidate(
+                title: "New title",
+                frame: CGRect(x: 46, y: 66, width: 1000, height: 720)
+            ),
+            matchCandidate(
+                title: "Other",
+                frame: CGRect(x: 500, y: 300, width: 900, height: 600)
+            )
+        ]
+
+        try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 0)
     }
 
     static func activateFrontmostWindowSkipsAppActivation() throws {
@@ -145,5 +251,19 @@ enum WindowActivatorTests {
         )
 
         try expectEqual(chosen, secondary)
+    }
+
+    private static func matchCandidate(
+        title: String?,
+        frame: CGRect?,
+        isMain: Bool = false,
+        isFocused: Bool = false
+    ) -> WindowActivator.WindowMatchCandidate {
+        WindowActivator.WindowMatchCandidate(
+            title: title,
+            frame: frame,
+            isMain: isMain,
+            isFocused: isFocused
+        )
     }
 }

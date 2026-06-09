@@ -8,6 +8,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let visibleFrame: CGRect
     }
 
+    struct WindowMatchCandidate: Equatable {
+        let title: String?
+        let frame: CGRect?
+        let isMain: Bool
+        let isFocused: Bool
+    }
+
     private let raiseWindowOverride: ((WindowItem) -> Bool)?
     private let activateApplicationOverride: ((pid_t) -> Bool)?
 
@@ -110,7 +117,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     @discardableResult
     private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
         let appElement = AXUIElementCreateApplication(item.pid)
-        guard let window = matchingWindow(for: appElement, item: item) else {
+        guard let window = matchingWindow(
+            for: appElement,
+            item: item,
+            preferNonMainOnTies: item.isFrontmostApp
+        ) else {
             Logger.activator.notice(
                 "AX match failed pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public)"
             )
@@ -193,57 +204,46 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return windows
     }
 
-    private func matchingWindow(for appElement: AXUIElement, item: WindowItem) -> AXUIElement? {
+    private func matchingWindow(
+        for appElement: AXUIElement,
+        item: WindowItem,
+        preferNonMainOnTies: Bool = false
+    ) -> AXUIElement? {
         guard let windows = windows(for: appElement) else {
             return nil
         }
 
-        if let match = windows.first(where: { matches($0, item: item) }) {
-            return match
+        let candidates = windows.map { window in
+            (
+                element: window,
+                candidate: WindowMatchCandidate(
+                    title: axString(kAXTitleAttribute, on: window),
+                    frame: axFrame(on: window),
+                    isMain: axBool(kAXMainAttribute, on: window),
+                    isFocused: axBool(kAXFocusedAttribute, on: window)
+                )
+            )
         }
 
-        let titleMatchCount = windows.reduce(0) { count, window in
-            count + ((item.title.isEmpty || axString(kAXTitleAttribute, on: window) == item.title) ? 1 : 0)
+        if let matchIndex = Self.bestMatchIndex(
+            for: item,
+            candidates: candidates.map(\.candidate),
+            preferNonMainOnTies: preferNonMainOnTies
+        ) {
+            return candidates[matchIndex].element
         }
-        let frameMatchCount = windows.reduce(0) { count, window in
-            guard let frame = axFrame(on: window) else { return count }
+
+        let titleMatchCount = candidates.reduce(0) { count, candidate in
+            count + (Self.titleMatches(item.title, candidateTitle: candidate.candidate.title) ? 1 : 0)
+        }
+        let frameMatchCount = candidates.reduce(0) { count, candidate in
+            guard let frame = candidate.candidate.frame else { return count }
             return count + (Self.framesAreClose(frame, item.bounds) ? 1 : 0)
         }
         Logger.activator.notice(
             "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public)"
         )
         return nil
-    }
-
-    private func setFrame(_ frame: CGRect, on window: AXUIElement) -> Bool {
-        var origin = frame.origin
-        var size = frame.size
-        guard let positionValue = AXValueCreate(.cgPoint, &origin),
-              let sizeValue = AXValueCreate(.cgSize, &size) else {
-            return false
-        }
-
-        let positionResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-        let sizeResult = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-        return positionResult == .success && sizeResult == .success
-    }
-
-    private func matches(_ window: AXUIElement, item: WindowItem) -> Bool {
-        let titleMatches = item.title.isEmpty || axString(kAXTitleAttribute, on: window) == item.title
-
-        guard titleMatches else {
-            return false
-        }
-
-        if item.isMinimized {
-            return true
-        }
-
-        guard let frame = axFrame(on: window) else {
-            return item.title.isEmpty
-        }
-
-        return Self.framesAreClose(frame, item.bounds)
     }
 
     private func axString(_ attribute: String, on element: AXUIElement) -> String? {
@@ -253,6 +253,17 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
 
         return rawValue as? String
+    }
+
+    private func axBool(_ attribute: String, on element: AXUIElement) -> Bool {
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &rawValue) == .success,
+              let rawValue,
+              CFGetTypeID(rawValue) == CFBooleanGetTypeID() else {
+            return false
+        }
+
+        return CFBooleanGetValue((rawValue as! CFBoolean))
     }
 
     private func axFrame(on element: AXUIElement) -> CGRect? {
@@ -279,6 +290,19 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return CGRect(origin: point, size: size)
     }
 
+    private func setFrame(_ frame: CGRect, on window: AXUIElement) -> Bool {
+        var origin = frame.origin
+        var size = frame.size
+        guard let positionValue = AXValueCreate(.cgPoint, &origin),
+              let sizeValue = AXValueCreate(.cgSize, &size) else {
+            return false
+        }
+
+        let positionResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+        let sizeResult = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+        return positionResult == .success && sizeResult == .success
+    }
+
     /// Internal so tests can verify the tolerance logic without going through
     /// a real AX walk.
     static func framesAreClose(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 12) -> Bool {
@@ -286,6 +310,129 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             && abs(lhs.origin.y - rhs.origin.y) < tolerance
             && abs(lhs.width - rhs.width) < tolerance
             && abs(lhs.height - rhs.height) < tolerance
+    }
+
+    static func bestMatchIndex(
+        for item: WindowItem,
+        candidates: [WindowMatchCandidate],
+        preferNonMainOnTies: Bool = false
+    ) -> Int? {
+        guard !candidates.isEmpty else { return nil }
+
+        let indexedCandidates = candidates.enumerated().map { (index: $0.offset, candidate: $0.element) }
+        let titleFiltered = {
+            let exactTitleMatches = indexedCandidates.filter {
+                titleMatches(item.title, candidateTitle: $0.candidate.title)
+            }
+            return exactTitleMatches.isEmpty ? indexedCandidates : exactTitleMatches
+        }()
+
+        let exactFrameMatches = titleFiltered.filter { indexedCandidate in
+            guard let frame = indexedCandidate.candidate.frame else { return false }
+            return framesAreClose(frame, item.bounds)
+        }
+        if let bestFrameMatch = bestFrameCandidate(
+            in: exactFrameMatches,
+            for: item,
+            preferNonMainOnTies: preferNonMainOnTies
+        ) {
+            return bestFrameMatch.index
+        }
+
+        let frameFallbackCandidates = titleFiltered.filter { $0.candidate.frame != nil }
+        if let bestFrameFallback = bestFrameCandidate(
+            in: frameFallbackCandidates,
+            for: item,
+            preferNonMainOnTies: preferNonMainOnTies
+        ) {
+            return bestFrameFallback.index
+        }
+
+        return bestFallbackCandidate(
+            in: titleFiltered,
+            for: item,
+            preferNonMainOnTies: preferNonMainOnTies
+        )?.index
+    }
+
+    private static func bestFrameCandidate(
+        in candidates: [(index: Int, candidate: WindowMatchCandidate)],
+        for item: WindowItem,
+        preferNonMainOnTies: Bool
+    ) -> (index: Int, candidate: WindowMatchCandidate)? {
+        guard !candidates.isEmpty else { return nil }
+
+        return candidates.min { lhs, rhs in
+            guard let lhsFrame = lhs.candidate.frame,
+                  let rhsFrame = rhs.candidate.frame else {
+                return lhs.index < rhs.index
+            }
+
+            let lhsDistance = frameDistance(lhsFrame, item.bounds)
+            let rhsDistance = frameDistance(rhsFrame, item.bounds)
+            if lhsDistance != rhsDistance {
+                return lhsDistance < rhsDistance
+            }
+
+            return prefers(
+                lhs.candidate,
+                over: rhs.candidate,
+                preferNonMainOnTies: preferNonMainOnTies,
+                lhsIndex: lhs.index,
+                rhsIndex: rhs.index
+            )
+        }
+    }
+
+    private static func bestFallbackCandidate(
+        in candidates: [(index: Int, candidate: WindowMatchCandidate)],
+        for item: WindowItem,
+        preferNonMainOnTies: Bool
+    ) -> (index: Int, candidate: WindowMatchCandidate)? {
+        guard !candidates.isEmpty else { return nil }
+
+        return candidates.min { lhs, rhs in
+            prefers(
+                lhs.candidate,
+                over: rhs.candidate,
+                preferNonMainOnTies: preferNonMainOnTies,
+                lhsIndex: lhs.index,
+                rhsIndex: rhs.index
+            )
+        }
+    }
+
+    private static func titleMatches(_ itemTitle: String, candidateTitle: String?) -> Bool {
+        itemTitle.isEmpty || candidateTitle == itemTitle
+    }
+
+    private static func frameDistance(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        abs(lhs.origin.x - rhs.origin.x)
+            + abs(lhs.origin.y - rhs.origin.y)
+            + abs(lhs.width - rhs.width)
+            + abs(lhs.height - rhs.height)
+    }
+
+    private static func prefers(
+        _ lhs: WindowMatchCandidate,
+        over rhs: WindowMatchCandidate,
+        preferNonMainOnTies: Bool,
+        lhsIndex: Int,
+        rhsIndex: Int
+    ) -> Bool {
+        if preferNonMainOnTies {
+            let lhsPenalty = currentWindowPenalty(lhs)
+            let rhsPenalty = currentWindowPenalty(rhs)
+            if lhsPenalty != rhsPenalty {
+                return lhsPenalty < rhsPenalty
+            }
+        }
+
+        return lhsIndex < rhsIndex
+    }
+
+    private static func currentWindowPenalty(_ candidate: WindowMatchCandidate) -> Int {
+        (candidate.isMain ? 1 : 0) + (candidate.isFocused ? 1 : 0)
     }
 
     static func snapFrame(inVisibleFrame visibleFrame: CGRect, screenFrame: CGRect, to edge: WindowSnapEdge) -> CGRect {
