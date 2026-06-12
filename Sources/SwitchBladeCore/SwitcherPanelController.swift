@@ -17,6 +17,37 @@ final class SwitcherPanelController {
     private let cardMarginX = SwitcherLayoutCalculator.cardMarginX
     private let cardMarginY = SwitcherLayoutCalculator.cardMarginY
     private let cardCornerRadius: CGFloat = 20
+    private struct CachedPanelLayout {
+        let itemCount: Int
+        let screenFrame: CGRect
+        let visibleFrame: CGRect
+        let tileMinWidth: CGFloat
+        let tileAspectRatio: CGFloat
+        let panelFrame: CGRect
+
+        func matches(
+            itemCount: Int,
+            mouseLocation: CGPoint,
+            tileMinWidth: CGFloat,
+            tileAspectRatio: CGFloat
+        ) -> Bool {
+            self.itemCount == itemCount
+                && screenFrame.contains(mouseLocation)
+                && abs(self.tileMinWidth - tileMinWidth) < 0.5
+                && abs(self.tileAspectRatio - tileAspectRatio) < 0.001
+        }
+    }
+
+    private struct PanelSizingMetrics {
+        let totalMs: Double
+        let screenMs: Double
+        let calcMs: Double
+        let setFrameMs: Double
+        let maskMs: Double
+        let cacheHit: Bool
+    }
+
+    private var cachedLayout: CachedPanelLayout?
 
     /// Set by the owner (AppDelegate) so the store can cancel without this class
     /// needing a direct store reference.
@@ -75,9 +106,7 @@ final class SwitcherPanelController {
 
     func show(itemCount: Int) {
         let start = Date()
-        let sizeStart = Date()
-        sizeAndCenter(itemCount: itemCount)
-        let sizeEnd = Date()
+        let sizing = sizeAndCenter(itemCount: itemCount)
         // Ensure SwiftUI has laid out the current store state before the
         // transparent panel becomes visible.
         let layoutStart = Date()
@@ -99,7 +128,6 @@ final class SwitcherPanelController {
         scheduleKeyWindowVerification()
 
         let ms = Date().timeIntervalSince(start) * 1000
-        let sizeMs = sizeEnd.timeIntervalSince(sizeStart) * 1000
         let layoutMs = layoutEnd.timeIntervalSince(layoutStart) * 1000
         let orderMs = orderEnd.timeIntervalSince(orderStart) * 1000
         PerformanceDiagnostics.record(
@@ -109,12 +137,22 @@ final class SwitcherPanelController {
                 "layout_ms": .double(layoutMs),
                 "milliseconds": .double(ms),
                 "order_ms": .double(orderMs),
-                "size_ms": .double(sizeMs)
+                "size_cache_hit": .bool(sizing.cacheHit),
+                "size_calc_ms": .double(sizing.calcMs),
+                "size_mask_ms": .double(sizing.maskMs),
+                "size_ms": .double(sizing.totalMs),
+                "size_screen_ms": .double(sizing.screenMs),
+                "size_set_frame_ms": .double(sizing.setFrameMs)
             ]
         )
         Logger.switcher.notice(
-            "Panel show: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items; size=\(sizeMs, format: .fixed(precision: 1), privacy: .public), layout=\(layoutMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+            "Panel show: \(ms, format: .fixed(precision: 1), privacy: .public) ms for \(itemCount, privacy: .public) items; size=\(sizing.totalMs, format: .fixed(precision: 1), privacy: .public), sizeCache=\(sizing.cacheHit, privacy: .public), layout=\(layoutMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
         )
+    }
+
+    func invalidateLayoutCache(reason: String) {
+        cachedLayout = nil
+        Logger.switcher.info("Panel layout cache invalidated: \(reason, privacy: .public)")
     }
 
     /// macOS sometimes returns from `NSApp.activate` + `makeKeyAndOrderFront`
@@ -173,20 +211,84 @@ final class SwitcherPanelController {
         }
     }
 
-    private func sizeAndCenter(itemCount: Int) {
-        let targetScreen = activeScreen()
-        guard let frame = targetScreen?.visibleFrame else { return }
+    private func sizeAndCenter(itemCount: Int) -> PanelSizingMetrics {
+        let start = Date()
+        let tileMinWidth = SwitchBladeSettings.shared.tileMinWidth
+        let tileAspectRatio = SwitcherLayout.tileAspectRatio
+        let mouseLocation = NSEvent.mouseLocation
 
+        if let cachedLayout,
+           cachedLayout.matches(
+               itemCount: itemCount,
+               mouseLocation: mouseLocation,
+               tileMinWidth: tileMinWidth,
+               tileAspectRatio: tileAspectRatio
+           ),
+           framesApproximatelyEqual(panel.frame, cachedLayout.panelFrame) {
+            return PanelSizingMetrics(
+                totalMs: Date().timeIntervalSince(start) * 1000,
+                screenMs: 0,
+                calcMs: 0,
+                setFrameMs: 0,
+                maskMs: 0,
+                cacheHit: true
+            )
+        }
+
+        let screenStart = Date()
+        let geometry = cachedLayout.flatMap { cached -> (screenFrame: CGRect, visibleFrame: CGRect)? in
+            guard cached.screenFrame.contains(mouseLocation) else { return nil }
+            return (cached.screenFrame, cached.visibleFrame)
+        } ?? activeScreenGeometry()
+        let screenMs = Date().timeIntervalSince(screenStart) * 1000
+        guard let geometry else {
+            return PanelSizingMetrics(
+                totalMs: Date().timeIntervalSince(start) * 1000,
+                screenMs: screenMs,
+                calcMs: 0,
+                setFrameMs: 0,
+                maskMs: 0,
+                cacheHit: false
+            )
+        }
+
+        let calcStart = Date()
         let result = SwitcherLayoutCalculator.calculate(.init(
-            visibleFrame: frame,
-            tileMinWidth: SwitchBladeSettings.shared.tileMinWidth,
+            visibleFrame: geometry.visibleFrame,
+            tileMinWidth: tileMinWidth,
             itemCount: itemCount,
-            tileAspectRatio: SwitcherLayout.tileAspectRatio
+            tileAspectRatio: tileAspectRatio
         ))
+        let calcMs = Date().timeIntervalSince(calcStart) * 1000
 
-        panel.setFrame(result.panelFrame, display: false)
+        let setFrameStart = Date()
+        if !framesApproximatelyEqual(panel.frame, result.panelFrame) {
+            panel.setFrame(result.panelFrame, display: false)
+        }
+        let setFrameMs = Date().timeIntervalSince(setFrameStart) * 1000
+
+        let maskStart = Date()
         updateCardMask(panelWidth: result.panelFrame.width,
                        panelHeight: result.panelFrame.height)
+        let maskMs = Date().timeIntervalSince(maskStart) * 1000
+
+        cachedLayout = CachedPanelLayout(
+            itemCount: itemCount,
+            screenFrame: geometry.screenFrame,
+            visibleFrame: geometry.visibleFrame,
+            tileMinWidth: tileMinWidth,
+            tileAspectRatio: tileAspectRatio,
+            panelFrame: result.panelFrame
+        )
+
+        return PanelSizingMetrics(
+            totalMs: Date().timeIntervalSince(start) * 1000,
+            screenMs: screenMs,
+            calcMs: calcMs,
+            setFrameMs: setFrameMs,
+            maskMs: maskMs,
+            cacheHit: false
+        )
     }
 
     /// Screen the panel should appear on. Priority:
@@ -203,6 +305,17 @@ final class SwitcherPanelController {
             return keyScreen
         }
         return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func activeScreenGeometry() -> (screenFrame: CGRect, visibleFrame: CGRect)? {
+        activeScreen().map { ($0.frame, $0.visibleFrame) }
+    }
+
+    private func framesApproximatelyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.origin.x - rhs.origin.x) < 0.5
+            && abs(lhs.origin.y - rhs.origin.y) < 0.5
+            && abs(lhs.size.width - rhs.size.width) < 0.5
+            && abs(lhs.size.height - rhs.size.height) < 0.5
     }
 
     /// Keeps the CAShapeLayer mask in sync with the panel size.

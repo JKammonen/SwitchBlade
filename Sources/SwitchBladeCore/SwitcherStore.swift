@@ -63,6 +63,8 @@ final class SwitcherStore: ObservableObject {
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
     private var pendingOpenRequestedAt: Date?
+    private var activeOpenRequestedAt: Date?
+    private var currentOpenSource: String?
     private var cachedOpenItems: [WindowItem] = []
     private var cachedOpenItemsUpdatedAt: Date?
     /// Set when app focus changes outside the switcher after the cache was
@@ -110,7 +112,7 @@ final class SwitcherStore: ObservableObject {
         performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
         activationWarmupWindow: TimeInterval = 60,
         cachedOpenItemsMaxAge: TimeInterval = 30,
-        initialPanelShowDelayNanoseconds: UInt64 = 120_000_000,
+        initialPanelShowDelayNanoseconds: UInt64 = 0,
         deferredPreviewCaptureBudget: Int = 12,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
@@ -261,6 +263,7 @@ final class SwitcherStore: ObservableObject {
         panelShowTask?.cancel()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
+        activeOpenRequestedAt = pendingOpenRequestedAt
         enterResolving(commitWhenReady: false)
 
         if !cachedOpenItems.isEmpty {
@@ -415,6 +418,10 @@ final class SwitcherStore: ObservableObject {
     func commitSelection() {
         if isSwitching, !isVisible {
             if case .previewHidden = phase, let item = selectedItem {
+                if hiddenStaleCommitNeedsFreshSnapshot(for: item) {
+                    deferHiddenStaleCommitUntilFreshSnapshot(item)
+                    return
+                }
                 Logger.switcher.info(
                     "Commit selection from prepared hidden open item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
                 )
@@ -580,16 +587,18 @@ final class SwitcherStore: ObservableObject {
         for item: WindowItem,
         liveItems: [WindowItem]? = nil,
         actionName: String,
+        source: String? = nil,
         action: @escaping (WindowActivating, WindowItem) -> Void
     ) {
         let liveItems = liveItems ?? items
+        let actionSource = source ?? currentOpenSource ?? "unknown"
         Logger.switcher.info(
-            "Schedule selection action=\(actionName, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+            "Schedule selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
         mruTracker.rememberSelection(
             item.id,
             in: liveItems,
-            context: "selection-\(actionName)-stale=\(currentShowingStale)"
+            context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
         )
         hide()
         // Give AppKit one frame to commit orderOut before WindowActivator starts
@@ -598,7 +607,7 @@ final class SwitcherStore: ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 16_000_000)
             Logger.switcher.info(
-                "Dispatch selection action=\(actionName, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+                "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
             )
             action(activator, item)
         }
@@ -697,6 +706,8 @@ final class SwitcherStore: ObservableObject {
         enterIdle()
         hoverEnabled = false
         pendingOpenRequestedAt = nil
+        activeOpenRequestedAt = nil
+        currentOpenSource = nil
         onHide?()
         scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
         scheduleOpenItemsCacheWarmup(context: "after hide", delayNanoseconds: 250_000_000)
@@ -719,6 +730,7 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
+        currentOpenSource = source
         if updateCachedItems {
             updateCachedOpenItems(orderedItems)
         }
@@ -755,7 +767,8 @@ final class SwitcherStore: ObservableObject {
             performSelectionAction(
                 for: item,
                 liveItems: orderedItems,
-                actionName: "activate"
+                actionName: "activate",
+                source: source
             ) { activator, selectedItem in
                 activator.activate(selectedItem)
             }
@@ -1042,6 +1055,24 @@ final class SwitcherStore: ObservableObject {
         cachedOpenItemsNeedResnapshot = false
     }
 
+    private func hiddenStaleCommitNeedsFreshSnapshot(for item: WindowItem) -> Bool {
+        guard currentShowingStale else { return false }
+        return items.filter { $0.pid == item.pid }.count > 1
+    }
+
+    private func deferHiddenStaleCommitUntilFreshSnapshot(_ item: WindowItem) {
+        Logger.switcher.info(
+            "Deferring hidden stale commit for same-app window id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) until fresh snapshot"
+        )
+        panelShowTask?.cancel()
+        panelShowTask = nil
+        staleCacheHealTask?.cancel()
+        staleCacheHealTask = nil
+        openRefreshTask?.cancel()
+        enterResolving(commitWhenReady: true)
+        openFromFreshSnapshotOffMain()
+    }
+
     private func logOpenOrdering(source: String, orderedItems: [WindowItem], selectedID: WindowItem.ID?) {
         guard PerformanceLoggingState.mode == .debug else { return }
         let orderSummary = orderedItems.prefix(16)
@@ -1061,6 +1092,26 @@ final class SwitcherStore: ObservableObject {
     private func isCachedOpenItemsFresh(now: Date = Date()) -> Bool {
         guard let updatedAt = cachedOpenItemsUpdatedAt else { return false }
         return now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge
+    }
+
+    private func recordPanelVisibleMetric(itemCount: Int) {
+        guard let activeOpenRequestedAt else { return }
+        let ms = Date().timeIntervalSince(activeOpenRequestedAt) * 1000
+        let source = currentOpenSource ?? "unknown"
+        PerformanceDiagnostics.record(
+            "keydown_to_panel_visible",
+            fields: [
+                "item_count": .int(itemCount),
+                "milliseconds": .double(ms),
+                "source": .string(source),
+                "stale": .bool(currentShowingStale)
+            ]
+        )
+        if PerformanceLoggingState.mode != .off {
+            Logger.switcher.info(
+                "Keydown-to-panel-visible: \(ms, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), items=\(itemCount, privacy: .public), stale=\(self.currentShowingStale, privacy: .public)"
+            )
+        }
     }
 
     private func snapshotVisibleOnlyOffMain(
@@ -1262,6 +1313,7 @@ final class SwitcherStore: ObservableObject {
     private func schedulePanelShow(generation: Int) {
         guard isVisible, previewGeneration == generation else { return }
         onShow?()
+        recordPanelVisibleMetric(itemCount: items.count)
     }
 
     private func removeItem(withID id: WindowItem.ID) {

@@ -238,6 +238,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.panelController?.invalidateLayoutCache(reason: "system did wake")
                     self?.handleCaptureContentInvalidation(reason: "system did wake", warmAfter: true)
                 }
             }
@@ -252,6 +253,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.panelController?.invalidateLayoutCache(reason: "screen parameters changed")
                     self?.handleCaptureContentInvalidation(reason: "screen parameters changed", warmAfter: true)
                 }
             }

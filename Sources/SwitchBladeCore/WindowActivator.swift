@@ -15,6 +15,22 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let isFocused: Bool
     }
 
+    struct WindowMatchDecision: Equatable {
+        let index: Int
+        let reason: String
+        let titleMatchCount: Int
+        let frameMatchCount: Int
+        let frameDistanceBucket: String
+        let chosenIsMain: Bool
+        let chosenIsFocused: Bool
+    }
+
+    private struct MatchedWindow {
+        let element: AXUIElement
+        let decision: WindowMatchDecision
+        let candidateCount: Int
+    }
+
     private let raiseWindowOverride: ((WindowItem) -> Bool)?
     private let activateApplicationOverride: ((pid_t) -> Bool)?
 
@@ -50,9 +66,10 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         log(action: "snap \(edge.rawValue)", item: item)
 
         let appElement = AXUIElementCreateApplication(item.pid)
-        guard let window = matchingWindow(for: appElement, item: item) else {
+        guard let match = matchingWindow(for: appElement, item: item) else {
             return false
         }
+        let window = match.element
 
         if item.isMinimized {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
@@ -75,12 +92,20 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return false
         }
 
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let activated = Self.shouldActivateApplication(afterTargeting: item)
             ? performApplicationActivation(pid: item.pid)
             : false
+        logMatchDecision(
+            action: "snap",
+            item: item,
+            match: match,
+            raiseResult: raiseResult,
+            mainResult: mainResult,
+            focusResult: focusResult
+        )
         Logger.activator.info(
             "snap result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appActivated=\(activated, privacy: .public)"
         )
@@ -117,7 +142,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     @discardableResult
     private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
         let appElement = AXUIElementCreateApplication(item.pid)
-        guard let window = matchingWindow(
+        guard let match = matchingWindow(
             for: appElement,
             item: item,
             preferNonMainOnTies: item.isFrontmostApp
@@ -127,14 +152,25 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             )
             return false
         }
+        let window = match.element
 
+        var unminimizeResult: AXError?
         if item.isMinimized {
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            unminimizeResult = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        return true
+        let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        logMatchDecision(
+            action: "activate",
+            item: item,
+            match: match,
+            raiseResult: raiseResult,
+            mainResult: mainResult,
+            focusResult: focusResult,
+            unminimizeResult: unminimizeResult
+        )
+        return raiseResult == .success && mainResult == .success && focusResult == .success
     }
 
     @discardableResult
@@ -173,11 +209,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
     private func closeMatchingWindow(_ item: WindowItem) -> Bool {
         let appElement = AXUIElementCreateApplication(item.pid)
-        guard let window = matchingWindow(for: appElement, item: item) else {
+        guard let match = matchingWindow(for: appElement, item: item) else {
             return false
         }
 
-        return pressCloseButton(on: window)
+        return pressCloseButton(on: match.element)
     }
 
     private func pressCloseButton(on window: AXUIElement) -> Bool {
@@ -208,7 +244,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         for appElement: AXUIElement,
         item: WindowItem,
         preferNonMainOnTies: Bool = false
-    ) -> AXUIElement? {
+    ) -> MatchedWindow? {
         guard let windows = windows(for: appElement) else {
             return nil
         }
@@ -225,12 +261,16 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             )
         }
 
-        if let matchIndex = Self.bestMatchIndex(
+        if let decision = Self.bestMatchDecision(
             for: item,
             candidates: candidates.map(\.candidate),
             preferNonMainOnTies: preferNonMainOnTies
         ) {
-            return candidates[matchIndex].element
+            return MatchedWindow(
+                element: candidates[decision.index].element,
+                decision: decision,
+                candidateCount: candidates.count
+            )
         }
 
         let titleMatchCount = candidates.reduce(0) { count, candidate in
@@ -244,6 +284,21 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public)"
         )
         return nil
+    }
+
+    private func logMatchDecision(
+        action: String,
+        item: WindowItem,
+        match: MatchedWindow,
+        raiseResult: AXError,
+        mainResult: AXError,
+        focusResult: AXError,
+        unminimizeResult: AXError? = nil
+    ) {
+        let unminimizeRaw = unminimizeResult?.rawValue ?? Int32.min
+        Logger.activator.info(
+            "AX target action=\(action, privacy: .public) pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) candidates=\(match.candidateCount, privacy: .public) chosenIndex=\(match.decision.index, privacy: .public) reason=\(match.decision.reason, privacy: .public) titleMatches=\(match.decision.titleMatchCount, privacy: .public) frameMatches=\(match.decision.frameMatchCount, privacy: .public) frameDistance=\(match.decision.frameDistanceBucket, privacy: .public) chosenMain=\(match.decision.chosenIsMain, privacy: .public) chosenFocused=\(match.decision.chosenIsFocused, privacy: .public) raiseResult=\(raiseResult.rawValue, privacy: .public) mainResult=\(mainResult.rawValue, privacy: .public) focusResult=\(focusResult.rawValue, privacy: .public) unminimizeResult=\(unminimizeRaw, privacy: .public)"
+        )
     }
 
     private func axString(_ attribute: String, on element: AXUIElement) -> String? {
@@ -317,15 +372,25 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         candidates: [WindowMatchCandidate],
         preferNonMainOnTies: Bool = false
     ) -> Int? {
+        bestMatchDecision(
+            for: item,
+            candidates: candidates,
+            preferNonMainOnTies: preferNonMainOnTies
+        )?.index
+    }
+
+    static func bestMatchDecision(
+        for item: WindowItem,
+        candidates: [WindowMatchCandidate],
+        preferNonMainOnTies: Bool = false
+    ) -> WindowMatchDecision? {
         guard !candidates.isEmpty else { return nil }
 
         let indexedCandidates = candidates.enumerated().map { (index: $0.offset, candidate: $0.element) }
-        let titleFiltered = {
-            let exactTitleMatches = indexedCandidates.filter {
-                titleMatches(item.title, candidateTitle: $0.candidate.title)
-            }
-            return exactTitleMatches.isEmpty ? indexedCandidates : exactTitleMatches
-        }()
+        let exactTitleMatches = indexedCandidates.filter {
+            titleMatches(item.title, candidateTitle: $0.candidate.title)
+        }
+        let titleFiltered = exactTitleMatches.isEmpty ? indexedCandidates : exactTitleMatches
 
         let exactFrameMatches = titleFiltered.filter { indexedCandidate in
             guard let frame = indexedCandidate.candidate.frame else { return false }
@@ -336,7 +401,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             for: item,
             preferNonMainOnTies: preferNonMainOnTies
         ) {
-            return bestFrameMatch.index
+            return decision(
+                bestFrameMatch,
+                reason: "frame-close",
+                item: item,
+                titleMatchCount: exactTitleMatches.count,
+                frameMatchCount: exactFrameMatches.count
+            )
         }
 
         let frameFallbackCandidates = titleFiltered.filter { $0.candidate.frame != nil }
@@ -345,14 +416,27 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             for: item,
             preferNonMainOnTies: preferNonMainOnTies
         ) {
-            return bestFrameFallback.index
+            return decision(
+                bestFrameFallback,
+                reason: exactTitleMatches.isEmpty ? "closest-frame-no-title" : "closest-frame",
+                item: item,
+                titleMatchCount: exactTitleMatches.count,
+                frameMatchCount: exactFrameMatches.count
+            )
         }
 
-        return bestFallbackCandidate(
+        guard let fallback = bestFallbackCandidate(
             in: titleFiltered,
             for: item,
             preferNonMainOnTies: preferNonMainOnTies
-        )?.index
+        ) else { return nil }
+        return decision(
+            fallback,
+            reason: exactTitleMatches.isEmpty ? "fallback-no-title" : "fallback-title",
+            item: item,
+            titleMatchCount: exactTitleMatches.count,
+            frameMatchCount: exactFrameMatches.count
+        )
     }
 
     private static func bestFrameCandidate(
@@ -411,6 +495,39 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             + abs(lhs.origin.y - rhs.origin.y)
             + abs(lhs.width - rhs.width)
             + abs(lhs.height - rhs.height)
+    }
+
+    private static func frameDistanceBucket(_ distance: CGFloat?) -> String {
+        guard let distance else { return "none" }
+        switch distance {
+        case ..<12:
+            return "lt12"
+        case ..<50:
+            return "lt50"
+        case ..<200:
+            return "lt200"
+        default:
+            return "gte200"
+        }
+    }
+
+    private static func decision(
+        _ match: (index: Int, candidate: WindowMatchCandidate),
+        reason: String,
+        item: WindowItem,
+        titleMatchCount: Int,
+        frameMatchCount: Int
+    ) -> WindowMatchDecision {
+        let distance = match.candidate.frame.map { frameDistance($0, item.bounds) }
+        return WindowMatchDecision(
+            index: match.index,
+            reason: reason,
+            titleMatchCount: titleMatchCount,
+            frameMatchCount: frameMatchCount,
+            frameDistanceBucket: frameDistanceBucket(distance),
+            chosenIsMain: match.candidate.isMain,
+            chosenIsFocused: match.candidate.isFocused
+        )
     }
 
     private static func prefers(

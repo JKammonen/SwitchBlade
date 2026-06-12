@@ -151,7 +151,7 @@ func makeStore(
     userDefaults: UserDefaults = makeIsolatedUserDefaults(),
     activationWarmupWindow: TimeInterval = 60,
     cachedOpenItemsMaxAge: TimeInterval = 30,
-    initialPanelShowDelayNanoseconds: UInt64 = 120_000_000,
+    initialPanelShowDelayNanoseconds: UInt64 = 0,
     deferredPreviewCaptureBudget: Int = 12,
     initialFrontmostAppPID: pid_t? = nil,
     switchBladePID: pid_t = getpid()
