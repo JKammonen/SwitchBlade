@@ -8,6 +8,9 @@ enum HotkeyMonitorTests {
         ("HotkeyMonitor/commandRelease_firesOnModifierDownUpTransition", commandReleaseFiresOnTransition),
         ("HotkeyMonitor/commandRelease_duplicateReleaseDelivery_firesOnlyOnce", commandReleaseDuplicateDeliveryFiresOnce),
         ("HotkeyMonitor/commandRelease_keyDownWithoutPriorModifierDownStillFires", commandReleaseKeyDownWithoutPriorModifierDownStillFires),
+        ("HotkeyMonitor/tapRecovery_rebuildsInvalidTap", tapRecoveryRebuildsInvalidTap),
+        ("HotkeyMonitor/tapRecovery_reenablesValidDisabledTap", tapRecoveryReenablesValidDisabledTap),
+        ("HotkeyMonitor/tapRecovery_leavesValidEnabledTapAlone", tapRecoveryLeavesValidEnabledTapAlone),
         ("HotkeyMonitor/modifierMouseSwitch_requiresSettingEnabled", modifierMouseSwitchRequiresSettingEnabled),
         ("HotkeyMonitor/modifierMouseSwitch_requiresDoubleTapModifier", modifierMouseSwitchRequiresDoubleTapModifier)
     ]
@@ -70,6 +73,31 @@ enum HotkeyMonitorTests {
             flags: [.maskCommand],
             doubleTapModifier: .maskCommand
         ))
+    }
+
+    @MainActor static func tapRecoveryRebuildsInvalidTap() throws {
+        try expectEqual(
+            HotkeyMonitor.tapRecoveryAction(isPortValid: false, isEnabled: false),
+            .rebuild
+        )
+        try expectEqual(
+            HotkeyMonitor.tapRecoveryAction(isPortValid: false, isEnabled: true),
+            .rebuild
+        )
+    }
+
+    @MainActor static func tapRecoveryReenablesValidDisabledTap() throws {
+        try expectEqual(
+            HotkeyMonitor.tapRecoveryAction(isPortValid: true, isEnabled: false),
+            .reenable
+        )
+    }
+
+    @MainActor static func tapRecoveryLeavesValidEnabledTapAlone() throws {
+        try expectEqual(
+            HotkeyMonitor.tapRecoveryAction(isPortValid: true, isEnabled: true),
+            .noOp
+        )
     }
 
     @MainActor static func modifierMouseSwitchRequiresDoubleTapModifier() throws {

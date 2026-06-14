@@ -4,6 +4,12 @@ import os.log
 
 @MainActor
 final class HotkeyMonitor {
+    enum TapRecoveryAction: Equatable {
+        case noOp
+        case reenable
+        case rebuild
+    }
+
     enum Direction {
         case forward
         case backward
@@ -92,21 +98,18 @@ final class HotkeyMonitor {
     // callback and an off-thread deinit was exactly what we're guarding against.
     // Owners MUST call stop() from MainActor before dropping the monitor.
 
-    /// Periodic safety net: macOS can silently disable an event tap without
-    /// firing `.tapDisabledByTimeout`/`.tapDisabledByUserInput` (rare but
-    /// observed under system stress). Polling `CGEvent.tapIsEnabled` every 5 s
-    /// catches that and re-enables the tap — and the log line is the smoking
-    /// gun if user-reported "Cmd+Tab did nothing for a few seconds" recurs.
+    /// Periodic safety net: macOS can silently disable or invalidate an event
+    /// tap without firing `.tapDisabledByTimeout`/`.tapDisabledByUserInput`
+    /// (rare but observed under system stress). Polling every 5 s catches that
+    /// and heals the tap — and the log line is the smoking gun if user-reported
+    /// "Cmd+Tab did nothing for a few seconds" recurs.
     private func startTapWatchdog() {
         tapWatchdogTask?.cancel()
         tapWatchdogTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled, let self, let tap = self.eventTap else { return }
-                if !CGEvent.tapIsEnabled(tap: tap) {
-                    Logger.hotkey.notice("Watchdog: tap silently disabled — re-enabling")
-                    CGEvent.tapEnable(tap: tap, enable: true)
-                }
+                guard !Task.isCancelled, let self else { return }
+                self.ensureEventTapReady(reason: "watchdog")
             }
         }
     }
@@ -149,13 +152,54 @@ final class HotkeyMonitor {
         Logger.hotkey.info("Event tap installed")
     }
 
+    private func ensureEventTapReady(reason: String) {
+        guard let eventTap else {
+            Logger.hotkey.notice("Event tap missing at \(reason, privacy: .public) — reinstalling")
+            installEventTap()
+            return
+        }
+
+        let isPortValid = CFMachPortIsValid(eventTap)
+        let isEnabled = isPortValid && CGEvent.tapIsEnabled(tap: eventTap)
+        switch Self.tapRecoveryAction(isPortValid: isPortValid, isEnabled: isEnabled) {
+        case .noOp:
+            return
+        case .reenable:
+            Logger.hotkey.notice("Tap was disabled at \(reason, privacy: .public) — re-enabling")
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+            if !CGEvent.tapIsEnabled(tap: eventTap) {
+                Logger.hotkey.notice("Tap stayed disabled after re-enable at \(reason, privacy: .public) — rebuilding")
+                rebuildEventTap()
+            }
+        case .rebuild:
+            Logger.hotkey.notice("Tap was invalid at \(reason, privacy: .public) — rebuilding")
+            rebuildEventTap()
+        }
+    }
+
+    static func tapRecoveryAction(isPortValid: Bool, isEnabled: Bool) -> TapRecoveryAction {
+        if !isPortValid { return .rebuild }
+        return isEnabled ? .noOp : .reenable
+    }
+
+    private func rebuildEventTap() {
+        if let eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
+            self.eventTapSource = nil
+        }
+
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+            self.eventTap = nil
+        }
+
+        installEventTap()
+    }
+
     private func handleEventTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            Logger.hotkey.notice("Event tap disabled by system (\(type.rawValue, privacy: .public)) — re-enabling")
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-            }
-
+            ensureEventTapReady(reason: "system callback \(type.rawValue)")
             return Unmanaged.passUnretained(event)
         }
 
@@ -275,13 +319,7 @@ final class HotkeyMonitor {
     }
 
     private func reenableTapIfDisabled(reason: String) {
-        guard let eventTap else { return }
-        if !CGEvent.tapIsEnabled(tap: eventTap) {
-            Logger.hotkey.notice(
-                "Tap was disabled at \(reason, privacy: .public) — re-enabling before next key event"
-            )
-            CGEvent.tapEnable(tap: eventTap, enable: true)
-        }
+        ensureEventTapReady(reason: reason)
     }
 
     private func handleModifierFlagsChanged(
