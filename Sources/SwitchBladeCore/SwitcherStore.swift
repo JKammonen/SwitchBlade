@@ -660,27 +660,21 @@ final class SwitcherStore: ObservableObject {
         )
         let scheduledAt = Date()
         hide()
-        // Give AppKit one frame to commit orderOut before WindowActivator starts
-        // synchronous AX IPC to the target app.
-        let activator = self.activator
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 16_000_000)
-            let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
-            PerformanceDiagnostics.record(
-                "selection_action_dispatch",
-                fields: [
-                    "action": .string(actionName),
-                    "dispatch_delay_ms": .double(dispatchDelayMs),
-                    "pid": .int(Int(item.pid)),
-                    "source": .string(actionSource),
-                    "window_id": .int(Int(item.id))
-                ]
-            )
-            Logger.switcher.info(
-                "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
-            )
-            action(activator, item)
-        }
+        let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
+        PerformanceDiagnostics.record(
+            "selection_action_dispatch",
+            fields: [
+                "action": .string(actionName),
+                "dispatch_delay_ms": .double(dispatchDelayMs),
+                "pid": .int(Int(item.pid)),
+                "source": .string(actionSource),
+                "window_id": .int(Int(item.id))
+            ]
+        )
+        Logger.switcher.info(
+            "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
+        )
+        action(activator, item)
     }
 
     private func hydratedForDisplay(_ sourceItems: [WindowItem]) -> [WindowItem] {

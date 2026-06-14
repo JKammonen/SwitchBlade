@@ -64,6 +64,7 @@ enum SwitcherStoreTests {
         ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
+        ("Store/commitSelection_dispatchesActivationSynchronously", commit_dispatchesActivationSynchronously),
         ("Store/commitSelection_withNoSelection_hides", commit_noSelection),
         ("Store/cancel_hidesWithoutActivating", cancel_hides),
         // close
@@ -1196,6 +1197,25 @@ enum SwitcherStoreTests {
         try expect(!store.isVisible)
         await runPendingMainTasks()
         try expectEqual(activator.activatedItems.map(\.id), [1])
+    }
+
+    @MainActor static func commit_dispatchesActivationSynchronously() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        await openSwitcher(store)
+        store.selectedID = 1
+
+        store.commitSelection()
+
+        try expect(!store.isVisible)
+        try expectEqual(
+            activator.activatedItems.map(\.id),
+            [1],
+            "selection activation should not wait for a deferred MainActor sleep"
+        )
     }
 
     @MainActor static func commit_noSelection() async throws {
