@@ -241,6 +241,13 @@ final class HotkeyMonitor {
         armHotkeyModifierReleaseTrackingIfNeeded()
         let direction: Direction = flags.contains(.maskShift) ? .backward : .forward
         let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
+        PerformanceDiagnostics.record(
+            "hotkey_event",
+            fields: [
+                "kind": .string("cmd_tab"),
+                "queue_delay_ms": .double(queueDelayMs)
+            ]
+        )
         Logger.hotkey.notice(
             "Hotkey forwarded: \(String(describing: direction), privacy: .public) (queue delay \(queueDelayMs, format: .fixed(precision: 1), privacy: .public) ms)"
         )
@@ -266,6 +273,14 @@ final class HotkeyMonitor {
         // The double-tap modifier was used with a mouse button, so it was not
         // a standalone double-tap.
         lastTapModifierPressTimestamp = nil
+        let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
+        PerformanceDiagnostics.record(
+            "hotkey_event",
+            fields: [
+                "kind": .string("modifier_mouse"),
+                "queue_delay_ms": .double(queueDelayMs)
+            ]
+        )
         Logger.hotkey.info("Double-tap modifier + left mouse detected")
         onModifierMouseSwitch?()
         return nil

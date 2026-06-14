@@ -76,6 +76,7 @@ final class SwitcherStore: ObservableObject {
     private var hoverEnabled = false
     private var currentAppPID: pid_t?
     private var previousAppPID: pid_t?
+    private var pendingActivationMeasurements: [pid_t: [PendingActivationMeasurement]] = [:]
     /// True while a previous-app switch is resolving its off-main snapshot.
     /// Serializes the gesture so a second rapid double-tap can't run against the
     /// PID the first one is about to mutate.
@@ -100,6 +101,13 @@ final class SwitcherStore: ObservableObject {
         init(task: Task<[WindowItem], Never>) {
             self.task = task
         }
+    }
+
+    private struct PendingActivationMeasurement {
+        let requestedAt: Date
+        let context: String
+        let source: String
+        let windowID: WindowItem.ID?
     }
 
     init(
@@ -153,6 +161,7 @@ final class SwitcherStore: ObservableObject {
     /// callable directly from tests so the notification queue / RunLoop
     /// plumbing doesn't have to be exercised under XCTest.
     func handleAppActivation(pid: pid_t) {
+        recordObservedActivationIfNeeded(pid: pid)
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
                 previousAppPID = currentAppPID
@@ -499,6 +508,7 @@ final class SwitcherStore: ObservableObject {
     }
 
     func switchToPreviousApplication() {
+        let switchStart = Date()
         guard SwitchBladeSettings.shared.doubleModifierSwitchEnabled else {
             Logger.switcher.info("Double modifier switch ignored: setting disabled")
             return
@@ -518,7 +528,7 @@ final class SwitcherStore: ObservableObject {
         }
 
         if let targetPID = fastPreviousApplicationPIDFromCache() {
-            performFastPreviousApplicationSwitch(targetPID: targetPID)
+            performFastPreviousApplicationSwitch(targetPID: targetPID, switchStart: switchStart)
             return
         }
 
@@ -536,11 +546,11 @@ final class SwitcherStore: ObservableObject {
                 Logger.switcher.info("Double modifier switch aborted: switcher opened during snapshot")
                 return
             }
-            self.performPreviousApplicationSwitch(orderedItems: orderedItems)
+            self.performPreviousApplicationSwitch(orderedItems: orderedItems, switchStart: switchStart)
         }
     }
 
-    private func performPreviousApplicationSwitch(orderedItems: [WindowItem]) {
+    private func performPreviousApplicationSwitch(orderedItems: [WindowItem], switchStart: Date) {
         let effectiveCurrentPID = orderedItems.first?.pid ?? currentAppPID
         if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
             lastSwitcherUse = Date()
@@ -551,6 +561,18 @@ final class SwitcherStore: ObservableObject {
             currentAppPID = targetItem.pid
             Logger.switcher.info(
                 "Double modifier switching window current=\(effectiveCurrentPID ?? -1, privacy: .public) targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public)"
+            )
+            recordPreviousSwitchDispatch(
+                context: "modifier-window",
+                switchStart: switchStart,
+                targetPID: targetItem.pid,
+                windowID: targetItem.id
+            )
+            markActivationRequest(
+                pid: targetItem.pid,
+                context: "modifier-window",
+                source: "previous-switch",
+                windowID: targetItem.id
             )
             activator.activate(targetItem)
             return
@@ -571,16 +593,40 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.info(
             "Double modifier switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
         )
+        recordPreviousSwitchDispatch(
+            context: "modifier-app",
+            switchStart: switchStart,
+            targetPID: targetPID,
+            windowID: nil
+        )
+        markActivationRequest(
+            pid: targetPID,
+            context: "modifier-app",
+            source: "previous-switch",
+            windowID: nil
+        )
         activator.activateApplication(pid: targetPID)
     }
 
-    private func performFastPreviousApplicationSwitch(targetPID: pid_t) {
+    private func performFastPreviousApplicationSwitch(targetPID: pid_t, switchStart: Date) {
         guard let effectiveCurrentPID = currentAppPID else { return }
         lastSwitcherUse = Date()
         previousAppPID = effectiveCurrentPID
         currentAppPID = targetPID
         Logger.switcher.info(
             "Fast previous-app switch current=\(effectiveCurrentPID, privacy: .public) target=\(targetPID, privacy: .public)"
+        )
+        recordPreviousSwitchDispatch(
+            context: "modifier-fast-app",
+            switchStart: switchStart,
+            targetPID: targetPID,
+            windowID: nil
+        )
+        markActivationRequest(
+            pid: targetPID,
+            context: "modifier-fast-app",
+            source: "previous-switch",
+            windowID: nil
         )
         activator.activateApplication(pid: targetPID)
     }
@@ -673,6 +719,12 @@ final class SwitcherStore: ObservableObject {
         )
         Logger.switcher.info(
             "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
+        )
+        markActivationRequest(
+            pid: item.pid,
+            context: "selection-\(actionName)",
+            source: actionSource,
+            windowID: item.id
         )
         action(activator, item)
     }
@@ -1173,6 +1225,73 @@ final class SwitcherStore: ObservableObject {
         let currentItem = items.remove(at: currentIndex)
         items.insert(currentItem, at: 0)
         return items
+    }
+
+    private func recordPreviousSwitchDispatch(
+        context: String,
+        switchStart: Date,
+        targetPID: pid_t,
+        windowID: WindowItem.ID?
+    ) {
+        var fields: [String: PerformanceMetricValue] = [
+            "context": .string(context),
+            "dispatch_ms": .double(Date().timeIntervalSince(switchStart) * 1000),
+            "pid": .int(Int(targetPID))
+        ]
+        if let windowID {
+            fields["window_id"] = .int(Int(windowID))
+        }
+        PerformanceDiagnostics.record("previous_switch_dispatch", fields: fields)
+    }
+
+    private func markActivationRequest(
+        pid: pid_t,
+        context: String,
+        source: String,
+        windowID: WindowItem.ID?
+    ) {
+        pruneStaleActivationMeasurements(now: Date())
+        let measurement = PendingActivationMeasurement(
+            requestedAt: Date(),
+            context: context,
+            source: source,
+            windowID: windowID
+        )
+        pendingActivationMeasurements[pid, default: []].append(measurement)
+        var fields: [String: PerformanceMetricValue] = [
+            "context": .string(context),
+            "pid": .int(Int(pid)),
+            "source": .string(source)
+        ]
+        if let windowID {
+            fields["window_id"] = .int(Int(windowID))
+        }
+        PerformanceDiagnostics.record("activation_request", fields: fields)
+    }
+
+    private func recordObservedActivationIfNeeded(pid: pid_t) {
+        pruneStaleActivationMeasurements(now: Date())
+        guard var measurements = pendingActivationMeasurements[pid],
+              !measurements.isEmpty else { return }
+        let measurement = measurements.removeFirst()
+        pendingActivationMeasurements[pid] = measurements.isEmpty ? nil : measurements
+        var fields: [String: PerformanceMetricValue] = [
+            "context": .string(measurement.context),
+            "latency_ms": .double(Date().timeIntervalSince(measurement.requestedAt) * 1000),
+            "pid": .int(Int(pid)),
+            "source": .string(measurement.source)
+        ]
+        if let windowID = measurement.windowID {
+            fields["window_id"] = .int(Int(windowID))
+        }
+        PerformanceDiagnostics.record("activation_frontmost_observed", fields: fields)
+    }
+
+    private func pruneStaleActivationMeasurements(now: Date) {
+        for (pid, measurements) in pendingActivationMeasurements {
+            let freshMeasurements = measurements.filter { now.timeIntervalSince($0.requestedAt) <= 5 }
+            pendingActivationMeasurements[pid] = freshMeasurements.isEmpty ? nil : freshMeasurements
+        }
     }
 
     private func recordPanelVisibleMetric(itemCount: Int) {
