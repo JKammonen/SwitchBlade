@@ -53,7 +53,7 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 
 | Module | Role |
 |--------|------|
-| `SwitcherStore` | `@MainActor ObservableObject`. Holds `items`, `selectedID`, `isVisible`. Orchestrates everything else. |
+| `SwitcherStore` | `@MainActor ObservableObject`. Holds `items`, `selectedID`, `isVisible`. Orchestrates open/commit, including the prepared-hidden grace window for quick Cmd+Tab release. |
 | `WindowCatalog` | `Sendable`. Window enumeration + ScreenCaptureKit capture. Owns `SCContentCache` actor. |
 | `SCContentCache` | Actor. Caches `SCShareableContent` with staleness tracking (5 s threshold). |
 | `WindowActivator` | `Sendable`. Activate / close / quit / hide. Selected-window activate/snap target the AX window first, then activate the app so the target can become frontmost. |
@@ -134,6 +134,11 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `scripts/setup-local-codesign.sh` output. Should not happen with current setup.
 - **Blank previews after idle** → first-batch capture cold-starts. Has retry + soft
   timeout. Check rolling p95/p99 in cold-open log.
+- **Switcher feels slow when changing apps** → inspect
+  `~/Library/Logs/SwitchBlade/performance.jsonl` first. Compare `hotkey_event`,
+  `selection_action_dispatch` / `previous_switch_dispatch`, `panel_show`,
+  `capture_previews`, `activation_ax_*`, `activation_app_activate`, and
+  `activation_frontmost_observed`; app activation alone is not enough evidence.
 - **Window scope feels wrong** → Settings → Behavior → Window scope. Choices are
   current Space, all Spaces, and current app.
 - **Permission dialog reappears** → never add `CGRequest*` calls. Use `CGPreflight*` +
