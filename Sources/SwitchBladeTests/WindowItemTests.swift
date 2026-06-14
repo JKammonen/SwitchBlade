@@ -11,6 +11,7 @@ enum WindowItemTests {
         ("WindowItem/id_isWindowID", id_isWindowID),
         ("WindowItem/withPreview_setsPreview_keepsOtherFields", withPreview_setsPreview),
         ("WindowItem/withPreview_canClearPreview", withPreview_canClear),
+        ("WindowItem/withFrontmostState_updatesOnlyFrontmostFlag", withFrontmostState_updatesOnlyFlag),
         ("WindowItem/equatable_sameContents_areEqual", equatable_sameContents)
     ]
 
@@ -56,6 +57,21 @@ enum WindowItemTests {
         let img = NSImage(size: CGSize(width: 10, height: 10))
         let cleared = makeItem(id: 1).withPreview(img).withPreview(nil)
         try expectNil(cleared.preview)
+    }
+
+    @MainActor static func withFrontmostState_updatesOnlyFlag() throws {
+        let item = makeItem(id: 1, pid: 200, appName: "ChatGPT", title: "Window", isFrontmostApp: false)
+        let updated = item.withFrontmostState(true)
+
+        try expect(updated.isFrontmostApp)
+        try expectEqual(updated.id, item.id)
+        try expectEqual(updated.pid, item.pid)
+        try expectEqual(updated.appName, item.appName)
+        try expectEqual(updated.title, item.title)
+        try expectEqual(updated.bounds, item.bounds)
+        try expectEqual(updated.isMinimized, item.isMinimized)
+        try expectEqual(updated.canCapturePreview, item.canCapturePreview)
+        try expectEqual(updated.bundleIdentifier, item.bundleIdentifier)
     }
 
     @MainActor static func equatable_sameContents() throws {

@@ -142,25 +142,63 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     @discardableResult
     private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
         let appElement = AXUIElementCreateApplication(item.pid)
+        let matchStart = Date()
         guard let match = matchingWindow(
             for: appElement,
             item: item,
             preferNonMainOnTies: item.isFrontmostApp
         ) else {
+            let matchMs = Date().timeIntervalSince(matchStart) * 1000
+            PerformanceDiagnostics.record(
+                "activation_ax_match",
+                fields: [
+                    "matched": .bool(false),
+                    "match_ms": .double(matchMs),
+                    "pid": .int(Int(item.pid)),
+                    "window_id": .int(Int(item.id))
+                ]
+            )
             Logger.activator.notice(
-                "AX match failed pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public)"
+                "AX match failed pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) matchMs=\(matchMs, format: .fixed(precision: 1), privacy: .public)"
             )
             return false
         }
+        let matchMs = Date().timeIntervalSince(matchStart) * 1000
         let window = match.element
 
         var unminimizeResult: AXError?
+        var unminimizeMs: Double?
         if item.isMinimized {
+            let start = Date()
             unminimizeResult = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            unminimizeMs = Date().timeIntervalSince(start) * 1000
         }
+        let raiseStart = Date()
         let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        let raiseMs = Date().timeIntervalSince(raiseStart) * 1000
+        let mainStart = Date()
         let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let mainMs = Date().timeIntervalSince(mainStart) * 1000
+        let focusStart = Date()
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let focusMs = Date().timeIntervalSince(focusStart) * 1000
+        PerformanceDiagnostics.record(
+            "activation_ax_target",
+            fields: [
+                "candidate_count": .int(match.candidateCount),
+                "focus_ms": .double(focusMs),
+                "focus_result": .int(Int(focusResult.rawValue)),
+                "main_ms": .double(mainMs),
+                "main_result": .int(Int(mainResult.rawValue)),
+                "match_ms": .double(matchMs),
+                "pid": .int(Int(item.pid)),
+                "raise_ms": .double(raiseMs),
+                "raise_result": .int(Int(raiseResult.rawValue)),
+                "unminimize_ms": .double(unminimizeMs ?? 0),
+                "unminimize_result": .int(Int(unminimizeResult?.rawValue ?? Int32.min)),
+                "window_id": .int(Int(item.id))
+            ]
+        )
         logMatchDecision(
             action: "activate",
             item: item,
@@ -189,7 +227,21 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return false
         }
 
-        return app.activate(options: [])
+        let start = Date()
+        let activated = app.activate(options: [])
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+        PerformanceDiagnostics.record(
+            "activation_app_activate",
+            fields: [
+                "activated": .bool(activated),
+                "app_activate_ms": .double(elapsedMs),
+                "pid": .int(Int(pid))
+            ]
+        )
+        Logger.activator.info(
+            "App activate timing pid=\(pid, privacy: .public) activated=\(activated, privacy: .public) elapsed=\(elapsedMs, format: .fixed(precision: 1), privacy: .public)ms"
+        )
+        return activated
     }
 
     @discardableResult
@@ -245,10 +297,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         item: WindowItem,
         preferNonMainOnTies: Bool = false
     ) -> MatchedWindow? {
+        let windowsStart = Date()
         guard let windows = windows(for: appElement) else {
             return nil
         }
+        let windowsMs = Date().timeIntervalSince(windowsStart) * 1000
 
+        let candidatesStart = Date()
         let candidates = windows.map { window in
             (
                 element: window,
@@ -260,18 +315,34 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 )
             )
         }
+        let candidatesMs = Date().timeIntervalSince(candidatesStart) * 1000
 
+        let decisionStart = Date()
         if let decision = Self.bestMatchDecision(
             for: item,
             candidates: candidates.map(\.candidate),
             preferNonMainOnTies: preferNonMainOnTies
         ) {
+            let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
+            PerformanceDiagnostics.record(
+                "activation_ax_match",
+                fields: [
+                    "candidate_count": .int(candidates.count),
+                    "candidates_ms": .double(candidatesMs),
+                    "decision_ms": .double(decisionMs),
+                    "matched": .bool(true),
+                    "pid": .int(Int(item.pid)),
+                    "window_id": .int(Int(item.id)),
+                    "windows_ms": .double(windowsMs)
+                ]
+            )
             return MatchedWindow(
                 element: candidates[decision.index].element,
                 decision: decision,
                 candidateCount: candidates.count
             )
         }
+        let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
 
         let titleMatchCount = candidates.reduce(0) { count, candidate in
             count + (Self.titleMatches(item.title, candidateTitle: candidate.candidate.title) ? 1 : 0)
@@ -281,7 +352,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return count + (Self.framesAreClose(frame, item.bounds) ? 1 : 0)
         }
         Logger.activator.notice(
-            "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public)"
+            "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public) windowsMs=\(windowsMs, format: .fixed(precision: 1), privacy: .public) candidatesMs=\(candidatesMs, format: .fixed(precision: 1), privacy: .public) decisionMs=\(decisionMs, format: .fixed(precision: 1), privacy: .public)"
         )
         return nil
     }

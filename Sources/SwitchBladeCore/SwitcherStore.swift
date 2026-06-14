@@ -268,6 +268,31 @@ final class SwitcherStore: ObservableObject {
 
         if !cachedOpenItems.isEmpty {
             if cachedOpenItemsNeedResnapshot {
+                if let rebasedItems = rebasedCachedOpenItemsForCurrentApp() {
+                    Logger.switcher.info(
+                        "Using rebased cached open items after external activation"
+                    )
+                    let openStart = Date()
+                    let queueMs = pendingOpenRequestedAt.map { openStart.timeIntervalSince($0) * 1000 } ?? 0
+                    pendingOpenRequestedAt = nil
+                    openFromOrderedItems(
+                        rebasedItems,
+                        openStart: openStart,
+                        queueMs: queueMs,
+                        permissionMs: 0,
+                        snapshotMs: 0,
+                        orderMs: 0,
+                        source: "rebased-cached",
+                        updateCachedItems: false,
+                        showingStaleCachedItems: true
+                    )
+                    scheduleStaleCacheHealingIfNeeded()
+                    Task { @MainActor [weak self] in
+                        await Task.yield()
+                        self?.refreshPermissionState()
+                    }
+                    return
+                }
                 Logger.switcher.info(
                     "Bypassing cached open items after external activation changed the frontmost app"
                 )
@@ -492,6 +517,11 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
+        if let targetPID = fastPreviousApplicationPIDFromCache() {
+            performFastPreviousApplicationSwitch(targetPID: targetPID)
+            return
+        }
+
         // Enumerate windows off the main thread. The previous-app switch is a
         // user-facing gesture (double-tap modifier / modifier+click); doing the
         // CGWindowList walk + NSRunningApplication lookups + icon copies inline
@@ -544,6 +574,17 @@ final class SwitcherStore: ObservableObject {
         activator.activateApplication(pid: targetPID)
     }
 
+    private func performFastPreviousApplicationSwitch(targetPID: pid_t) {
+        guard let effectiveCurrentPID = currentAppPID else { return }
+        lastSwitcherUse = Date()
+        previousAppPID = effectiveCurrentPID
+        currentAppPID = targetPID
+        Logger.switcher.info(
+            "Fast previous-app switch current=\(effectiveCurrentPID, privacy: .public) target=\(targetPID, privacy: .public)"
+        )
+        activator.activateApplication(pid: targetPID)
+    }
+
     private func previousSwitchTarget(from orderedItems: [WindowItem], currentPID: pid_t?) -> WindowItem? {
         guard orderedItems.count > 1 else { return nil }
 
@@ -568,6 +609,23 @@ final class SwitcherStore: ObservableObject {
         return orderedItems.first { item in
             item.pid != switchBladePID && item.pid != currentPID
         }?.pid
+    }
+
+    private func fastPreviousApplicationPIDFromCache() -> pid_t? {
+        guard let currentAppPID,
+              let previousAppPID,
+              previousAppPID != switchBladePID,
+              previousAppPID != currentAppPID,
+              isCachedOpenItemsFresh() else {
+            return nil
+        }
+
+        let currentAppWindowCount = cachedOpenItems.reduce(0) { count, item in
+            count + (item.pid == currentAppPID ? 1 : 0)
+        }
+        guard currentAppWindowCount == 1 else { return nil }
+
+        return previousAppPID
     }
 
     private func snapSelected(to edge: WindowSnapEdge) {
@@ -600,14 +658,26 @@ final class SwitcherStore: ObservableObject {
             in: liveItems,
             context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
         )
+        let scheduledAt = Date()
         hide()
         // Give AppKit one frame to commit orderOut before WindowActivator starts
         // synchronous AX IPC to the target app.
         let activator = self.activator
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 16_000_000)
+            let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
+            PerformanceDiagnostics.record(
+                "selection_action_dispatch",
+                fields: [
+                    "action": .string(actionName),
+                    "dispatch_delay_ms": .double(dispatchDelayMs),
+                    "pid": .int(Int(item.pid)),
+                    "source": .string(actionSource),
+                    "window_id": .int(Int(item.id))
+                ]
+            )
             Logger.switcher.info(
-                "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+                "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
             )
             action(activator, item)
         }
@@ -1092,6 +1162,23 @@ final class SwitcherStore: ObservableObject {
     private func isCachedOpenItemsFresh(now: Date = Date()) -> Bool {
         guard let updatedAt = cachedOpenItemsUpdatedAt else { return false }
         return now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge
+    }
+
+    private func rebasedCachedOpenItemsForCurrentApp() -> [WindowItem]? {
+        guard let currentAppPID,
+              isCachedOpenItemsFresh() else {
+            return nil
+        }
+
+        let matchingIndices = cachedOpenItems.indices.filter { cachedOpenItems[$0].pid == currentAppPID }
+        guard matchingIndices.count == 1, let currentIndex = matchingIndices.first else { return nil }
+
+        var items = cachedOpenItems.enumerated().map { _, item in
+            item.withFrontmostState(item.pid == currentAppPID)
+        }
+        let currentItem = items.remove(at: currentIndex)
+        items.insert(currentItem, at: 0)
+        return items
     }
 
     private func recordPanelVisibleMetric(itemCount: Int) {

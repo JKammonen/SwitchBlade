@@ -18,6 +18,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
         ("Store/requestCycle_bypassesFreshCacheAfterExternalActivation", requestCycle_bypassesFreshCacheAfterExternalActivation),
+        ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
@@ -58,6 +59,7 @@ enum SwitcherStoreTests {
         ("Store/switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale", switchToPreviousApplication_usesSnapshotCurrentPidWhenTrackedPidIsStale),
         ("Store/switchToPreviousApplication_repeatedCallsCanBounceBetweenTwoApps", switchToPreviousApplication_bouncesBetweenTwoApps),
         ("Store/switchToPreviousApplication_concurrentGestureDropped", switchToPreviousApplication_concurrentGestureDropped),
+        ("Store/switchToPreviousApplication_singleWindowCachedPreviousPidSkipsSnapshot", switchToPreviousApplication_singleWindowCachedPreviousPidSkipsSnapshot),
         ("Store/handleModifierMouseSwitch_visible_commitsSelection", handleModifierMouseSwitch_visibleCommitsSelection),
         ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
         // commit / cancel
@@ -268,6 +270,30 @@ enum SwitcherStoreTests {
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [3, 4])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
+    }
+
+    @MainActor static func requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation() async throws {
+        let (store, catalog, _, _) = makeStore(activationWarmupWindow: -1)
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        await seedOpenItemsCache(store)
+
+        catalog.visibleSnapshotDelayNanoseconds = 200_000_000
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        store.handleAppActivation(pid: 200)
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isVisible, "single-window rebased cache should show without waiting for a fresh snapshot")
+        try expectEqual(store.items.map(\.id), [2, 1])
+        try expectEqual(store.items.map(\.isFrontmostApp), [true, false])
+        try expectEqual(store.selectedID, 1)
+        try expect(
+            catalog.visibleSnapshotCount <= baselineSnapshots + 1,
+            "background cache healing may start, but the panel must not wait for it"
+        )
     }
 
     // Regression guard for "minimized windows do not appear in the switcher":
@@ -1085,6 +1111,34 @@ enum SwitcherStoreTests {
         await runPendingMainTasks()
 
         try expectEqual(activator.activatedApplicationPIDs, [101])
+    }
+
+    @MainActor static func switchToPreviousApplication_singleWindowCachedPreviousPidSkipsSnapshot() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
+
+        let catalog = MockWindowCatalog()
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 101, isFrontmostApp: true),
+            makeItem(id: 2, pid: 202)
+        ]
+        let (store, _, activator, _) = makeStore(
+            catalog: catalog,
+            activationWarmupWindow: -1,
+            initialFrontmostAppPID: 101,
+            switchBladePID: 999
+        )
+        await seedOpenItemsCache(store)
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        catalog.visibleSnapshotDelayNanoseconds = 200_000_000
+        store.handleAppActivation(pid: 202)
+
+        store.switchToPreviousApplication()
+
+        try expectEqual(activator.activatedApplicationPIDs, [101])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
     }
 
     @MainActor static func handleModifierMouseSwitch_visibleCommitsSelection() async throws {

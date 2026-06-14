@@ -41,4 +41,20 @@ struct WindowItem: Identifiable, Equatable {
             bundleIdentifier: bundleIdentifier
         )
     }
+
+    func withFrontmostState(_ isFrontmostApp: Bool) -> Self {
+        WindowItem(
+            windowID: windowID,
+            pid: pid,
+            appName: appName,
+            title: title,
+            bounds: bounds,
+            isFrontmostApp: isFrontmostApp,
+            isMinimized: isMinimized,
+            canCapturePreview: canCapturePreview,
+            preview: preview,
+            icon: icon,
+            bundleIdentifier: bundleIdentifier
+        )
+    }
 }
