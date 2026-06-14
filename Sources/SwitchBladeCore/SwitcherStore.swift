@@ -120,7 +120,7 @@ final class SwitcherStore: ObservableObject {
         performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
         activationWarmupWindow: TimeInterval = 60,
         cachedOpenItemsMaxAge: TimeInterval = 30,
-        initialPanelShowDelayNanoseconds: UInt64 = 0,
+        initialPanelShowDelayNanoseconds: UInt64 = 70_000_000,
         deferredPreviewCaptureBudget: Int = 12,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
