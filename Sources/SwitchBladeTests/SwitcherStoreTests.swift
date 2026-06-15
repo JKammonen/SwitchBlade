@@ -19,6 +19,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
         ("Store/requestCycle_bypassesFreshCacheAfterExternalActivation", requestCycle_bypassesFreshCacheAfterExternalActivation),
         ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
+        ("Store/requestCycle_backgroundedAppPreviewIsNotReusedAfterExternalActivation", requestCycle_backgroundedAppPreviewIsNotReusedAfterExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
@@ -274,7 +275,10 @@ enum SwitcherStoreTests {
     }
 
     @MainActor static func requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation() async throws {
-        let (store, catalog, _, _) = makeStore(activationWarmupWindow: -1)
+        let (store, catalog, _, _) = makeStore(
+            activationWarmupWindow: -1,
+            initialFrontmostAppPID: 100
+        )
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
@@ -294,6 +298,48 @@ enum SwitcherStoreTests {
         try expect(
             catalog.visibleSnapshotCount <= baselineSnapshots + 1,
             "background cache healing may start, but the panel must not wait for it"
+        )
+    }
+
+    @MainActor static func requestCycle_backgroundedAppPreviewIsNotReusedAfterExternalActivation() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+        let (store, catalog, _, _) = makeStore(
+            activationWarmupWindow: -1,
+            initialFrontmostAppPID: 100
+        )
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, appName: "Safari", title: "Tab A", isFrontmostApp: true, bundleIdentifier: "com.apple.Safari"),
+            makeItem(id: 2, pid: 200, appName: "Notes", title: "Note", bundleIdentifier: "com.apple.Notes")
+        ]
+        catalog.previewsToReturn = [1: preview]
+
+        await store.warmPreviewCache(context: "seed")
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+        try expect(store.items.first(where: { $0.id == 1 })?.preview === preview)
+
+        store.cancel()
+        await runPendingMainTasks()
+
+        catalog.previewsToReturn = [:]
+        catalog.visibleItems = [
+            makeItem(id: 2, pid: 200, appName: "Notes", title: "Note", isFrontmostApp: true, bundleIdentifier: "com.apple.Notes"),
+            makeItem(id: 1, pid: 100, appName: "Safari", title: "Tab A", bundleIdentifier: "com.apple.Safari")
+        ]
+        store.handleAppActivation(pid: 200)
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [2, 1])
+        try expectNil(
+            store.items.first(where: { $0.id == 1 })?.preview,
+            "backgrounded app must not keep replaying its old preview after external activation"
         )
     }
 

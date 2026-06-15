@@ -164,6 +164,9 @@ final class SwitcherStore: ObservableObject {
         recordObservedActivationIfNeeded(pid: pid)
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
+                if let backgroundedPID = currentAppPID {
+                    invalidateCachedPreviews(forPID: backgroundedPID)
+                }
                 previousAppPID = currentAppPID
                 currentAppPID = pid
                 cachedOpenItemsNeedResnapshot = true
@@ -176,6 +179,7 @@ final class SwitcherStore: ObservableObject {
         guard Date().timeIntervalSince(lastSwitcherUse) < activationWarmupWindow else { return }
         scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
         scheduleOpenItemsCacheWarmup(context: "app activation", delayNanoseconds: 250_000_000)
+        schedulePreviewCacheWarmup(context: "app activation", delayNanoseconds: 250_000_000)
     }
 
     deinit {
@@ -205,8 +209,9 @@ final class SwitcherStore: ObservableObject {
         let visibleSnapshot = await snapshotVisibleOnlyOffMain()
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview"))
-        updateCachedOpenItems(orderedItems)
-        let windowIDs = orderedItems
+        let stabilizedItems = stabilizeBackgroundWarmupOrder(orderedItems, context: context)
+        updateCachedOpenItems(stabilizedItems)
+        let windowIDs = stabilizedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
             .map(\.windowID)
         let initialWindowIDs = Array(windowIDs.prefix(10))
@@ -222,7 +227,7 @@ final class SwitcherStore: ObservableObject {
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
-        let acceptedPreviews = previewCache.record(previews, liveItems: orderedItems, mostlyWhiteIDs: whiteIDs)
+        let acceptedPreviews = previewCache.record(previews, liveItems: stabilizedItems, mostlyWhiteIDs: whiteIDs)
         let ms = Date().timeIntervalSince(start) * 1000
         Logger.switcher.info(
             "Preview cache warmup (\(context, privacy: .public)): \(acceptedPreviews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
@@ -1070,9 +1075,17 @@ final class SwitcherStore: ObservableObject {
     }
 
     func schedulePreviewCacheWarmup(context: String) {
+        schedulePreviewCacheWarmup(context: context, delayNanoseconds: 0)
+    }
+
+    private func schedulePreviewCacheWarmup(context: String, delayNanoseconds: UInt64) {
         previewWarmupTask?.cancel()
         previewWarmupTask = Task { @MainActor [weak self] in
-            await self?.warmPreviewCache(context: context)
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
+            await self.warmPreviewCache(context: context)
         }
     }
 
@@ -1169,6 +1182,12 @@ final class SwitcherStore: ObservableObject {
         cachedOpenItems = orderedItems
         cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
         cachedOpenItemsNeedResnapshot = false
+    }
+
+    private func invalidateCachedPreviews(forPID pid: pid_t) {
+        let matchingItems = Array((cachedOpenItems + items).filter { $0.pid == pid })
+        guard !matchingItems.isEmpty else { return }
+        previewCache.invalidate(matchingItems)
     }
 
     private func hiddenStaleCommitNeedsFreshSnapshot(for item: WindowItem) -> Bool {

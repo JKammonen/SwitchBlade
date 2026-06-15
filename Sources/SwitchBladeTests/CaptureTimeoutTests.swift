@@ -7,6 +7,7 @@ enum CaptureTimeoutTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
+        ("ActivationRefresh/handleAppActivation_rewarmsPreviewCacheAfterInvalidation", activationRewarmsPreviewCacheAfterInvalidation),
         ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
         ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
@@ -43,6 +44,48 @@ enum CaptureTimeoutTests {
         }
 
         try expectGreaterThan(catalog.refreshIfStaleCallCount, baseline)
+    }
+
+    /// The background-preview invalidation must not strand the next switcher
+    /// open in icon-only state for that app. App activation should trigger a
+    /// preview warmup soon after the invalidation so the next cached open can
+    /// already hydrate a real preview again.
+    @MainActor static func activationRewarmsPreviewCacheAfterInvalidation() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let preview = NSImage(size: CGSize(width: 12, height: 12))
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, appName: "App A", title: "A", isFrontmostApp: true, bundleIdentifier: "com.example.a"),
+            makeItem(id: 2, pid: 200, appName: "App B", title: "B", bundleIdentifier: "com.example.b")
+        ]
+        catalog.previewsToReturn = [1: preview]
+
+        await store.warmPreviewCache(context: "seed")
+
+        catalog.visibleItems = [
+            makeItem(id: 2, pid: 200, appName: "App B", title: "B", isFrontmostApp: true, bundleIdentifier: "com.example.b"),
+            makeItem(id: 1, pid: 100, appName: "App A", title: "A", bundleIdentifier: "com.example.a")
+        ]
+        let baselineCaptureCount = catalog.captureCallCount
+        store.handleAppActivation(pid: 200)
+
+        for _ in 0 ..< 120 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            if catalog.captureCallCount > baselineCaptureCount { break }
+        }
+        await runPendingMainTasks()
+
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [2, 1])
+        try expect(store.items.first(where: { $0.id == 1 })?.preview === preview)
     }
 
     /// If the user hasn't used Cmd+Tab in `activationWarmupWindow`, app

@@ -40,6 +40,14 @@ struct LRUDictionary<Key: Hashable, Value> {
         keysInOrder.removeAll { !liveKeys.contains($0) }
     }
 
+    /// Drops every key matching `shouldRemove`. O(n).
+    mutating func removeAll(where shouldRemove: (Key) -> Bool) {
+        let removedKeys = Set(keysInOrder.filter(shouldRemove))
+        guard !removedKeys.isEmpty else { return }
+        storage = storage.filter { !removedKeys.contains($0.key) }
+        keysInOrder.removeAll { removedKeys.contains($0) }
+    }
+
     private mutating func touch(_ key: Key) {
         if storage[key] != nil {
             keysInOrder.removeAll { $0 == key }

@@ -141,6 +141,24 @@ final class PreviewCacheStore {
         return accepted
     }
 
+    /// Drops cached previews for the given concrete windows/app identities.
+    /// Used when an app moved to the background and its last live capture is no
+    /// longer trustworthy (for example a browser tab changed while the app was
+    /// frontmost). The next switcher open may show an icon briefly, but it must
+    /// not keep replaying the wrong old preview across multiple opens.
+    func invalidate(_ items: [WindowItem]) {
+        guard !items.isEmpty else { return }
+        let windowIDs = Set(items.map(\.windowID))
+        let signatures = Set(items.map(signature(for:)))
+        let recentSignatures = Set(items.map(recentSignature(for:)))
+        let appIdentities = Set(items.map(appIdentity(for:)))
+        byID.removeAll { windowIDs.contains($0) }
+        bySignature.removeAll { signatures.contains($0) }
+        byRecentlySeenSignature.removeAll { recentSignatures.contains($0) }
+        byAppIdentity.removeAll { appIdentities.contains($0) }
+        whiteDeferredIDs.subtract(windowIDs)
+    }
+
     private func keepOnlyLive(_ items: [WindowItem]) {
         let liveWindowIDs = Set(items.map(\.windowID))
         byID.keepOnly(liveWindowIDs)

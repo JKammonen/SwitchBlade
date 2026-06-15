@@ -22,7 +22,8 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/blankStorm_rejectsMostlyWhiteBatch", blankStormRejectsMostlyWhiteBatch),
         ("PreviewCache/singleWhiteNonSafariCapture_isRejected", singleWhiteNonSafariCaptureIsRejected),
         ("PreviewCache/whiteCapture_acceptedOnSecondConsecutiveSighting", whiteCaptureAcceptedOnSecondSighting),
-        ("PreviewCache/whiteCapture_deferralResetsAfterGoodCapture", whiteDeferralResetsAfterGoodCapture)
+        ("PreviewCache/whiteCapture_deferralResetsAfterGoodCapture", whiteDeferralResetsAfterGoodCapture),
+        ("PreviewCache/invalidate_dropsCachedPreviewAcrossAllKeys", invalidateDropsCachedPreviewAcrossAllKeys)
     ]
 
     @MainActor static func hydrated_noMatch() throws {
@@ -369,6 +370,33 @@ enum PreviewCacheStoreTests {
 
         try expectNil(afterGood[1])
         try expect(store.hydrated(item, liveItems: [item]).preview === good)
+    }
+
+    @MainActor static func invalidateDropsCachedPreviewAcrossAllKeys() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Safari",
+            title: "Tab A",
+            bundleIdentifier: "com.apple.Safari"
+        )
+        let img = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: img], liveItems: [original])
+
+        let recreated = makeItem(
+            id: 2,
+            pid: 100,
+            appName: "Safari",
+            title: "Tab A",
+            bundleIdentifier: "com.apple.Safari"
+        )
+        try expect(store.hydrated(recreated, liveItems: [recreated]).preview === img)
+
+        store.invalidate([original])
+
+        try expectNil(store.hydrated(original, liveItems: [original]).preview)
+        try expectNil(store.hydrated(recreated, liveItems: [recreated]).preview)
     }
 
     private static func solidImage(color: NSColor) -> NSImage {
