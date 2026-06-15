@@ -11,6 +11,22 @@ build_timestamp="${APP_BUILD_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 
 source "$repo_root/scripts/signing-config.sh"
 
+normalize_sha1() {
+    tr -d ':\n\r ' | tr 'A-F' 'a-f'
+}
+
+certificate_sha1() {
+    openssl x509 -in "$1" -noout -fingerprint -sha1 | sed 's/.*=//' | normalize_sha1
+}
+
+expected_signing_fingerprint() {
+    if [[ -f "$SWITCHBLADE_CODESIGN_FINGERPRINT_FILE" ]]; then
+        normalize_sha1 < "$SWITCHBLADE_CODESIGN_FINGERPRINT_FILE"
+        return
+    fi
+    certificate_sha1 "$SWITCHBLADE_CODESIGN_CERTIFICATE"
+}
+
 assert_keychain_search_list_sane() {
     local keychain_count
     keychain_count="$(security list-keychains -d user | wc -l | tr -d ' ')"
@@ -34,33 +50,54 @@ assert_expected_signature() {
         return 0
     fi
 
-    local requirement_output
+    local requirement_output actual_fingerprint expected_fingerprint
     requirement_output="$(codesign -dv --requirements - "$app_bundle" 2>&1)"
-    if ! grep -Fq "designated => identifier \"$bundle_id\" and certificate root = H\"" <<<"$requirement_output"; then
+    actual_fingerprint="$(
+        sed -n 's/.*designated => identifier "[^"]*" and certificate root = H"\([0-9A-Fa-f]*\)".*/\1/p' <<<"$requirement_output" \
+            | normalize_sha1
+    )"
+    expected_fingerprint="$(expected_signing_fingerprint)"
+    if [[ -z "$actual_fingerprint" ]] || ! grep -Fq "designated => identifier \"$bundle_id\"" <<<"$requirement_output"; then
         echo "ERROR: built app is not signed with the stable local designated requirement." >&2
+        echo "$requirement_output" >&2
+        exit 1
+    fi
+    if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
+        echo "ERROR: built app was signed with the wrong local certificate fingerprint." >&2
+        echo "Expected: $expected_fingerprint" >&2
+        echo "Actual:   $actual_fingerprint" >&2
         echo "$requirement_output" >&2
         exit 1
     fi
 }
 
 sign_with_local_identity() {
-    local identity_name="$1"
+    local expected_fingerprint="$1"
     local keychain_password
     keychain_password="$(<"$SWITCHBLADE_CODESIGN_PASSWORD_FILE")"
 
     (
         set +e
 
-        local temp_dir temp_keychain identity_hash
+        local temp_dir temp_keychain identity_hash expected_fingerprint_upper
         temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/switchblade-codesign.XXXXXX")"
         temp_keychain="$temp_dir/SwitchBladeCodesign.keychain"
+        expected_fingerprint_upper="$(printf '%s' "$expected_fingerprint" | tr 'a-f' 'A-F')"
         local original_keychains=()
         while IFS= read -r keychain; do
             [[ -n "$keychain" ]] && original_keychains+=("$keychain")
         done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//')
 
+        restore_original_keychains() {
+            if (( ${#original_keychains[@]} > 0 )); then
+                security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
+            else
+                security list-keychains -d user -s >/dev/null 2>&1 || true
+            fi
+        }
+
         cleanup_signing_state() {
-            security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
+            restore_original_keychains
             rm -rf "$temp_dir"
         }
 
@@ -81,8 +118,13 @@ sign_with_local_identity() {
             sign_status=$?
         fi
         if (( sign_status == 0 )); then
-            security list-keychains -d user -s "$temp_keychain" "${original_keychains[@]}" >/dev/null
-            sign_status=$?
+            if (( ${#original_keychains[@]} > 0 )); then
+                security list-keychains -d user -s "$temp_keychain" "${original_keychains[@]}" >/dev/null
+                sign_status=$?
+            else
+                security list-keychains -d user -s "$temp_keychain" >/dev/null
+                sign_status=$?
+            fi
         fi
         if (( sign_status == 0 )); then
             security import "$SWITCHBLADE_CODESIGN_ARCHIVE" \
@@ -98,7 +140,10 @@ sign_with_local_identity() {
         fi
 
         if (( sign_status == 0 )); then
-            identity_hash="$(security find-identity -v -p codesigning "$temp_keychain" | awk -v name="$identity_name" '$0 ~ name { print $2; exit }')"
+            identity_hash="$(
+                security find-identity -v -p codesigning "$temp_keychain" \
+                    | awk -v hash="$expected_fingerprint_upper" '$2 == hash { print $2; exit }'
+            )"
             [[ -n "$identity_hash" ]]
             sign_status=$?
         fi
@@ -183,9 +228,10 @@ fi
 if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" == "1" ]]; then
     codesign --force --deep --sign - "$app_bundle"
     echo "Signed ad-hoc because SWITCHBLADE_FORCE_ADHOC_SIGN=1"
-elif identity_name="$($repo_root/scripts/setup-local-codesign.sh 2>/dev/null)"; then
-    if sign_with_local_identity "$identity_name"; then
-        echo "Signed with identity: $identity_name"
+elif identity_name="$($repo_root/scripts/setup-local-codesign.sh)"; then
+    expected_fingerprint="$(expected_signing_fingerprint)"
+    if sign_with_local_identity "$expected_fingerprint"; then
+        echo "Signed with identity: $identity_name ($expected_fingerprint)"
     else
         echo "ERROR: local identity signing failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
         exit 1
