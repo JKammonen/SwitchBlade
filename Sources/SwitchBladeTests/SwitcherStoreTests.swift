@@ -19,7 +19,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
         ("Store/requestCycle_bypassesFreshCacheAfterExternalActivation", requestCycle_bypassesFreshCacheAfterExternalActivation),
         ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
-        ("Store/requestCycle_backgroundedAppPreviewIsNotReusedAfterExternalActivation", requestCycle_backgroundedAppPreviewIsNotReusedAfterExternalActivation),
+        ("Store/requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation", requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
@@ -301,7 +301,7 @@ enum SwitcherStoreTests {
         )
     }
 
-    @MainActor static func requestCycle_backgroundedAppPreviewIsNotReusedAfterExternalActivation() async throws {
+    @MainActor static func requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation() async throws {
         let settings = SwitchBladeSettings.shared
         let oldPreviewMode = settings.previewMode
         settings.previewMode = .livePreviews
@@ -337,9 +337,13 @@ enum SwitcherStoreTests {
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [2, 1])
-        try expectNil(
-            store.items.first(where: { $0.id == 1 })?.preview,
-            "backgrounded app must not keep replaying its old preview after external activation"
+        // Stale-while-revalidate: the backgrounded app keeps its cached preview so
+        // the next open shows it instantly instead of flashing an icon. With warmup
+        // disabled and no fresh capture available, the cached image must still be
+        // present (a later capture would replace it in place).
+        try expect(
+            store.items.first(where: { $0.id == 1 })?.preview === preview,
+            "backgrounded app should keep showing its cached preview, not blank to an icon"
         )
     }
 

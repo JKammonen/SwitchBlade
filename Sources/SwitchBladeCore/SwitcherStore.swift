@@ -164,9 +164,11 @@ final class SwitcherStore: ObservableObject {
         recordObservedActivationIfNeeded(pid: pid)
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
-                if let backgroundedPID = currentAppPID {
-                    invalidateCachedPreviews(forPID: backgroundedPID)
-                }
+                // Do NOT discard the backgrounded app's cached preview here.
+                // Dropping it made that app — usually the next Cmd+Tab target —
+                // flash its icon for a beat until a fresh capture landed. Keep the
+                // preview and let the next open's capture replace it in place
+                // (stale-while-revalidate); a briefly-stale thumbnail beats a blank.
                 previousAppPID = currentAppPID
                 currentAppPID = pid
                 cachedOpenItemsNeedResnapshot = true
@@ -1182,12 +1184,6 @@ final class SwitcherStore: ObservableObject {
         cachedOpenItems = orderedItems
         cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
         cachedOpenItemsNeedResnapshot = false
-    }
-
-    private func invalidateCachedPreviews(forPID pid: pid_t) {
-        let matchingItems = Array((cachedOpenItems + items).filter { $0.pid == pid })
-        guard !matchingItems.isEmpty else { return }
-        previewCache.invalidate(matchingItems)
     }
 
     private func hiddenStaleCommitNeedsFreshSnapshot(for item: WindowItem) -> Bool {
