@@ -96,6 +96,31 @@ actor SCContentCache {
         case timedOut
     }
 
+    enum SoftTimeoutResult<Value: Sendable>: Sendable {
+        case completed(Value)
+        case timedOut
+    }
+
+    static func awaitTaskWithSoftTimeout<Value: Sendable>(
+        _ task: Task<Value, Never>,
+        timeoutMs: Int
+    ) async -> SoftTimeoutResult<Value> {
+        await withCheckedContinuation { continuation in
+            let box = OneShotContinuation(continuation)
+            let observedTask = task
+
+            Task.detached(priority: .userInitiated) {
+                box.resume(returning: .completed(await observedTask.value))
+            }
+
+            Task.detached(priority: .userInitiated) {
+                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+                observedTask.cancel()
+                box.resume(returning: .timedOut)
+            }
+        }
+    }
+
     /// Captures the window or stops waiting after `timeoutMs`.
     ///
     /// Important: this is a UX timeout, not a hard resource kill. We cancel our
@@ -111,21 +136,12 @@ actor SCContentCache {
         if let permitPool {
             await permitPool.acquire()
         }
-        nonisolated(unsafe) let capturedWindow = window
-        // Release the concurrency permit when we STOP WAITING — capture success,
-        // failure, OR soft timeout, whichever comes first. The old code released
-        // only when SCKit's `captureImage` actually returned, so a stalled capture
-        // kept its slot. Because the retry's `acquire()` has no timeout, a fully
-        // stalled initial wave then blocked every retry behind the wedged first
-        // attempts and froze the whole batch despite the 300 ms "soft timeout".
-        // A capture still running after the timeout is left to finish in the
-        // background (orphaned); its slot is already freed for a fresh attempt.
-        // Acquire/release stays 1:1 per call, so the pool count never drifts.
-        let permitReleased = OneShotFlag()
-        let releasePermit: @Sendable () -> Void = {
-            guard let permitPool, permitReleased.consume() else { return }
-            Task { await permitPool.release() }
+        defer {
+            if let permitPool {
+                permitPool.release()
+            }
         }
+        nonisolated(unsafe) let capturedWindow = window
         let captureTask = Task.detached(priority: .userInitiated) { () -> CaptureAttemptResult in
             do {
                 return .success(try await SCContentCache.capture(window: capturedWindow, maxDim: maxDim))
@@ -134,49 +150,54 @@ actor SCContentCache {
             }
         }
 
-        return await withCheckedContinuation { continuation in
-            let box = OneShotContinuation(continuation)
-
-            Task {
-                let result = await captureTask.value
-                releasePermit()
-                box.resume(returning: result)
-            }
-
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
-                captureTask.cancel()
-                releasePermit()
-                box.resume(returning: .timedOut)
-            }
+        switch await awaitTaskWithSoftTimeout(captureTask, timeoutMs: timeoutMs) {
+        case .completed(let result):
+            return result
+        case .timedOut:
+            return .timedOut
         }
     }
 }
 
-actor CapturePermitPool {
-    private var availablePermits: Int
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+final class CapturePermitPool: @unchecked Sendable {
+    private struct State {
+        var availablePermits: Int
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+
+    private let state: LockedValue<State>
 
     init(limit: Int) {
-        self.availablePermits = max(1, limit)
+        self.state = LockedValue(State(availablePermits: max(1, limit)))
     }
 
     func acquire() async {
-        if availablePermits > 0 {
-            availablePermits -= 1
-            return
+        let acquiredImmediately = state.withValue { state in
+            if state.availablePermits > 0 {
+                state.availablePermits -= 1
+                return true
+            }
+            return false
         }
+        if acquiredImmediately { return }
         await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+            state.withValue { state in
+                state.waiters.append(continuation)
+            }
         }
     }
 
     func release() {
-        if let waiter = waiters.first {
-            waiters.removeFirst()
+        let waiter: CheckedContinuation<Void, Never>? = state.withValue { state in
+            if let waiter = state.waiters.first {
+                state.waiters.removeFirst()
+                return waiter
+            }
+            state.availablePermits += 1
+            return nil
+        }
+        if let waiter {
             waiter.resume()
-        } else {
-            availablePermits += 1
         }
     }
 }
@@ -198,28 +219,12 @@ private final class OneShotContinuation<Value: Sendable>: @unchecked Sendable {
     }
 }
 
-/// Single-shot latch. `consume()` returns true exactly once — the first caller
-/// wins, every later caller gets false. Used to release a capture permit on
-/// whichever of (capture finished / soft timeout fired) happens first, without
-/// double-releasing.
-private final class OneShotFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var consumed = false
-
-    func consume() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if consumed { return false }
-        consumed = true
-        return true
-    }
-}
-
 private struct WindowCaptureOutcome {
     let windowID: CGWindowID
     let image: NSImage?
     let firstAttempt: SCContentCache.CaptureAttemptResult
     let secondAttempt: SCContentCache.CaptureAttemptResult?
+    let fallbackAttempt: WindowCatalog.FallbackAttemptResult?
 }
 
 enum WindowSharingPolicy {
@@ -259,6 +264,12 @@ enum IconNaming {
 }
 
 final class WindowCatalog: WindowSnapshotProviding, Sendable {
+    enum FallbackAttemptResult: @unchecked Sendable {
+        case success(NSImage)
+        case failed
+        case timedOut
+    }
+
     private let excludedBundleIdentifiers: Set<String> = [
         "com.apple.PasswordsUIAgent",
         "com.apple.PasskeysUIService",
@@ -443,6 +454,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         guard !Task.isCancelled else { return [:] }
         let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
         let maxDim = 320
+        let captureTimeoutMs = 300
+        let fallbackTimeoutMs = 300
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
         let captureTargets = requestedIDs.compactMap { windowID -> (CGWindowID, SCWindow)? in
             guard let window = windowsByID[windowID] else { return nil }
@@ -473,6 +486,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             var firstAttemptFailures = 0
             var secondAttemptTimeouts = 0
             var secondAttemptFailures = 0
+            var fallbackTimeouts = 0
+            var fallbackFailures = 0
 
             func enqueueNextCapture() -> Bool {
                 guard !Task.isCancelled, nextIndex < captureTargets.count else { return false }
@@ -489,7 +504,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     let first = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow,
                         maxDim: maxDim,
-                        timeoutMs: 300,
+                        timeoutMs: captureTimeoutMs,
                         permitPool: permitPool
                     )
                     if case .success(let image) = first {
@@ -497,7 +512,17 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             windowID: windowID,
                             image: image,
                             firstAttempt: first,
-                            secondAttempt: nil
+                            secondAttempt: nil,
+                            fallbackAttempt: nil
+                        )
+                    }
+                    if Task.isCancelled {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: nil,
+                            fallbackAttempt: nil
                         )
                     }
                     let reason: String = switch first {
@@ -511,7 +536,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     let second = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow,
                         maxDim: maxDim,
-                        timeoutMs: 300,
+                        timeoutMs: captureTimeoutMs,
                         permitPool: permitPool
                     )
                     if case .success(let image) = second {
@@ -519,15 +544,26 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             windowID: windowID,
                             image: image,
                             firstAttempt: first,
-                            secondAttempt: second
+                            secondAttempt: second,
+                            fallbackAttempt: nil
                         )
                     }
-                    let fallback = await WindowCatalog.captureFallbackWithCGWindowList(
+                    if Task.isCancelled {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: second,
+                            fallbackAttempt: nil
+                        )
+                    }
+                    let fallback = await WindowCatalog.captureFallbackWithSoftTimeout(
                         windowID: windowID,
                         maxDim: maxDim,
+                        timeoutMs: fallbackTimeoutMs,
                         permitPool: permitPool
                     )
-                    if let image = fallback {
+                    if case .success(let image) = fallback {
                         Logger.capture.notice(
                             "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — SCKit retry also failed"
                         )
@@ -535,17 +571,25 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             windowID: windowID,
                             image: image,
                             firstAttempt: first,
-                            secondAttempt: second
+                            secondAttempt: second,
+                            fallbackAttempt: fallback
                         )
                     }
-                    Logger.capture.error(
-                        "All capture attempts failed for windowID=\(windowID, privacy: .public)"
-                    )
+                    if case .timedOut = fallback {
+                        Logger.capture.error(
+                            "CGWindowList fallback timed out for windowID=\(windowID, privacy: .public)"
+                        )
+                    } else {
+                        Logger.capture.error(
+                            "All capture attempts failed for windowID=\(windowID, privacy: .public)"
+                        )
+                    }
                     return WindowCaptureOutcome(
                         windowID: windowID,
                         image: nil,
                         firstAttempt: first,
-                        secondAttempt: second
+                        secondAttempt: second,
+                        fallbackAttempt: fallback
                     )
                 }
 
@@ -559,10 +603,6 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
             var result: [CGWindowID: NSImage] = [:]
             for await captureResult in group {
-                if Task.isCancelled {
-                    group.cancelAll()
-                    break
-                }
                 switch captureResult.firstAttempt {
                 case .success:
                     break
@@ -583,6 +623,17 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     }
                 }
 
+                if let fallbackAttempt = captureResult.fallbackAttempt {
+                    switch fallbackAttempt {
+                    case .success:
+                        break
+                    case .failed:
+                        fallbackFailures += 1
+                    case .timedOut:
+                        fallbackTimeouts += 1
+                    }
+                }
+
                 if let image = captureResult.image {
                     result[captureResult.windowID] = image
                 }
@@ -594,11 +645,17 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     for windowID in scMissingIDs {
                         let wid = windowID
                         fallbackGroup.addTask {
-                            let image = await WindowCatalog.captureFallbackWithCGWindowList(
+                            let fallback = await WindowCatalog.captureFallbackWithSoftTimeout(
                                 windowID: wid,
                                 maxDim: maxDim,
+                                timeoutMs: fallbackTimeoutMs,
                                 permitPool: permitPool
                             )
+                            let image: NSImage? = if case .success(let image) = fallback {
+                                image
+                            } else {
+                                nil
+                            }
                             return (wid, image)
                         }
                     }
@@ -624,13 +681,15 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     "requested": .int(requestedIDs.count),
                     "sc_missing": .int(scMissingIDs.count),
                     "screen_recording": .bool(true),
+                    "fallback_failures": .int(fallbackFailures),
+                    "fallback_timeouts": .int(fallbackTimeouts),
                     "second_failures": .int(secondAttemptFailures),
                     "second_timeouts": .int(secondAttemptTimeouts)
                 ]
             )
             if PerformanceLoggingState.mode == .debug {
                 Logger.capture.info(
-                    "Captured \(result.count, privacy: .public)/\(requestedIDs.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public)"
+                    "Captured \(result.count, privacy: .public)/\(requestedIDs.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public), fallbackTimeouts=\(fallbackTimeouts, privacy: .public), fallbackFailures=\(fallbackFailures, privacy: .public)"
                 )
             }
             return result
@@ -826,21 +885,29 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     // CGWindowListCreateImage is deprecated in macOS 14 but still functional.
     // Used as a last-resort fallback when both SCKit capture attempts time out
     // or fail: SCKit can be flaky on off-screen / multi-Space / recently-created
-    // windows, while the legacy API often succeeds where SCKit stalls.
-    private static func captureFallbackWithCGWindowList(
+    // windows, while the legacy API often succeeds where SCKit stalls. The
+    // fallback itself is bounded: if the legacy API wedges, we stop waiting and
+    // let the orphaned work finish in the background instead of freezing the
+    // whole preview batch.
+    private static func captureFallbackWithSoftTimeout(
         windowID: CGWindowID,
         maxDim: Int,
+        timeoutMs: Int,
         permitPool: CapturePermitPool
-    ) async -> NSImage? {
+    ) async -> FallbackAttemptResult {
         await permitPool.acquire()
-        return await Task.detached(priority: .userInitiated) { () -> NSImage? in
-            defer {
-                Task {
-                    await permitPool.release()
-                }
-            }
-            return WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
-        }.value
+        defer {
+            permitPool.release()
+        }
+        let fallbackTask = Task.detached(priority: .userInitiated) {
+            WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
+        }
+        switch await SCContentCache.awaitTaskWithSoftTimeout(fallbackTask, timeoutMs: timeoutMs) {
+        case .completed(let image):
+            return image.map(FallbackAttemptResult.success) ?? .failed
+        case .timedOut:
+            return .timedOut
+        }
     }
 
     private static func captureWithCGWindowList(windowID: CGWindowID, maxDim: Int) -> NSImage? {

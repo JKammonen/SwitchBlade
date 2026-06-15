@@ -16,13 +16,13 @@ enum CapturePermitPoolTests {
         let waiter = Task {
             await pool.acquire()
             flag.value = true
-            await pool.release()
+            pool.release()
         }
 
         try? await Task.sleep(nanoseconds: 50_000_000)
         try expect(!flag.value, "third acquire should still be blocked while both permits are held")
 
-        await pool.release()
+        pool.release()
 
         for _ in 0 ..< 20 where !flag.value {
             await Task.yield()
@@ -31,7 +31,7 @@ enum CapturePermitPoolTests {
 
         try expect(flag.value, "third acquire should resume after a permit is released")
 
-        await pool.release()
+        pool.release()
         _ = await waiter.result
     }
 }

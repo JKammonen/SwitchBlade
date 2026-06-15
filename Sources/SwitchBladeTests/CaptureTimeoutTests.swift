@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 @testable import SwitchBladeCore
 
@@ -6,6 +7,9 @@ enum CaptureTimeoutTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
+        ("CaptureTimeout/softTimeoutHelper_timesOutWithoutWaitingForBlockedTask", softTimeoutHelper_timesOutWithoutWaitingForBlockedTask),
+        ("CaptureTimeout/softTimeoutHelper_returnsCompletedValueForFastTask", softTimeoutHelper_returnsCompletedValueForFastTask),
+        ("CaptureTimeout/softTimeoutHelper_stillTimesOutAfterParentCancellation", softTimeoutHelper_stillTimesOutAfterParentCancellation),
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
         ("ActivationRefresh/handleAppActivation_rewarmsPreviewCacheAfterInvalidation", activationRewarmsPreviewCacheAfterInvalidation),
         ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
@@ -23,6 +27,79 @@ enum CaptureTimeoutTests {
         let elapsedMs = Date().timeIntervalSince(start) * 1000
         try expectGreaterThanOrEqual(elapsedMs, 45)
         try expectLessThan(elapsedMs, 250)
+    }
+
+    /// A blocked detached task must not hold the caller hostage past the UX
+    /// timeout. This is the guard that keeps stuck SCKit / CGWindowList work
+    /// from stretching a canceled preview batch into a 30 s hang.
+    static func softTimeoutHelper_timesOutWithoutWaitingForBlockedTask() async throws {
+        let start = Date()
+        let result = await SCContentCache.awaitTaskWithSoftTimeout(
+            Task.detached(priority: .userInitiated) {
+                usleep(200_000)
+                return 7
+            },
+            timeoutMs: 50
+        )
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+
+        switch result {
+        case .timedOut:
+            break
+        case .completed:
+            try expect(false, "blocked task should have timed out")
+        }
+
+        try expectGreaterThanOrEqual(elapsedMs, 45)
+        try expectLessThan(elapsedMs, 160)
+    }
+
+    static func softTimeoutHelper_returnsCompletedValueForFastTask() async throws {
+        let start = Date()
+        let result = await SCContentCache.awaitTaskWithSoftTimeout(
+            Task.detached(priority: .userInitiated) {
+                42
+            },
+            timeoutMs: 100
+        )
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+
+        switch result {
+        case .completed(let value):
+            try expectEqual(value, 42)
+        case .timedOut:
+            try expect(false, "fast task should have completed")
+        }
+
+        try expectLessThan(elapsedMs, 100)
+    }
+
+    static func softTimeoutHelper_stillTimesOutAfterParentCancellation() async throws {
+        let start = Date()
+        let parentTask = Task {
+            await SCContentCache.awaitTaskWithSoftTimeout(
+                Task.detached(priority: .userInitiated) {
+                    usleep(200_000)
+                    return 9
+                },
+                timeoutMs: 50
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        parentTask.cancel()
+        let result = await parentTask.value
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+
+        switch result {
+        case .timedOut:
+            break
+        case .completed:
+            try expect(false, "timeout watcher should outlive parent cancellation")
+        }
+
+        try expectGreaterThanOrEqual(elapsedMs, 45)
+        try expectLessThan(elapsedMs, 160)
     }
 
     /// Calls SwitcherStore.handleAppActivation directly (same entry point the

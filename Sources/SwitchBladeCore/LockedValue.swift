@@ -14,4 +14,11 @@ public final class LockedValue<T>: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _value }
         set { lock.lock(); _value = newValue; lock.unlock() }
     }
+
+    @discardableResult
+    public func withValue<R>(_ body: (inout T) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&_value)
+    }
 }
