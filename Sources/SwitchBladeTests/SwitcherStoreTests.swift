@@ -22,6 +22,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation", requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
+        ("Store/requestCycle_slowSnapshotDoesNotPaySecondPanelDelay", requestCycle_slowSnapshotDoesNotPaySecondPanelDelay),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
@@ -445,6 +446,26 @@ enum SwitcherStoreTests {
         await runPendingMainTasks()
 
         try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 2])
+    }
+
+    @MainActor static func requestCycle_slowSnapshotDoesNotPaySecondPanelDelay() async throws {
+        let (store, catalog, _, _) = makeStore(initialPanelShowDelayNanoseconds: 120_000_000)
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        catalog.visibleSnapshotDelayNanoseconds = 180_000_000
+
+        store.requestCycle(forward: true)
+
+        try? await Task.sleep(nanoseconds: 220_000_000)
+        await runPendingMainTasks()
+
+        try expect(
+            store.isVisible,
+            "panel should appear as soon as the slow snapshot is ready instead of paying the full panel delay again"
+        )
         try expectEqual(store.items.map(\.id), [1, 2])
     }
 

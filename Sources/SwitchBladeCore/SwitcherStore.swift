@@ -1056,16 +1056,30 @@ final class SwitcherStore: ObservableObject {
     private func schedulePreparedPanelShow() {
         panelShowTask?.cancel()
         let delayNanoseconds = initialPanelShowDelayNanoseconds
+        let remainingDelayNanoseconds: UInt64
+        if let activeOpenRequestedAt {
+            let elapsedNanoseconds = UInt64(max(0, Date().timeIntervalSince(activeOpenRequestedAt) * 1_000_000_000))
+            remainingDelayNanoseconds = elapsedNanoseconds >= delayNanoseconds
+                ? 0
+                : delayNanoseconds - elapsedNanoseconds
+        } else {
+            remainingDelayNanoseconds = delayNanoseconds
+        }
 
-        guard delayNanoseconds > 0 else {
+        guard remainingDelayNanoseconds > 0 else {
             showPreparedPanelIfNeeded()
             return
         }
 
-        panelShowTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard let self, !Task.isCancelled else { return }
-            self.showPreparedPanelIfNeeded()
+        // The quick-release grace window is anchored to the original hotkey
+        // press, not to "snapshot finished". After a long idle pause, a
+        // backgrounded agent's MainActor timer can wake hundreds of ms late;
+        // sleeping off-main and only hopping back to MainActor for the show
+        // avoids turning a 70 ms grace window into a 400+ ms pre-show stall.
+        panelShowTask = Task.detached(priority: .userInitiated) { [weak self] in
+            try? await Task.sleep(nanoseconds: remainingDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await self?.showPreparedPanelIfNeeded()
         }
     }
 
