@@ -27,6 +27,22 @@ assert_keychain_search_list_sane() {
     fi
 }
 
+assert_expected_signature() {
+    codesign --verify --deep --strict "$app_bundle" >/dev/null
+
+    if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    local requirement_output
+    requirement_output="$(codesign -dv --requirements - "$app_bundle" 2>&1)"
+    if ! grep -Fq "designated => identifier \"$bundle_id\" and certificate root = H\"" <<<"$requirement_output"; then
+        echo "ERROR: built app is not signed with the stable local designated requirement." >&2
+        echo "$requirement_output" >&2
+        exit 1
+    fi
+}
+
 sign_with_local_identity() {
     local identity_name="$1"
     local keychain_password
@@ -159,23 +175,27 @@ cat > "$plist_path" <<EOF
 </plist>
 EOF
 
-if command -v codesign >/dev/null 2>&1; then
-    if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" == "1" ]]; then
-        codesign --force --deep --sign - "$app_bundle"
-        echo "Signed ad-hoc because SWITCHBLADE_FORCE_ADHOC_SIGN=1"
-    elif identity_name="$($repo_root/scripts/setup-local-codesign.sh 2>/dev/null)"; then
-        if sign_with_local_identity "$identity_name"; then
-            echo "Signed with identity: $identity_name"
-        else
-            codesign --force --deep --sign - "$app_bundle"
-            echo "Warning: local identity not found, used ad-hoc signing (TCC permissions will reset on rebuild)"
-        fi
-    else
-        codesign --force --deep --sign - "$app_bundle"
-        echo "Warning: local codesign setup failed, used ad-hoc signing (TCC permissions will reset on rebuild)"
-    fi
+if ! command -v codesign >/dev/null 2>&1; then
+    echo "ERROR: codesign is unavailable; refusing to build an unsigned app bundle." >&2
+    exit 1
 fi
 
+if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" == "1" ]]; then
+    codesign --force --deep --sign - "$app_bundle"
+    echo "Signed ad-hoc because SWITCHBLADE_FORCE_ADHOC_SIGN=1"
+elif identity_name="$($repo_root/scripts/setup-local-codesign.sh 2>/dev/null)"; then
+    if sign_with_local_identity "$identity_name"; then
+        echo "Signed with identity: $identity_name"
+    else
+        echo "ERROR: local identity signing failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
+        exit 1
+    fi
+else
+    echo "ERROR: local codesign setup failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
+    exit 1
+fi
+
+assert_expected_signature
 assert_keychain_search_list_sane
 
 echo "Built $app_bundle"
