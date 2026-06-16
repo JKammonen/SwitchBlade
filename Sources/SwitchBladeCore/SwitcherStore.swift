@@ -466,7 +466,7 @@ final class SwitcherStore: ObservableObject {
                 Logger.switcher.info(
                     "Commit selection from prepared hidden open item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
                 )
-                performSelectionAction(for: item, actionName: "activate") { activator, selectedItem in
+                performSelectionAction(for: item, actionName: "activate", updateCachedSelectionState: true) { activator, selectedItem in
                     activator.activate(selectedItem)
                 }
                 return
@@ -485,7 +485,7 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.info(
             "Commit selection item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) isVisible=\(self.isVisible, privacy: .public) isSwitching=\(self.isSwitching, privacy: .public)"
         )
-        performSelectionAction(for: item, actionName: "activate") { activator, selectedItem in
+        performSelectionAction(for: item, actionName: "activate", updateCachedSelectionState: true) { activator, selectedItem in
             activator.activate(selectedItem)
         }
     }
@@ -699,6 +699,7 @@ final class SwitcherStore: ObservableObject {
         liveItems: [WindowItem]? = nil,
         actionName: String,
         source: String? = nil,
+        updateCachedSelectionState: Bool = false,
         action: @escaping (WindowActivating, WindowItem) -> Void
     ) {
         let liveItems = liveItems ?? items
@@ -711,6 +712,9 @@ final class SwitcherStore: ObservableObject {
             in: liveItems,
             context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
         )
+        if updateCachedSelectionState {
+            syncCachedOpenStateAfterSelection(item, liveItems: liveItems)
+        }
         let scheduledAt = Date()
         hide()
         let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
@@ -734,6 +738,16 @@ final class SwitcherStore: ObservableObject {
             windowID: item.id
         )
         action(activator, item)
+    }
+
+    private func syncCachedOpenStateAfterSelection(_ item: WindowItem, liveItems: [WindowItem]) {
+        guard !liveItems.isEmpty else { return }
+
+        let reorderedItems = [item] + liveItems.filter { $0.id != item.id }
+        let frontmostAdjustedItems = reorderedItems.map { candidate in
+            candidate.withFrontmostState(candidate.pid == item.pid)
+        }
+        updateCachedOpenItems(orderItems(frontmostAdjustedItems))
     }
 
     private func hydratedForDisplay(_ sourceItems: [WindowItem]) -> [WindowItem] {

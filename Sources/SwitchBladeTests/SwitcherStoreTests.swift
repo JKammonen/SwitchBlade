@@ -21,6 +21,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
         ("Store/requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation", requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
+        ("Store/requestCycle_immediateReopenAfterCommitUsesUpdatedCachedOrder", requestCycle_immediateReopenAfterCommitUsesUpdatedCachedOrder),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_slowSnapshotDoesNotPaySecondPanelDelay", requestCycle_slowSnapshotDoesNotPaySecondPanelDelay),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
@@ -405,6 +406,35 @@ enum SwitcherStoreTests {
 
         try expect(store.isVisible)
         try expectEqual(store.selectedID, 3)
+    }
+
+    @MainActor static func requestCycle_immediateReopenAfterCommitUsesUpdatedCachedOrder() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300)
+        ]
+
+        await openSwitcher(store)
+        store.selectedID = 3
+
+        store.commitSelection()
+
+        try expectEqual(activator.activatedItems.map(\.id), [3])
+        try expect(!store.isVisible)
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(
+            store.items.map(\.id),
+            [3, 1, 2],
+            "a rapid reopen should not replay the pre-commit cached order and leave the newly selected app at the tail"
+        )
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
     }
 
     @MainActor static func requestCycle_reusesInFlightWarmupSnapshot() async throws {
