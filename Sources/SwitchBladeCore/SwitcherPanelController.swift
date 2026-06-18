@@ -57,6 +57,28 @@ final class SwitcherPanelController {
     private let clickMonitor: ClickOutsideMonitor
     private var keyWindowVerificationTask: Task<Void, Never>?
 
+#if DEBUG
+    /// Test-only view into the constructed panel so the AppKit wiring (masked
+    /// hosting content view, transparency, window level) can be asserted without
+    /// exposing internals. Excluded from the shipped app — `build-app.sh` builds
+    /// `-c release`, where DEBUG is undefined.
+    struct ConstructionProbe {
+        let contentViewIsHostingView: Bool
+        let hasCardMask: Bool
+        let panelLevel: NSWindow.Level
+        let panelIsOpaque: Bool
+    }
+
+    var constructionProbe: ConstructionProbe {
+        ConstructionProbe(
+            contentViewIsHostingView: panel.contentView === hostingView,
+            hasCardMask: hostingView.layer?.mask === cardMaskLayer,
+            panelLevel: panel.level,
+            panelIsOpaque: panel.isOpaque
+        )
+    }
+#endif
+
     init(store: SwitcherStore) {
         panel = SwitcherPanel(
             contentRect: NSRect(origin: .zero, size: CGSize(width: 1200, height: 800)),
