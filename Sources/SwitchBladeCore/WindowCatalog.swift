@@ -181,8 +181,16 @@ final class CapturePermitPool: @unchecked Sendable {
         }
         if acquiredImmediately { return }
         await withCheckedContinuation { continuation in
-            state.withValue { state in
+            let shouldResumeImmediately = state.withValue { state in
+                if state.availablePermits > 0 {
+                    state.availablePermits -= 1
+                    return true
+                }
                 state.waiters.append(continuation)
+                return false
+            }
+            if shouldResumeImmediately {
+                continuation.resume()
             }
         }
     }

@@ -45,8 +45,11 @@ final class HotkeyMonitor {
     /// is mach_absolute_time at event creation — comparing it to now reveals how
     /// long the event sat in the system event queue before the tap callback
     /// dispatched it.
-    private static func machDeltaMilliseconds(from then: UInt64, to now: UInt64) -> Double {
-        let delta = now &- then
+    static func machDeltaMilliseconds(from then: UInt64, to now: UInt64) -> Double {
+        guard now >= then else {
+            return 0
+        }
+        let delta = now - then
         let nanos = Double(delta) * Double(machTimebase.numer) / Double(machTimebase.denom)
         return nanos / 1_000_000
     }

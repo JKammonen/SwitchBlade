@@ -12,7 +12,8 @@ enum HotkeyMonitorTests {
         ("HotkeyMonitor/tapRecovery_reenablesValidDisabledTap", tapRecoveryReenablesValidDisabledTap),
         ("HotkeyMonitor/tapRecovery_leavesValidEnabledTapAlone", tapRecoveryLeavesValidEnabledTapAlone),
         ("HotkeyMonitor/modifierMouseSwitch_requiresSettingEnabled", modifierMouseSwitchRequiresSettingEnabled),
-        ("HotkeyMonitor/modifierMouseSwitch_requiresDoubleTapModifier", modifierMouseSwitchRequiresDoubleTapModifier)
+        ("HotkeyMonitor/modifierMouseSwitch_requiresDoubleTapModifier", modifierMouseSwitchRequiresDoubleTapModifier),
+        ("HotkeyMonitor/machDelta_clampsFutureTimestamp", machDeltaClampsFutureTimestamp)
     ]
 
     @MainActor static func commandReleaseFiresOnTransition() throws {
@@ -111,5 +112,16 @@ enum HotkeyMonitorTests {
             flags: [.maskCommand],
             doubleTapModifier: .maskAlternate
         ))
+    }
+
+    @MainActor static func machDeltaClampsFutureTimestamp() throws {
+        try expectEqual(
+            HotkeyMonitor.machDeltaMilliseconds(from: 2_000, to: 1_000),
+            0
+        )
+        try expectGreaterThan(
+            HotkeyMonitor.machDeltaMilliseconds(from: 1_000, to: 2_000),
+            0
+        )
     }
 }
