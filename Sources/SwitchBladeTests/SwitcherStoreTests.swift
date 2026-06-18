@@ -29,6 +29,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
         ("Store/cachedDelayPath_mergesMinimizedAfterPanelShow", cachedDelayPath_mergesMinimized),
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
+        ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -460,6 +461,47 @@ enum SwitcherStoreTests {
             syntheticTeamsID,
             "automatic default selection should follow the new MRU order after minimized merge"
         )
+    }
+
+    @MainActor static func minimizedMerge_redactedTitleShowsAppOnly() async throws {
+        let (store, catalog, _, _) = makeStore()
+        let frontmost = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Safari",
+            title: "Docs",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.apple.Safari"
+        )
+        let syntheticMailID = SyntheticWindowID.make(pid: 200, index: 0, title: "Private Subject")
+        let minimizedMail = makeItem(
+            id: syntheticMailID,
+            pid: 200,
+            appName: "Mail",
+            title: "Private Subject",
+            isMinimized: true,
+            canCapturePreview: false,
+            isTitleRedacted: true,
+            bundleIdentifier: "com.apple.mail"
+        )
+        catalog.visibleItems = [frontmost]
+        catalog.minimizedItems = [minimizedMail]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == syntheticMailID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        guard let merged = store.items.first(where: { $0.id == syntheticMailID }) else {
+            try expect(false, "redacted minimized window must merge into switcher")
+            return
+        }
+        try expectEqual(merged.title, "Private Subject")
+        try expectEqual(merged.displayTitle, "Mail")
+        try expectEqual(merged.subtitle, "App")
+        try expect(!merged.canCapturePreview)
+        try expectNil(merged.preview)
     }
 
     @MainActor static func requestCycle_cachedSecondTabMovesSelectionBeforePanelShows() async throws {

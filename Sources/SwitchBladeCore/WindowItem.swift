@@ -9,6 +9,7 @@ struct WindowItem: Identifiable, Equatable {
     let isFrontmostApp: Bool
     let isMinimized: Bool
     let canCapturePreview: Bool
+    let isTitleRedacted: Bool
     let preview: NSImage?
     let icon: NSImage?
     /// Bundle identifier of the owning application, when available. Used to
@@ -19,11 +20,11 @@ struct WindowItem: Identifiable, Equatable {
     var id: CGWindowID { windowID }
 
     var displayTitle: String {
-        title.isEmpty ? appName : title
+        isTitleRedacted || title.isEmpty ? appName : title
     }
 
     var subtitle: String {
-        title.isEmpty ? "App" : appName
+        isTitleRedacted || title.isEmpty ? "App" : appName
     }
 
     func withPreview(_ preview: NSImage?) -> Self {
@@ -36,6 +37,7 @@ struct WindowItem: Identifiable, Equatable {
             isFrontmostApp: isFrontmostApp,
             isMinimized: isMinimized,
             canCapturePreview: canCapturePreview,
+            isTitleRedacted: isTitleRedacted,
             preview: preview,
             icon: icon,
             bundleIdentifier: bundleIdentifier
@@ -52,6 +54,7 @@ struct WindowItem: Identifiable, Equatable {
             isFrontmostApp: isFrontmostApp,
             isMinimized: isMinimized,
             canCapturePreview: canCapturePreview,
+            isTitleRedacted: isTitleRedacted,
             preview: preview,
             icon: icon,
             bundleIdentifier: bundleIdentifier

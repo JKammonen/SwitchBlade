@@ -6,7 +6,12 @@ enum WindowSharingPolicyTests {
         ("WindowSharingPolicy/listsShareableWindows", listsShareableWindows),
         ("WindowSharingPolicy/rejectsPrivateNonTeamsWindows", rejectsPrivateNonTeamsWindows),
         ("WindowSharingPolicy/rejectsTeamsSharingIndicator", rejectsTeamsSharingIndicator),
-        ("WindowSharingPolicy/allowsPrivateMicrosoftTeamsWindows", allowsPrivateMicrosoftTeamsWindows)
+        ("WindowSharingPolicy/allowsPrivateMicrosoftTeamsWindows", allowsPrivateMicrosoftTeamsWindows),
+        ("WindowSharingPolicy/minimizedWithoutSharingMatchRedactsTitle", minimizedWithoutSharingMatchRedactsTitle),
+        ("WindowSharingPolicy/minimizedShareableMatchShowsTitle", minimizedShareableMatchShowsTitle),
+        ("WindowSharingPolicy/minimizedPrivateNonTeamsMatchIsExcluded", minimizedPrivateNonTeamsMatchIsExcluded),
+        ("WindowSharingPolicy/minimizedPrivateTeamsMatchShowsTitle", minimizedPrivateTeamsMatchShowsTitle),
+        ("WindowSharingPolicy/minimizedTeamsSharingIndicatorIsExcluded", minimizedTeamsSharingIndicatorIsExcluded)
     ]
 
     @MainActor static func listsShareableWindows() async throws {
@@ -61,5 +66,65 @@ enum WindowSharingPolicyTests {
             title: "",
             sharingState: 0
         ))
+    }
+
+    @MainActor static func minimizedWithoutSharingMatchRedactsTitle() async throws {
+        try expectEqual(
+            WindowSharingPolicy.minimizedTitleDecision(
+                appName: "Mail",
+                bundleIdentifier: "com.apple.mail",
+                title: "Private Subject",
+                matchingSharingStates: nil
+            ),
+            .redactTitle
+        )
+    }
+
+    @MainActor static func minimizedShareableMatchShowsTitle() async throws {
+        try expectEqual(
+            WindowSharingPolicy.minimizedTitleDecision(
+                appName: "Mail",
+                bundleIdentifier: "com.apple.mail",
+                title: "Inbox",
+                matchingSharingStates: [1]
+            ),
+            .showTitle
+        )
+    }
+
+    @MainActor static func minimizedPrivateNonTeamsMatchIsExcluded() async throws {
+        try expectEqual(
+            WindowSharingPolicy.minimizedTitleDecision(
+                appName: "ChatGPT",
+                bundleIdentifier: "com.openai.chat",
+                title: "Sensitive",
+                matchingSharingStates: [0]
+            ),
+            .exclude
+        )
+    }
+
+    @MainActor static func minimizedPrivateTeamsMatchShowsTitle() async throws {
+        try expectEqual(
+            WindowSharingPolicy.minimizedTitleDecision(
+                appName: "Microsoft Teams",
+                bundleIdentifier: "com.microsoft.teams2",
+                title: "Daily",
+                matchingSharingStates: [0]
+            ),
+            .showTitle
+        )
+    }
+
+    @MainActor static func minimizedTeamsSharingIndicatorIsExcluded() async throws {
+        try expectEqual(
+            WindowSharingPolicy.minimizedTitleDecision(
+                appName: "Microsoft Teams",
+                bundleIdentifier: "com.microsoft.teams2",
+                title: "Sharing Indicator",
+                matchingSharingStates: [0]
+            ),
+            .exclude
+        )
     }
 }

@@ -9,6 +9,7 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
         ("PreviewCache/hydrated_fallsBackTo_signature_whenBoundsChange", signatureFallback),
         ("PreviewCache/minimizedExactSignatureSurvivesVisiblePrune", minimizedExactSignatureSurvivesVisiblePrune),
+        ("PreviewCache/redactedMinimizedDoesNotHydrateRetainedPreview", redactedMinimizedDoesNotHydrateRetainedPreview),
         ("PreviewCache/nonMinimizedDoesNotUseRetainedPrunedPreview", nonMinimizedDoesNotUseRetainedPrunedPreview),
         ("PreviewCache/minimizedDuplicateExactSignatureDoesNotGuess", minimizedDuplicateExactSignatureDoesNotGuess),
         ("PreviewCache/minimizedRetainedPreviewExpires", minimizedRetainedPreviewExpires),
@@ -100,6 +101,35 @@ enum PreviewCacheStoreTests {
         )
         let result = store.hydrated(minimized, liveItems: [other, minimized])
         try expect(result.preview === img)
+    }
+
+    @MainActor static func redactedMinimizedDoesNotHydrateRetainedPreview() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Mail",
+            title: "Private Subject",
+            bundleIdentifier: "com.apple.mail"
+        )
+        let img = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: img], liveItems: [original])
+
+        let minimized = makeItem(
+            id: 99,
+            pid: 100,
+            appName: "Mail",
+            title: "Private Subject",
+            isMinimized: true,
+            canCapturePreview: false,
+            isTitleRedacted: true,
+            bundleIdentifier: "com.apple.mail"
+        )
+
+        let result = store.hydrated(minimized, liveItems: [minimized])
+        try expectNil(result.preview)
+        try expectEqual(result.displayTitle, "Mail")
+        try expectEqual(result.title, "Private Subject")
     }
 
     @MainActor static func nonMinimizedDoesNotUseRetainedPrunedPreview() throws {

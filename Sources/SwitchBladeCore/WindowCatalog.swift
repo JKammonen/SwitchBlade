@@ -236,6 +236,12 @@ private struct WindowCaptureOutcome {
 }
 
 enum WindowSharingPolicy {
+    enum MinimizedTitleDecision: Equatable {
+        case showTitle
+        case redactTitle
+        case exclude
+    }
+
     static func canListWindow(appName: String, bundleIdentifier: String?, title: String, sharingState: Int) -> Bool {
         if isMicrosoftTeams(appName: appName, bundleIdentifier: bundleIdentifier),
            title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -247,11 +253,79 @@ enum WindowSharingPolicy {
         return isMicrosoftTeams(appName: appName, bundleIdentifier: bundleIdentifier)
     }
 
+    static func minimizedTitleDecision(
+        appName: String,
+        bundleIdentifier: String?,
+        title: String,
+        matchingSharingStates: [Int]?
+    ) -> MinimizedTitleDecision {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return .exclude }
+        guard let matchingSharingStates,
+              !matchingSharingStates.isEmpty else {
+            return .redactTitle
+        }
+        return matchingSharingStates.contains {
+            canListWindow(
+                appName: appName,
+                bundleIdentifier: bundleIdentifier,
+                title: trimmedTitle,
+                sharingState: $0
+            )
+        } ? .showTitle : .exclude
+    }
+
     private static func isMicrosoftTeams(appName: String, bundleIdentifier: String?) -> Bool {
         let normalizedName = appName.lowercased()
         let normalizedBundle = (bundleIdentifier ?? "").lowercased()
         return normalizedName.contains("teams")
             && normalizedBundle.hasPrefix("com.microsoft.teams")
+    }
+}
+
+private struct WindowSharingStateIndex {
+    private struct Key: Hashable {
+        let pid: pid_t
+        let title: String
+    }
+
+    private let statesByKey: [Key: [Int]]
+
+    private init(statesByKey: [Key: [Int]]) {
+        self.statesByKey = statesByKey
+    }
+
+    static func fromCurrentWindowList() -> Self {
+        guard let rawList = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return WindowSharingStateIndex(statesByKey: [:])
+        }
+        return WindowSharingStateIndex(rawList: rawList)
+    }
+
+    init(rawList: [[String: Any]]) {
+        var statesByKey: [Key: [Int]] = [:]
+        for entry in rawList {
+            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+                  let layer = entry[kCGWindowLayer as String] as? Int,
+                  layer == 0 else {
+                continue
+            }
+            let title = (entry[kCGWindowName as String] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { continue }
+            let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
+            statesByKey[Key(pid: ownerPID, title: title), default: []].append(sharingState)
+        }
+        self.statesByKey = statesByKey
+    }
+
+    func sharingStates(pid: pid_t, title: String) -> [Int]? {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return nil }
+        return statesByKey[Key(pid: pid, title: trimmedTitle)]
     }
 }
 
@@ -327,7 +401,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// is already on screen. Safe to call AX read APIs off the main thread.
     func snapshotMinimized() async -> [WindowItem] {
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        return minimizedItems(excluding: Set(), frontmostPID: frontmostPID)
+        return minimizedItems(
+            excluding: Set(),
+            frontmostPID: frontmostPID,
+            sharingStateIndex: WindowSharingStateIndex.fromCurrentWindowList()
+        )
     }
 
     func snapshot() -> [WindowItem] {
@@ -419,6 +497,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 isFrontmostApp: ownerPID == frontmostPID,
                 isMinimized: false,
                 canCapturePreview: sharingState != 0,
+                isTitleRedacted: false,
                 preview: nil,
                 icon: IconNaming.named(application?.icon, bundleIdentifier: application?.bundleIdentifier, appName: appName),
                 bundleIdentifier: application?.bundleIdentifier
@@ -426,7 +505,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
 
         let minimized = includeMinimized
-            ? minimizedItems(excluding: visibleWindowIDs, frontmostPID: frontmostPID)
+            ? minimizedItems(
+                excluding: visibleWindowIDs,
+                frontmostPID: frontmostPID,
+                sharingStateIndex: WindowSharingStateIndex(rawList: rawList)
+            )
             : []
         return SnapshotResult(visible: visibleItems, minimized: minimized)
     }
@@ -753,7 +836,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return true
     }
 
-    private func minimizedItems(excluding visibleWindowIDs: Set<CGWindowID>, frontmostPID: pid_t?) -> [WindowItem] {
+    private func minimizedItems(
+        excluding visibleWindowIDs: Set<CGWindowID>,
+        frontmostPID: pid_t?,
+        sharingStateIndex: WindowSharingStateIndex
+    ) -> [WindowItem] {
         // Soft bound on AX IPC. Per Apple's AXUIElement header, a timeout set
         // on a specific element only governs calls to *that* element — it does
         // not propagate to children — so we set it on the app element (for
@@ -784,7 +871,16 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 guard axBool(kAXMinimizedAttribute, on: window) == true else { continue }
 
                 let title = axString(kAXTitleAttribute, on: window) ?? ""
-                if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let titleDecision = WindowSharingPolicy.minimizedTitleDecision(
+                    appName: appName,
+                    bundleIdentifier: application.bundleIdentifier,
+                    title: title,
+                    matchingSharingStates: sharingStateIndex.sharingStates(
+                        pid: application.processIdentifier,
+                        title: title
+                    )
+                )
+                if titleDecision == .exclude {
                     continue
                 }
 
@@ -802,6 +898,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     isFrontmostApp: application.processIdentifier == frontmostPID,
                     isMinimized: true,
                     canCapturePreview: false,
+                    isTitleRedacted: titleDecision == .redactTitle,
                     preview: nil,
                     icon: IconNaming.named(application.icon, bundleIdentifier: application.bundleIdentifier, appName: appName),
                     bundleIdentifier: application.bundleIdentifier

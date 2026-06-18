@@ -6,8 +6,10 @@ enum WindowItemTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("WindowItem/displayTitle_usesTitleWhenAvailable", displayTitle_usesTitle),
         ("WindowItem/displayTitle_fallsBackToAppName_whenEmpty", displayTitle_fallsBack),
+        ("WindowItem/displayTitle_redactsTitleWhenMarkedPrivate", displayTitle_redactsTitle),
         ("WindowItem/subtitle_isAppName_whenTitlePresent", subtitle_appName),
         ("WindowItem/subtitle_isFallback_whenTitleEmpty", subtitle_fallback),
+        ("WindowItem/subtitle_isFallback_whenTitleRedacted", subtitle_redactedTitle),
         ("WindowItem/id_isWindowID", id_isWindowID),
         ("WindowItem/withPreview_setsPreview_keepsOtherFields", withPreview_setsPreview),
         ("WindowItem/withPreview_canClearPreview", withPreview_canClear),
@@ -25,6 +27,12 @@ enum WindowItemTests {
         try expectEqual(item.displayTitle, "Calculator")
     }
 
+    @MainActor static func displayTitle_redactsTitle() throws {
+        let item = makeItem(id: 1, appName: "Mail", title: "Private Subject", isTitleRedacted: true)
+        try expectEqual(item.displayTitle, "Mail")
+        try expectEqual(item.title, "Private Subject")
+    }
+
     @MainActor static func subtitle_appName() throws {
         let item = makeItem(id: 1, appName: "Safari", title: "Apple News")
         try expectEqual(item.subtitle, "Safari")
@@ -32,6 +40,11 @@ enum WindowItemTests {
 
     @MainActor static func subtitle_fallback() throws {
         let item = makeItem(id: 1, appName: "Calculator", title: "")
+        try expectEqual(item.subtitle, "App")
+    }
+
+    @MainActor static func subtitle_redactedTitle() throws {
+        let item = makeItem(id: 1, appName: "Mail", title: "Private Subject", isTitleRedacted: true)
         try expectEqual(item.subtitle, "App")
     }
 
@@ -71,6 +84,7 @@ enum WindowItemTests {
         try expectEqual(updated.bounds, item.bounds)
         try expectEqual(updated.isMinimized, item.isMinimized)
         try expectEqual(updated.canCapturePreview, item.canCapturePreview)
+        try expectEqual(updated.isTitleRedacted, item.isTitleRedacted)
         try expectEqual(updated.bundleIdentifier, item.bundleIdentifier)
     }
 

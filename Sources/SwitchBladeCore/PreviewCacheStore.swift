@@ -59,6 +59,9 @@ final class PreviewCacheStore {
     /// for ~100 ms. Window IDs are stable for the lifetime of the window in
     /// macOS, so there's no risk of showing the wrong window's image.
     func hydrated(_ item: WindowItem, liveItems: [WindowItem]) -> WindowItem {
+        guard !item.isTitleRedacted else {
+            return item.withPreview(nil)
+        }
         if let cached = byID[item.windowID] {
             return item.withPreview(cached.image)
         }
