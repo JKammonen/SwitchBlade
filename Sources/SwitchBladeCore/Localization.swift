@@ -209,6 +209,11 @@ public enum L10n {
 
         // Behavior
         case fieldLaunchAtLogin
+        case launchAtLoginStatusEnabled
+        case launchAtLoginStatusDisabled
+        case launchAtLoginStatusRequiresApproval
+        case launchAtLoginStatusUnavailable
+        case launchAtLoginStatusUpdateFailed
         case fieldShowMenuBarIcon
         case fieldWindowScope
         case fieldPreviewMode

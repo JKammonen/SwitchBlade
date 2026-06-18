@@ -104,7 +104,9 @@ enum SBTriggerKey: String, CaseIterable, Identifiable {
 final class SwitchBladeSettings: ObservableObject {
     static let shared = SwitchBladeSettings()
 
-    private let ud = UserDefaults.standard
+    private let ud: UserDefaults
+    private let launchAtLoginController: LaunchAtLoginController
+    private var isSyncingLaunchAtLogin = false
 
     // Switcher panel background color RGB
     @Published var bgRed: Double   { didSet { ud.set(bgRed,   forKey: "sb_bgR") } }
@@ -170,10 +172,15 @@ final class SwitchBladeSettings: ObservableObject {
 
     @Published var launchAtLogin: Bool {
         didSet {
-            ud.set(launchAtLogin, forKey: "sb_launchAtLogin")
-            LaunchAtLoginController.setEnabled(launchAtLogin)
+            guard launchAtLogin != oldValue else { return }
+            if isSyncingLaunchAtLogin {
+                ud.set(launchAtLogin, forKey: "sb_launchAtLogin")
+                return
+            }
+            applyLaunchAtLoginChange(requestedEnabled: launchAtLogin)
         }
     }
+    @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus
 
     @Published var showMenuBarIcon: Bool {
         didSet { ud.set(showMenuBarIcon, forKey: "sb_showMenuBarIcon") }
@@ -242,7 +249,13 @@ final class SwitchBladeSettings: ObservableObject {
         set { windowScope = newValue ? .currentSpace : .allSpaces }
     }
 
-    private init() {
+    init(
+        userDefaults: UserDefaults = .standard,
+        launchAtLoginController: LaunchAtLoginController = .system
+    ) {
+        self.ud = userDefaults
+        self.launchAtLoginController = launchAtLoginController
+
         bgRed   = ud.object(forKey: "sb_bgR") as? Double ?? 0.0
         bgGreen = ud.object(forKey: "sb_bgG") as? Double ?? 0.0
         bgBlue  = ud.object(forKey: "sb_bgB") as? Double ?? 0.0
@@ -261,8 +274,10 @@ final class SwitchBladeSettings: ObservableObject {
         triggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
         doubleModifierSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? true
         doubleModifier = SBModifier(rawValue: ud.string(forKey: "sb_doubleModifier") ?? "") ?? .command
-        launchAtLogin = ud.object(forKey: "sb_launchAtLogin") as? Bool
-            ?? (LaunchAtLoginController.currentStatusIsEnabled())
+        let currentLaunchStatus = launchAtLoginController.currentStatus()
+        launchAtLoginStatus = currentLaunchStatus
+        launchAtLogin = currentLaunchStatus.isEnabled
+        ud.set(currentLaunchStatus.isEnabled, forKey: "sb_launchAtLogin")
         showMenuBarIcon = ud.object(forKey: "sb_showMenuBarIcon") as? Bool ?? true
         if let rawScope = ud.string(forKey: "sb_windowScope"),
            let storedScope = SBWindowScope(rawValue: rawScope) {
@@ -331,6 +346,29 @@ final class SwitchBladeSettings: ObservableObject {
         reducedMotion = false
     }
 
+    private func applyLaunchAtLoginChange(requestedEnabled: Bool) {
+        switch launchAtLoginController.setEnabled(requestedEnabled) {
+        case .success(let status):
+            launchAtLoginStatus = status
+            syncLaunchAtLoginValue(status.isEnabled)
+        case .failure(let failure):
+            Logger.app.error("Launch at login update failed: \(failure.message, privacy: .public)")
+            launchAtLoginStatus = .updateFailed
+            let actualStatus = launchAtLoginController.currentStatus()
+            syncLaunchAtLoginValue(actualStatus.isEnabled)
+        }
+    }
+
+    private func syncLaunchAtLoginValue(_ enabled: Bool) {
+        if launchAtLogin == enabled {
+            ud.set(enabled, forKey: "sb_launchAtLogin")
+            return
+        }
+        isSyncingLaunchAtLogin = true
+        launchAtLogin = enabled
+        isSyncingLaunchAtLogin = false
+    }
+
     /// Parses the comma/semicolon/newline-separated hidden-apps field.
     /// Bare tokens become `.contains`; a leading `=` makes the rule exact.
     /// `=` with no body, or empty entries, are silently dropped.
@@ -356,27 +394,85 @@ final class SwitchBladeSettings: ObservableObject {
     }
 }
 
-enum LaunchAtLoginController {
-    static func currentStatusIsEnabled() -> Bool {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        }
-        return false
+enum LaunchAtLoginStatus: Equatable {
+    case enabled
+    case disabled
+    case requiresApproval
+    case unavailable
+    case updateFailed
+
+    var isEnabled: Bool {
+        self == .enabled
     }
 
-    static func setEnabled(_ enabled: Bool) {
-        guard #available(macOS 13.0, *) else { return }
+    var allowsUserToggle: Bool {
+        self != .unavailable
+    }
 
-        do {
-            if enabled {
-                if SMAppService.mainApp.status != .enabled {
-                    try SMAppService.mainApp.register()
+    var isFailure: Bool {
+        self == .updateFailed
+    }
+
+    var title: String {
+        switch self {
+        case .enabled:
+            return L10n.tr(.launchAtLoginStatusEnabled)
+        case .disabled:
+            return L10n.tr(.launchAtLoginStatusDisabled)
+        case .requiresApproval:
+            return L10n.tr(.launchAtLoginStatusRequiresApproval)
+        case .unavailable:
+            return L10n.tr(.launchAtLoginStatusUnavailable)
+        case .updateFailed:
+            return L10n.tr(.launchAtLoginStatusUpdateFailed)
+        }
+    }
+}
+
+struct LaunchAtLoginUpdateFailure: Error, Equatable {
+    let message: String
+}
+
+/// Main-actor settings own this controller. The unchecked marker keeps the static
+/// system instance Swift-6-clean while still allowing tests to inject local fakes.
+struct LaunchAtLoginController: @unchecked Sendable {
+    let currentStatus: () -> LaunchAtLoginStatus
+    let setEnabled: (Bool) -> Result<LaunchAtLoginStatus, LaunchAtLoginUpdateFailure>
+
+    static let system = LaunchAtLoginController(
+        currentStatus: {
+            guard #available(macOS 13.0, *) else { return .unavailable }
+            return status(from: SMAppService.mainApp.status)
+        },
+        setEnabled: { enabled in
+            guard #available(macOS 13.0, *) else { return .success(.unavailable) }
+
+            do {
+                if enabled {
+                    if SMAppService.mainApp.status != .enabled {
+                        try SMAppService.mainApp.register()
+                    }
+                } else if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
                 }
-            } else if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
+                return .success(status(from: SMAppService.mainApp.status))
+            } catch {
+                return .failure(LaunchAtLoginUpdateFailure(message: error.localizedDescription))
             }
-        } catch {
-            Logger.app.error("Launch at login update failed: \(error.localizedDescription, privacy: .public)")
+        }
+    )
+
+    @available(macOS 13.0, *)
+    private static func status(from status: SMAppService.Status) -> LaunchAtLoginStatus {
+        switch status {
+        case .enabled:
+            return .enabled
+        case .requiresApproval:
+            return .requiresApproval
+        case .notRegistered, .notFound:
+            return .disabled
+        @unknown default:
+            return .disabled
         }
     }
 }

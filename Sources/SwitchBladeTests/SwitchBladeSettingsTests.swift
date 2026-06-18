@@ -10,6 +10,9 @@ enum SwitchBladeSettingsTests {
         ("Settings/hiddenApps_containsMatchesSubstring", hiddenApps_containsMatchesSubstring),
         ("Settings/hiddenApps_exactDoesNotMatchSubstring", hiddenApps_exactDoesNotMatchSubstring),
         ("Settings/hiddenApps_matchesBundleIdentifier", hiddenApps_matchesBundleIdentifier),
+        ("Settings/launchAtLogin_initializesFromLiveStatus", launchAtLogin_initializesFromLiveStatus),
+        ("Settings/launchAtLogin_successPersistsActualStatus", launchAtLogin_successPersistsActualStatus),
+        ("Settings/launchAtLogin_failureRestoresActualStatus", launchAtLogin_failureRestoresActualStatus),
         ("Settings/windowScope_mirrorsThreadSafeFilterState", windowScope_mirrorsFilterState),
         ("Settings/performanceLogging_mirrorsThreadSafeState", performanceLogging_mirrorsState)
     ]
@@ -81,6 +84,73 @@ enum SwitchBladeSettingsTests {
         try expect(!fuzzy.matches(appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2"))
     }
 
+    @MainActor static func launchAtLogin_initializesFromLiveStatus() async throws {
+        let userDefaults = makeIsolatedUserDefaults()
+        userDefaults.set(true, forKey: "sb_launchAtLogin")
+        let settings = SwitchBladeSettings(
+            userDefaults: userDefaults,
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+
+        try expectEqual(settings.launchAtLogin, false)
+        try expectEqual(settings.launchAtLoginStatus, .disabled)
+        try expectEqual(userDefaults.object(forKey: "sb_launchAtLogin") as? Bool, false)
+    }
+
+    @MainActor static func launchAtLogin_successPersistsActualStatus() async throws {
+        let userDefaults = makeIsolatedUserDefaults()
+        var requestedValues: [Bool] = []
+        let settings = SwitchBladeSettings(
+            userDefaults: userDefaults,
+            launchAtLoginController: LaunchAtLoginController.fake(
+                currentStatus: .disabled,
+                setEnabled: { enabled in
+                    requestedValues.append(enabled)
+                    return .success(enabled ? .requiresApproval : .disabled)
+                }
+            )
+        )
+
+        settings.launchAtLogin = true
+
+        try expectEqual(requestedValues, [true])
+        try expectEqual(settings.launchAtLogin, false)
+        try expectEqual(settings.launchAtLoginStatus, .requiresApproval)
+        try expectEqual(userDefaults.object(forKey: "sb_launchAtLogin") as? Bool, false)
+    }
+
+    @MainActor static func launchAtLogin_failureRestoresActualStatus() async throws {
+        let userDefaults = makeIsolatedUserDefaults()
+        var liveStatus = LaunchAtLoginStatus.disabled
+        let settings = SwitchBladeSettings(
+            userDefaults: userDefaults,
+            launchAtLoginController: LaunchAtLoginController.fake(
+                currentStatus: liveStatus,
+                setEnabled: { _ in .failure(LaunchAtLoginUpdateFailure(message: "denied")) }
+            )
+        )
+
+        settings.launchAtLogin = true
+
+        try expectEqual(settings.launchAtLogin, false)
+        try expectEqual(settings.launchAtLoginStatus, .updateFailed)
+        try expectEqual(userDefaults.object(forKey: "sb_launchAtLogin") as? Bool, false)
+
+        liveStatus = .enabled
+        let enabledSettings = SwitchBladeSettings(
+            userDefaults: makeIsolatedUserDefaults(),
+            launchAtLoginController: LaunchAtLoginController.fake(
+                currentStatus: liveStatus,
+                setEnabled: { _ in .failure(LaunchAtLoginUpdateFailure(message: "denied")) }
+            )
+        )
+
+        enabledSettings.launchAtLogin = false
+
+        try expectEqual(enabledSettings.launchAtLogin, true)
+        try expectEqual(enabledSettings.launchAtLoginStatus, .updateFailed)
+    }
+
     @MainActor static func windowScope_mirrorsFilterState() async throws {
         let settings = SwitchBladeSettings.shared
         let oldScope = settings.windowScope
@@ -105,5 +175,19 @@ enum SwitchBladeSettingsTests {
 
         settings.performanceLogging = .off
         try expectEqual(PerformanceLoggingState.mode, .off)
+    }
+}
+
+extension LaunchAtLoginController {
+    static func fake(
+        currentStatus: @autoclosure @escaping () -> LaunchAtLoginStatus,
+        setEnabled: @escaping (Bool) -> Result<LaunchAtLoginStatus, LaunchAtLoginUpdateFailure> = { enabled in
+            .success(enabled ? .enabled : .disabled)
+        }
+    ) -> LaunchAtLoginController {
+        LaunchAtLoginController(
+            currentStatus: currentStatus,
+            setEnabled: setEnabled
+        )
     }
 }

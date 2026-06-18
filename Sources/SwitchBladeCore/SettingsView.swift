@@ -59,10 +59,15 @@ struct SettingsView: View {
                 }
 
                 group(title: L10n.tr(.settingsBehavior)) {
-                    row(L10n.tr(.fieldLaunchAtLogin)) {
+                    statusRow(
+                        L10n.tr(.fieldLaunchAtLogin),
+                        status: settings.launchAtLoginStatus.title,
+                        statusColor: settings.launchAtLoginStatus.isFailure ? .red : .secondary
+                    ) {
                         Toggle("", isOn: $settings.launchAtLogin)
                             .labelsHidden()
                             .toggleStyle(.switch)
+                            .disabled(!settings.launchAtLoginStatus.allowsUserToggle)
                     }
                     divider()
                     row(L10n.tr(.fieldShowMenuBarIcon)) {
@@ -275,6 +280,29 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 36)
+    }
+
+    private func statusRow<Content: View>(
+        _ label: String,
+        status: String,
+        statusColor: Color,
+        @ViewBuilder trailing: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 13))
+                Text(status)
+                    .font(.system(size: 11))
+                    .foregroundStyle(statusColor)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 12)
+            trailing()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .frame(minHeight: 50)
     }
 
     private func sliderRow(_ label: String, value: Binding<Double>, in range: ClosedRange<Double>, unit: String, scale: Double) -> some View {

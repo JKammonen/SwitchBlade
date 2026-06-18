@@ -25,6 +25,11 @@ enum L10nTables {
         .settingsPreviewSize:             "Preview size",
 
         .fieldLanguage:                   "Language",
+        .launchAtLoginStatusEnabled:      "On",
+        .launchAtLoginStatusDisabled:     "Off",
+        .launchAtLoginStatusRequiresApproval:"Needs approval in System Settings",
+        .launchAtLoginStatusUnavailable:  "Not available on this macOS version",
+        .launchAtLoginStatusUpdateFailed: "Change failed; previous state restored",
         .fieldModifier:                   "Modifier",
         .fieldTriggerKey:                 "Trigger key",
         .fieldActiveCombo:                "Active: %@",
@@ -119,6 +124,11 @@ enum L10nTables {
         .settingsPreviewSize:             "Esikatselun koko",
 
         .fieldLanguage:                   "Kieli",
+        .launchAtLoginStatusEnabled:      "Päällä",
+        .launchAtLoginStatusDisabled:     "Pois päältä",
+        .launchAtLoginStatusRequiresApproval:"Odottaa hyväksyntää järjestelmäasetuksissa",
+        .launchAtLoginStatusUnavailable:  "Ei saatavilla tällä macOS-versiolla",
+        .launchAtLoginStatusUpdateFailed: "Muutos epäonnistui; aiempi tila palautettiin",
         .fieldModifier:                   "Muunnosnäppäin",
         .fieldTriggerKey:                 "Laukaisin",
         .fieldActiveCombo:                "Aktiivinen: %@",
