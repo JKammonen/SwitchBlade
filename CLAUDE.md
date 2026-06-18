@@ -86,7 +86,9 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 - Mocks live in `TestSupport.swift` (`MockWindowCatalog`, `MockWindowActivator`,
   `MockPermissionService`).
 - Per-test isolated UserDefaults via `makeIsolatedUserDefaults()`.
-- CI: `.github/workflows/tests.yml` runs on macos-15.
+- No CI: there is no `.github/` workflow. Tests run only locally via
+  `swift run SwitchBladeTests`. Run them yourself before handing off; nothing
+  runs them on push.
 
 ## Conventions
 
