@@ -32,6 +32,36 @@ enum PerformanceDiagnostics {
             await PerformanceMetricWriter.shared.record(event: event, fields: fields)
         }
     }
+
+    /// Builds the JSON object for one metric event. Pure + side-effect free so
+    /// it can be unit tested without touching the filesystem.
+    static func metricPayload(
+        event: String,
+        fields: [String: PerformanceMetricValue],
+        timestamp: String
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "timestamp": timestamp,
+            "event": event
+        ]
+        for (key, value) in fields {
+            payload[key] = value.jsonValue
+        }
+        return payload
+    }
+
+    /// Serializes one metric event to a single JSONL line (sorted keys +
+    /// trailing newline), exactly as written to disk. Pure — no IO.
+    static func metricLine(
+        event: String,
+        fields: [String: PerformanceMetricValue],
+        timestamp: String
+    ) throws -> Data {
+        let payload = metricPayload(event: event, fields: fields, timestamp: timestamp)
+        var line = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        line.append(0x0A)
+        return line
+    }
 }
 
 private actor PerformanceMetricWriter {
@@ -56,17 +86,11 @@ private actor PerformanceMetricWriter {
 
     func record(event: String, fields: [String: PerformanceMetricValue]) async {
         do {
-            var payload: [String: Any] = [
-                "timestamp": dateFormatter.string(from: Date()),
-                "event": event
-            ]
-            for (key, value) in fields {
-                payload[key] = value.jsonValue
-            }
-
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-            var line = data
-            line.append(0x0A)
+            let line = try PerformanceDiagnostics.metricLine(
+                event: event,
+                fields: fields,
+                timestamp: dateFormatter.string(from: Date())
+            )
 
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),

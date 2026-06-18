@@ -26,7 +26,8 @@ func runAll() async -> Int {
         ("PerformanceMetrics",      PerformanceMetricsTests.all),
         ("CaptureTimeout",          CaptureTimeoutTests.all),
         ("CapturePermitPool",       CapturePermitPoolTests.all),
-        ("PreviewScalingPolicy",    PreviewScalingPolicyTests.all)
+        ("PreviewScalingPolicy",    PreviewScalingPolicyTests.all),
+        ("PerformanceDiagnostics",  PerformanceDiagnosticsTests.all)
     ]
 
     var passed = 0

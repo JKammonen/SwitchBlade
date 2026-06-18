@@ -12,6 +12,11 @@ enum WindowActivatorTests {
         ("WindowActivator/bestMatchIndex_defaultTieKeepsFirstCandidate", bestMatchDefaultTieKeepsFirstCandidate),
         ("WindowActivator/bestMatchIndex_sameAppTiePrefersNonMainWindow", bestMatchSameAppTiePrefersNonMainWindow),
         ("WindowActivator/bestMatchIndex_fallsBackToClosestFrameWhenTitleDrifts", bestMatchFallsBackToClosestFrameWhenTitleDrifts),
+        ("WindowActivator/bestMatchIndex_emptyCandidates_returnsNil", bestMatchEmptyCandidatesReturnsNil),
+        ("WindowActivator/bestMatchIndex_emptyItemTitle_matchesByFrameOnly", bestMatchEmptyItemTitleMatchesByFrameOnly),
+        ("WindowActivator/bestMatchIndex_nilFrameCandidates_fallBackToTitleMatch", bestMatchNilFrameCandidatesFallBackToTitleMatch),
+        ("WindowActivator/bestScreen_emptyCandidates_returnsNil", bestScreenEmptyCandidatesReturnsNil),
+        ("WindowActivator/bestScreen_windowOffAllScreens_picksNearestByCenter", bestScreenWindowOffAllScreensPicksNearestByCenter),
         ("WindowActivator/activate_frontmostWindow_skipsAppActivation", activateFrontmostWindowSkipsAppActivation),
         ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
@@ -146,6 +151,71 @@ enum WindowActivatorTests {
         ]
 
         try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 0)
+    }
+
+    static func bestMatchEmptyCandidatesReturnsNil() throws {
+        let item = makeItem(id: 1, title: "Anything")
+        try expectNil(WindowActivator.bestMatchIndex(for: item, candidates: []))
+    }
+
+    // Empty item title (e.g. a window with no title) makes titleMatches() pass
+    // for every candidate, so the frame is the only discriminator.
+    static func bestMatchEmptyItemTitleMatchesByFrameOnly() throws {
+        let item = makeItem(
+            id: 9,
+            pid: 100,
+            title: "",
+            bounds: CGRect(x: 100, y: 100, width: 800, height: 600)
+        )
+
+        let candidates = [
+            matchCandidate(title: "Far away", frame: CGRect(x: 600, y: 600, width: 800, height: 600)),
+            matchCandidate(title: "Near", frame: CGRect(x: 104, y: 102, width: 800, height: 600))
+        ]
+
+        try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 1)
+    }
+
+    // Candidates without frame data can't frame-match; the title match still
+    // resolves through the fallback path.
+    static func bestMatchNilFrameCandidatesFallBackToTitleMatch() throws {
+        let item = makeItem(id: 12, pid: 100, title: "Doc")
+
+        let candidates = [
+            matchCandidate(title: "Other", frame: nil),
+            matchCandidate(title: "Doc", frame: nil)
+        ]
+
+        try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 1)
+    }
+
+    static func bestScreenEmptyCandidatesReturnsNil() throws {
+        try expectNil(
+            WindowActivator.bestScreen(
+                for: CGRect(x: 0, y: 0, width: 100, height: 100),
+                candidates: []
+            )
+        )
+    }
+
+    // Window sits in the gap between two screens: it intersects neither and its
+    // midpoint is contained by neither, so bestScreen falls through to
+    // nearest-by-center. Candidate order is reversed to prove distance wins.
+    static func bestScreenWindowOffAllScreensPicksNearestByCenter() throws {
+        let near = WindowActivator.ScreenGeometry(
+            frame: CGRect(x: 0, y: 0, width: 1000, height: 740),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1000, height: 700)
+        )
+        let far = WindowActivator.ScreenGeometry(
+            frame: CGRect(x: 2000, y: 0, width: 1000, height: 740),
+            visibleFrame: CGRect(x: 2000, y: 0, width: 1000, height: 700)
+        )
+        let window = CGRect(x: 1100, y: 0, width: 200, height: 200)
+
+        try expectEqual(
+            WindowActivator.bestScreen(for: window, candidates: [far, near]),
+            near
+        )
     }
 
     static func activateFrontmostWindowSkipsAppActivation() throws {
