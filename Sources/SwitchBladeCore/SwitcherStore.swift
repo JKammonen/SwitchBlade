@@ -1534,6 +1534,8 @@ final class SwitcherStore: ObservableObject {
     private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) {
         guard isVisible, previewGeneration == generation, !minimized.isEmpty else { return }
         let existingIDs = Set(items.map(\.id))
+        let previousSelectedID = selectedID
+        let selectionWasDefault = previousSelectedID == defaultSelectedID(in: items)
         let newItems = minimized
             .filter { !existingIDs.contains($0.id) }
             .map { item in
@@ -1542,7 +1544,21 @@ final class SwitcherStore: ObservableObject {
                     : previewCache.hydrated(item, liveItems: items + minimized)
             }
         guard !newItems.isEmpty else { return }
-        items = items + newItems
+        let orderedItems = orderItems(
+            mruTracker.orderedForDisplay(
+                from: items + newItems,
+                context: "minimized-merge"
+            )
+        )
+        items = orderedItems
+        if selectionWasDefault {
+            selectedID = defaultSelectedID(in: orderedItems)
+        } else if let previousSelectedID,
+                  orderedItems.contains(where: { $0.id == previousSelectedID }) {
+            selectedID = previousSelectedID
+        } else {
+            selectedID = defaultSelectedID(in: orderedItems)
+        }
     }
 
     private func scheduleHoverEnable(generation: Int) {

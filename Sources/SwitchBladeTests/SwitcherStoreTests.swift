@@ -28,6 +28,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
         ("Store/cachedDelayPath_mergesMinimizedAfterPanelShow", cachedDelayPath_mergesMinimized),
+        ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -379,6 +380,85 @@ enum SwitcherStoreTests {
         try expect(
             store.items.contains(where: { $0.id == 99 }),
             "minimized window must merge into items after the delayed cached open"
+        )
+    }
+
+    @MainActor static func minimizedMerge_keepsSyntheticWindowAtMRURank() async throws {
+        let userDefaults = makeIsolatedUserDefaults()
+        let catalog = MockWindowCatalog()
+        let activator = MockWindowActivator()
+        let permissions = MockPermissionService()
+        let mruTracker = MRUTracker(userDefaults: userDefaults)
+
+        let frontmost = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Safari",
+            title: "Docs",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.apple.Safari"
+        )
+        let teamsVisible = makeItem(
+            id: 10,
+            pid: 81772,
+            appName: "Microsoft Teams",
+            title: "Daily",
+            bundleIdentifier: "com.microsoft.teams2"
+        )
+        let codex = makeItem(
+            id: 2,
+            pid: 200,
+            appName: "Codex",
+            title: "Work",
+            bundleIdentifier: "com.openai.codex"
+        )
+        let claude = makeItem(
+            id: 3,
+            pid: 300,
+            appName: "Claude",
+            title: "Notes",
+            bundleIdentifier: "com.anthropic.claude"
+        )
+        mruTracker.rememberSelection(teamsVisible.id, in: [frontmost, teamsVisible, codex, claude])
+
+        let store = SwitcherStore(
+            catalog: catalog,
+            activator: activator,
+            permissionService: permissions,
+            userDefaults: userDefaults,
+            mruTracker: mruTracker,
+            initialFrontmostAppPID: frontmost.pid,
+            switchBladePID: 999
+        )
+        let syntheticTeamsID = SyntheticWindowID.make(pid: teamsVisible.pid, index: 0, title: teamsVisible.title)
+        let minimizedTeams = makeItem(
+            id: syntheticTeamsID,
+            pid: teamsVisible.pid,
+            appName: teamsVisible.appName,
+            title: teamsVisible.title,
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: teamsVisible.bundleIdentifier
+        )
+
+        catalog.visibleItems = [frontmost, codex, claude]
+        catalog.minimizedItems = [minimizedTeams]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == syntheticTeamsID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try expectEqual(
+            store.items.map(\.id),
+            [frontmost.id, syntheticTeamsID, codex.id, claude.id],
+            "a synthetic minimized row with an existing MRU signature must not append to the tail"
+        )
+        try expectEqual(
+            store.selectedID,
+            syntheticTeamsID,
+            "automatic default selection should follow the new MRU order after minimized merge"
         )
     }
 
