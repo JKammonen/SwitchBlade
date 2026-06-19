@@ -6,7 +6,8 @@ enum MenuBarControllerTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("MenuBarController/aboutVersionString_usesShortVersionOnly", aboutVersionStringUsesShortVersionOnly),
         ("MenuBarController/aboutTimestampString_formatsBuildTimestamp", aboutTimestampStringFormatsBuildTimestamp),
-        ("MenuBarController/aboutPanelOptions_omitsVersionWhenBundleInfoMissing", aboutPanelOptionsOmitsMissingVersion)
+        ("MenuBarController/aboutPanelOptions_omitsVersionWhenBundleInfoMissing", aboutPanelOptionsOmitsMissingVersion),
+        ("MenuBarController/secureInputStatus_formatsActiveAndStaleStates", secureInputStatusFormatsStates)
     ]
 
     @MainActor static func aboutVersionStringUsesShortVersionOnly() throws {
@@ -50,5 +51,34 @@ enum MenuBarControllerTests {
     @MainActor static func aboutPanelOptionsOmitsMissingVersion() throws {
         let options = MenuBarController.aboutPanelOptions(bundleInfo: [:])
         try expect(options.isEmpty)
+    }
+
+    @MainActor static func secureInputStatusFormatsStates() throws {
+        try expectEqual(
+            MenuBarController.secureInputStatusTitle(for: .inactive, language: .english),
+            "Secure Input: Off"
+        )
+        try expectEqual(
+            MenuBarController.secureInputStatusTitle(
+                for: SecureInputState(
+                    pid: 36557,
+                    process: SecureInputProcess(
+                        pid: 36557,
+                        displayName: "Preview",
+                        bundleIdentifier: "com.apple.Preview",
+                        executablePath: "/System/Applications/Preview.app/Contents/MacOS/Preview"
+                    )
+                ),
+                language: .english
+            ),
+            "Secure Input: Preview (pid 36557)"
+        )
+        try expectEqual(
+            MenuBarController.secureInputStatusTitle(
+                for: SecureInputState(pid: 36557, process: nil),
+                language: .english
+            ),
+            "Secure Input: stuck pid 36557"
+        )
     }
 }

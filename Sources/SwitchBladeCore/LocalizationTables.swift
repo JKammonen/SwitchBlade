@@ -95,11 +95,18 @@ enum L10nTables {
         .badgeBottom:                     "Bottom",
         .badgeTop:                        "Top",
 
+        .menuSecureInputOff:              "Secure Input: Off",
+        .menuSecureInputActive:           "Secure Input: %@ (pid %@)",
+        .menuSecureInputStale:            "Secure Input: stuck pid %@",
+        .menuSecureInputClear:            "Clear stuck Secure Input",
+        .menuSecureInputClearUnavailable: "No safe Secure Input cleanup",
         .menuSettings:                    "Settings…",
         .menuAbout:                       "About SwitchBlade",
         .menuQuit:                        "Quit SwitchBlade",
         .menuSettingsWindowTitle:         "SwitchBlade Settings",
         .tooltipSettings:                 "Settings",
+        .tooltipSecureInputActive:        "Secure Input is active in %@ (pid %@). Cmd+Tab may fall back to macOS.",
+        .tooltipSecureInputStale:         "Secure Input is stuck on stale pid %@. Use the SwitchBlade menu cleanup.",
         .aboutBuiltAt:                    "Built"
     ]
 
@@ -194,11 +201,18 @@ enum L10nTables {
         .badgeBottom:                     "Alhaalla",
         .badgeTop:                        "Ylhäällä",
 
+        .menuSecureInputOff:              "Secure Input: pois päältä",
+        .menuSecureInputActive:           "Secure Input: %@ (pid %@)",
+        .menuSecureInputStale:            "Secure Input jumissa pidissä %@",
+        .menuSecureInputClear:            "Puhdista jumittunut Secure Input",
+        .menuSecureInputClearUnavailable: "Ei turvallista Secure Input -siivousta",
         .menuSettings:                    "Asetukset…",
         .menuAbout:                       "Tietoja SwitchBladesta",
         .menuQuit:                        "Lopeta SwitchBlade",
         .menuSettingsWindowTitle:         "SwitchBlade-asetukset",
         .tooltipSettings:                 "Asetukset",
+        .tooltipSecureInputActive:        "Secure Input on päällä sovelluksessa %@ (pid %@). Cmd+Tab voi mennä macOS:lle.",
+        .tooltipSecureInputStale:         "Secure Input on jumissa kuolleessa pidissä %@. Käytä SwitchBladen valikkosiivousta.",
         .aboutBuiltAt:                    "Buildattu"
     ]
 }

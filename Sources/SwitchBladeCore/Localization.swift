@@ -305,11 +305,18 @@ public enum L10n {
         case badgeTop
 
         // Menu bar / status menu
+        case menuSecureInputOff
+        case menuSecureInputActive
+        case menuSecureInputStale
+        case menuSecureInputClear
+        case menuSecureInputClearUnavailable
         case menuSettings
         case menuAbout
         case menuQuit
         case menuSettingsWindowTitle
         case tooltipSettings
+        case tooltipSecureInputActive
+        case tooltipSecureInputStale
         case aboutBuiltAt
     }
 

@@ -1,14 +1,25 @@
 import AppKit
 import Combine
 import SwiftUI
+import os.log
 
 @MainActor
-final class MenuBarController: NSObject, NSWindowDelegate {
+final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindowController: NSWindowController?
     private var cancellables: Set<AnyCancellable> = []
+    private let secureInputMonitor: SecureInputMonitor
+    private var secureInputWatchdogTask: Task<Void, Never>?
+    private var secureInputState: SecureInputState = .inactive
+    private weak var secureInputStatusMenuItem: NSMenuItem?
+    private weak var secureInputCleanupMenuItem: NSMenuItem?
+
+    init(secureInputMonitor: SecureInputMonitor = SecureInputMonitor()) {
+        self.secureInputMonitor = secureInputMonitor
+    }
 
     func setup() {
+        secureInputState = secureInputMonitor.currentState()
         applyMenuBarVisibility(SwitchBladeSettings.shared.showMenuBarIcon)
         SwitchBladeSettings.shared.$showMenuBarIcon
             .removeDuplicates()
@@ -16,10 +27,12 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 self?.applyMenuBarVisibility(isVisible)
             }
             .store(in: &cancellables)
+        startSecureInputWatchdog()
     }
 
     private func applyMenuBarVisibility(_ isVisible: Bool) {
-        if isVisible {
+        let shouldShow = isVisible || secureInputState.isActive
+        if shouldShow {
             if statusItem == nil {
                 installStatusItem()
             }
@@ -32,8 +45,12 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = makeMenuBarIcon()
-        item.menu = makeMenu()
+        item.button?.toolTip = menuBarToolTip(for: secureInputState)
+        let menu = makeMenu()
+        menu.delegate = self
+        item.menu = menu
         statusItem = item
+        updateSecureInputMenu()
     }
 
     /// Draws a custom template image: two small overlapping rounded rectangles
@@ -77,6 +94,22 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         menu.addItem(header)
         menu.addItem(.separator())
 
+        let secureInputStatus = NSMenuItem(title: secureInputStatusTitle(for: secureInputState), action: nil, keyEquivalent: "")
+        secureInputStatus.isEnabled = false
+        menu.addItem(secureInputStatus)
+        secureInputStatusMenuItem = secureInputStatus
+
+        let secureInputCleanup = NSMenuItem(
+            title: L10n.tr(.menuSecureInputClear),
+            action: #selector(clearStuckSecureInput),
+            keyEquivalent: ""
+        )
+        secureInputCleanup.target = self
+        menu.addItem(secureInputCleanup)
+        secureInputCleanupMenuItem = secureInputCleanup
+
+        menu.addItem(.separator())
+
         let settings = NSMenuItem(title: L10n.tr(.menuSettings), action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -93,6 +126,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         menu.addItem(quit)
 
         return menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshSecureInputState(reason: "menu")
     }
 
     @objc func openSettings() {
@@ -118,6 +155,16 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         NSApp.orderFrontStandardAboutPanel(options: Self.aboutPanelOptions(bundleInfo: Bundle.main.infoDictionary ?? [:]))
     }
 
+    @objc private func clearStuckSecureInput() {
+        let result = secureInputMonitor.clearStuckSecureInput()
+        secureInputState = result.after
+        Logger.secureInput.notice(
+            "Secure Input cleanup terminated \(result.terminated.count, privacy: .public) helper process(es); before=\(Self.logDescription(for: result.before), privacy: .public), after=\(Self.logDescription(for: result.after), privacy: .public)"
+        )
+        applyMenuBarVisibility(SwitchBladeSettings.shared.showMenuBarIcon)
+        updateSecureInputMenu()
+    }
+
     func windowWillClose(_ notification: Notification) {
         closeAuxiliaryPanels()
     }
@@ -126,6 +173,89 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let colorPanel = NSColorPanel.shared
         colorPanel.orderOut(nil)
         colorPanel.close()
+    }
+
+    private func startSecureInputWatchdog() {
+        secureInputWatchdogTask?.cancel()
+        secureInputWatchdogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.refreshSecureInputState(reason: "watchdog")
+            }
+        }
+    }
+
+    private func refreshSecureInputState(reason: String) {
+        let previous = secureInputState
+        let current = secureInputMonitor.currentState()
+        secureInputState = current
+
+        if previous != current {
+            Logger.secureInput.notice(
+                "Secure Input state changed at \(reason, privacy: .public): \(Self.logDescription(for: current), privacy: .public)"
+            )
+        }
+
+        applyMenuBarVisibility(SwitchBladeSettings.shared.showMenuBarIcon)
+        updateSecureInputMenu()
+    }
+
+    private func updateSecureInputMenu() {
+        statusItem?.button?.toolTip = menuBarToolTip(for: secureInputState)
+        statusItem?.button?.contentTintColor = secureInputState.isActive ? .systemOrange : nil
+
+        secureInputStatusMenuItem?.title = secureInputStatusTitle(for: secureInputState)
+
+        let targets = secureInputMonitor.safeCleanupTargets(for: secureInputState)
+        secureInputCleanupMenuItem?.isEnabled = !targets.isEmpty
+        secureInputCleanupMenuItem?.title = targets.isEmpty
+            ? L10n.tr(.menuSecureInputClearUnavailable)
+            : L10n.tr(.menuSecureInputClear)
+    }
+
+    private func secureInputStatusTitle(for state: SecureInputState) -> String {
+        Self.secureInputStatusTitle(for: state, language: LocalizationState.effectiveLanguage)
+    }
+
+    private func menuBarToolTip(for state: SecureInputState) -> String {
+        Self.secureInputToolTip(for: state, language: LocalizationState.effectiveLanguage)
+    }
+
+    static func secureInputStatusTitle(for state: SecureInputState, language: AppLanguage) -> String {
+        guard let pid = state.pid else {
+            return L10n.tr(.menuSecureInputOff, language: language)
+        }
+        if let process = state.process {
+            return String(
+                format: L10n.tr(.menuSecureInputActive, language: language),
+                process.displayName,
+                "\(pid)"
+            )
+        }
+        return String(format: L10n.tr(.menuSecureInputStale, language: language), "\(pid)")
+    }
+
+    static func secureInputToolTip(for state: SecureInputState, language: AppLanguage) -> String {
+        guard let pid = state.pid else {
+            return "SwitchBlade"
+        }
+        if let process = state.process {
+            return String(
+                format: L10n.tr(.tooltipSecureInputActive, language: language),
+                process.displayName,
+                "\(pid)"
+            )
+        }
+        return String(format: L10n.tr(.tooltipSecureInputStale, language: language), "\(pid)")
+    }
+
+    private static func logDescription(for state: SecureInputState) -> String {
+        guard let pid = state.pid else { return "inactive" }
+        if let process = state.process {
+            return "active pid=\(pid) app=\(process.displayName)"
+        }
+        return "stale pid=\(pid)"
     }
 
     static func aboutPanelOptions(bundleInfo: [String: Any]) -> [NSApplication.AboutPanelOptionKey: Any] {

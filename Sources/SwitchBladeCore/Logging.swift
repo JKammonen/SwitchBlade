@@ -18,6 +18,8 @@ public extension Logger {
     static let capture     = Logger(subsystem: subsystem, category: "capture")
     /// HotkeyMonitor event-tap setup and flag-release detection.
     static let hotkey      = Logger(subsystem: subsystem, category: "hotkey")
+    /// Secure Event Input detection and safe helper cleanup.
+    static let secureInput = Logger(subsystem: subsystem, category: "secure-input")
     /// WindowActivator AX raise/close paths.
     static let activator   = Logger(subsystem: subsystem, category: "activator")
     /// PermissionService state checks and prompt routing.
