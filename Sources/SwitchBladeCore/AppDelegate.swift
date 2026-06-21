@@ -80,6 +80,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         store.onHide = { [weak panelController] in
             panelController?.hide()
         }
+        store.onPreparePanel = { [weak panelController] itemCount in
+            panelController?.prepare(itemCount: itemCount)
+        }
         self.panelController = panelController
 
         let hotkeyMonitor = HotkeyMonitor()

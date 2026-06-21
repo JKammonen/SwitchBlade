@@ -19,6 +19,7 @@ final class SwitcherStore: ObservableObject {
     var onShow: (() -> Void)?
     var onHide: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onPreparePanel: ((Int) -> Void)?
 
     /// True from the moment the first Cmd+Tab fires until the panel is hidden.
     /// Used so Command-release is detected even when the async show is still in flight.
@@ -58,7 +59,8 @@ final class SwitcherStore: ObservableObject {
     private var staleCacheHealTask: Task<Void, Never>?
     private var contentCacheWarmupTask: Task<Void, Never>?
     private var openItemsWarmupTask: Task<Void, Never>?
-    private var panelShowTask: Task<Void, Never>?
+    private var panelShowTimer: PanelShowTimer?
+    private var panelShowScheduleID = 0
     private var previewWarmupTask: Task<Void, Never>?
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
@@ -103,6 +105,18 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
+    private final class PanelShowTimer: @unchecked Sendable {
+        let workItem: DispatchWorkItem
+
+        init(workItem: DispatchWorkItem) {
+            self.workItem = workItem
+        }
+
+        func cancel() {
+            workItem.cancel()
+        }
+    }
+
     private struct PendingActivationMeasurement {
         let requestedAt: Date
         let context: String
@@ -120,7 +134,7 @@ final class SwitcherStore: ObservableObject {
         performanceMetrics: SwitcherPerformanceMetrics = SwitcherPerformanceMetrics(),
         activationWarmupWindow: TimeInterval = 60,
         cachedOpenItemsMaxAge: TimeInterval = 30,
-        initialPanelShowDelayNanoseconds: UInt64 = 70_000_000,
+        initialPanelShowDelayNanoseconds: UInt64 = 0,
         deferredPreviewCaptureBudget: Int = 12,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
@@ -188,7 +202,7 @@ final class SwitcherStore: ObservableObject {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
-        panelShowTask?.cancel()
+        panelShowTimer?.cancel()
         staleCacheHealTask?.cancel()
         previewWarmupTask?.cancel()
         if let activationObserver {
@@ -216,7 +230,7 @@ final class SwitcherStore: ObservableObject {
         let windowIDs = stabilizedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
             .map(\.windowID)
-        let initialWindowIDs = Array(windowIDs.prefix(10))
+        let initialWindowIDs = Array(windowIDs.prefix(4))
         guard !initialWindowIDs.isEmpty else { return }
         guard !Task.isCancelled else { return }
 
@@ -230,6 +244,7 @@ final class SwitcherStore: ObservableObject {
         let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let acceptedPreviews = previewCache.record(previews, liveItems: stabilizedItems, mostlyWhiteIDs: whiteIDs)
+        primeHiddenDisplayItems(stabilizedItems)
         let ms = Date().timeIntervalSince(start) * 1000
         Logger.switcher.info(
             "Preview cache warmup (\(context, privacy: .public)): \(acceptedPreviews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
@@ -262,6 +277,7 @@ final class SwitcherStore: ObservableObject {
             return
         }
         if case .previewHidden = phase {
+            showPreparedPanelIfNeeded()
             moveSelection(forward ? 1 : -1)
             return
         }
@@ -276,7 +292,7 @@ final class SwitcherStore: ObservableObject {
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
-        panelShowTask?.cancel()
+        cancelPanelShow()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
         activeOpenRequestedAt = pendingOpenRequestedAt
@@ -837,8 +853,7 @@ final class SwitcherStore: ObservableObject {
         previewLoadTask = nil
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
-        panelShowTask?.cancel()
-        panelShowTask = nil
+        cancelPanelShow()
         previewWarmupTask?.cancel()
         enterIdle()
         hoverEnabled = false
@@ -917,15 +932,7 @@ final class SwitcherStore: ObservableObject {
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
         // Preselect the second item so a tap-Cmd+Tab+release toggles between
         // the two most-recent windows. With only one item, select that.
-        // Disable animations so tiles appear at their final positions instantly
-        // on open — sliding/scaling on open is distracting; animation is reserved
-        // for explicit Tab/arrow navigation while the panel is already visible.
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) {
-            items = hydratedItems
-            selectedID = preselectedID
-        }
+        applyDisplayItems(hydratedItems, selectedID: preselectedID)
         logOpenOrdering(source: source, orderedItems: orderedItems, selectedID: selectedID)
 
         let cachedHits = items.filter { $0.preview != nil }.count
@@ -1068,11 +1075,14 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func schedulePreparedPanelShow() {
-        panelShowTask?.cancel()
+        cancelPanelShow()
         let delayNanoseconds = initialPanelShowDelayNanoseconds
+        let scheduledAt = Date()
+        let requestedAt = activeOpenRequestedAt
+        let scheduleID = panelShowScheduleID
         let remainingDelayNanoseconds: UInt64
-        if let activeOpenRequestedAt {
-            let elapsedNanoseconds = UInt64(max(0, Date().timeIntervalSince(activeOpenRequestedAt) * 1_000_000_000))
+        if let requestedAt {
+            let elapsedNanoseconds = UInt64(max(0, scheduledAt.timeIntervalSince(requestedAt) * 1_000_000_000))
             remainingDelayNanoseconds = elapsedNanoseconds >= delayNanoseconds
                 ? 0
                 : delayNanoseconds - elapsedNanoseconds
@@ -1081,27 +1091,64 @@ final class SwitcherStore: ObservableObject {
         }
 
         guard remainingDelayNanoseconds > 0 else {
-            showPreparedPanelIfNeeded()
+            showPreparedPanelIfNeeded(
+                scheduleID: scheduleID,
+                scheduledAt: scheduledAt,
+                requestedAt: requestedAt,
+                expectedDelayNanoseconds: 0
+            )
             return
         }
 
         // The quick-release grace window is anchored to the original hotkey
         // press, not to "snapshot finished". After a long idle pause, a
         // backgrounded agent's MainActor timer can wake hundreds of ms late;
-        // sleeping off-main and only hopping back to MainActor for the show
-        // avoids turning a 70 ms grace window into a 400+ ms pre-show stall.
-        panelShowTask = Task.detached(priority: .userInitiated) { [weak self] in
-            try? await Task.sleep(nanoseconds: remainingDelayNanoseconds)
-            guard !Task.isCancelled else { return }
-            await self?.showPreparedPanelIfNeeded()
+        // a GCD main-queue timer avoids sharing the Swift concurrency executor
+        // with SCKit capture tasks that can keep running after soft timeout.
+        let delay = DispatchTimeInterval.nanoseconds(Int(remainingDelayNanoseconds))
+        let workItem = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.showPreparedPanelIfNeeded(
+                    scheduleID: scheduleID,
+                    scheduledAt: scheduledAt,
+                    requestedAt: requestedAt,
+                    expectedDelayNanoseconds: remainingDelayNanoseconds
+                )
+            }
         }
+        panelShowTimer = PanelShowTimer(workItem: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func showPreparedPanelIfNeeded() {
+    private func showPreparedPanelIfNeeded(
+        scheduleID: Int? = nil,
+        scheduledAt: Date? = nil,
+        requestedAt: Date? = nil,
+        expectedDelayNanoseconds: UInt64? = nil
+    ) {
+        if let scheduleID, scheduleID != panelShowScheduleID { return }
         guard case .previewHidden = phase else { return }
-        panelShowTask?.cancel()
-        panelShowTask = nil
+        panelShowTimer?.cancel()
+        panelShowTimer = nil
+        if let scheduledAt {
+            var fields: [String: PerformanceMetricValue] = [
+                "actual_wait_ms": .double(Date().timeIntervalSince(scheduledAt) * 1000)
+            ]
+            if let expectedDelayNanoseconds {
+                fields["expected_wait_ms"] = .double(Double(expectedDelayNanoseconds) / 1_000_000)
+            }
+            if let requestedAt {
+                fields["keydown_elapsed_ms"] = .double(Date().timeIntervalSince(requestedAt) * 1000)
+            }
+            PerformanceDiagnostics.record("panel_show_timer", fields: fields)
+        }
         showWithPreviews()
+    }
+
+    private func cancelPanelShow() {
+        panelShowTimer?.cancel()
+        panelShowTimer = nil
+        panelShowScheduleID += 1
     }
 
     func schedulePreviewCacheWarmup(context: String) {
@@ -1212,6 +1259,28 @@ final class SwitcherStore: ObservableObject {
         cachedOpenItems = orderedItems
         cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
         cachedOpenItemsNeedResnapshot = false
+        primeHiddenDisplayItems(orderedItems)
+    }
+
+    private func primeHiddenDisplayItems(_ orderedItems: [WindowItem]) {
+        guard case .idle = phase, !orderedItems.isEmpty else { return }
+
+        let hydratedItems = hydratedForDisplay(orderedItems)
+        applyDisplayItems(hydratedItems, selectedID: defaultSelectedID(in: hydratedItems))
+        onPreparePanel?(hydratedItems.count)
+    }
+
+    private func applyDisplayItems(_ newItems: [WindowItem], selectedID newSelectedID: WindowItem.ID?) {
+        guard items != newItems || selectedID != newSelectedID else { return }
+
+        // Disable animations so hidden warmup and visible open both land at the
+        // final tile positions; navigation animations are only for explicit input.
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            items = newItems
+            selectedID = newSelectedID
+        }
     }
 
     private func hiddenStaleCommitNeedsFreshSnapshot(for item: WindowItem) -> Bool {
@@ -1223,8 +1292,7 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.info(
             "Deferring hidden stale commit for same-app window id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) until fresh snapshot"
         )
-        panelShowTask?.cancel()
-        panelShowTask = nil
+        cancelPanelShow()
         staleCacheHealTask?.cancel()
         staleCacheHealTask = nil
         openRefreshTask?.cancel()
@@ -1379,8 +1447,7 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func showWithPreviews() {
-        panelShowTask?.cancel()
-        panelShowTask = nil
+        cancelPanelShow()
         // Carry the incoming display staleness (from .previewHidden / .resolving)
         // into the visible phase below.
         let stale = currentShowingStale
@@ -1430,7 +1497,7 @@ final class SwitcherStore: ObservableObject {
         previewLoadTask = Task {
             let batchStart = Date()
             var previews: [CGWindowID: NSImage] = [:]
-            let firstBatchWindowIDs = priorityWindowIDs + remainingInitialWindowIDs
+            let firstBatchWindowIDs = priorityWindowIDs
             if !firstBatchWindowIDs.isEmpty {
                 let batchPreviews = await catalog.capturePreviews(
                     for: firstBatchWindowIDs,
@@ -1444,14 +1511,14 @@ final class SwitcherStore: ObservableObject {
 
             guard !Task.isCancelled else { return }
             let firstBatchMs = Date().timeIntervalSince(batchStart) * 1000
-            let successRate = windowIDs.isEmpty ? 0
-                : Double(previews.count) / Double(initialWindowIDs.count)
+            let successRate = firstBatchWindowIDs.isEmpty ? 0
+                : Double(previews.count) / Double(firstBatchWindowIDs.count)
             let batchSummary = self.performanceMetrics.recordFirstPreviewBatch(milliseconds: firstBatchMs)
             PerformanceDiagnostics.record(
                 "first_preview_batch",
                 fields: [
                     "captured": .int(previews.count),
-                    "initial_requested": .int(initialWindowIDs.count),
+                    "initial_requested": .int(firstBatchWindowIDs.count),
                     "milliseconds": .double(firstBatchMs),
                     "success_rate": .double(successRate),
                     "total_capturable": .int(windowIDs.count)
@@ -1463,18 +1530,34 @@ final class SwitcherStore: ObservableObject {
                 )
             }
 
+            let failedFirstBatchWindowIDs = firstBatchWindowIDs.filter { previews[$0] == nil }
+            let followUpInitialWindowIDs = Self.uniqueWindowIDs(
+                failedFirstBatchWindowIDs + remainingInitialWindowIDs
+            )
+            if !followUpInitialWindowIDs.isEmpty {
+                let followUpPreviews = await catalog.capturePreviews(
+                    for: followUpInitialWindowIDs,
+                    maxCount: nil,
+                    maxConcurrentCaptures: min(4, followUpInitialWindowIDs.count)
+                )
+                guard !Task.isCancelled else { return }
+                previews.merge(followUpPreviews) { _, fresh in fresh }
+                await self.applyPreviews(followUpPreviews, generation: generation)
+            }
+
             let firstBatchWindowIDSet = Set(firstBatchWindowIDs)
-            let failedInitialWindowIDs = firstBatchWindowIDs.filter { previews[$0] == nil }
+            let initialWindowIDSet = Set(initialWindowIDs)
             let uncachedDeferredWindowIDs = self.items.compactMap { item -> CGWindowID? in
                 guard !item.isMinimized,
                       item.canCapturePreview,
                       item.preview == nil,
-                      !firstBatchWindowIDSet.contains(item.windowID) else {
+                      !firstBatchWindowIDSet.contains(item.windowID),
+                      !initialWindowIDSet.contains(item.windowID) else {
                     return nil
                 }
                 return item.windowID
             }
-            let deferredCandidates = failedInitialWindowIDs + uncachedDeferredWindowIDs
+            let deferredCandidates = uncachedDeferredWindowIDs
             let deferredWindowIDs = Array(deferredCandidates.prefix(self.deferredPreviewCaptureBudget))
             if PerformanceLoggingState.mode == .debug, !deferredCandidates.isEmpty {
                 PerformanceDiagnostics.record(
@@ -1503,6 +1586,11 @@ final class SwitcherStore: ObservableObject {
                 await catalog.refreshContentCache()
             }
         }
+    }
+
+    private static func uniqueWindowIDs(_ windowIDs: [CGWindowID]) -> [CGWindowID] {
+        var seen: Set<CGWindowID> = []
+        return windowIDs.filter { seen.insert($0).inserted }
     }
 
     private func applyPreviews(_ previews: [CGWindowID: NSImage], generation: Int) async {

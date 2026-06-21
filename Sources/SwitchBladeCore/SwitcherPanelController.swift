@@ -177,6 +177,12 @@ final class SwitcherPanelController {
         Logger.switcher.info("Panel layout cache invalidated: \(reason, privacy: .public)")
     }
 
+    func prepare(itemCount: Int) {
+        _ = sizeAndCenter(itemCount: itemCount)
+        hostingView.needsLayout = true
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
     /// macOS sometimes returns from `NSApp.activate` + `makeKeyAndOrderFront`
     /// without actually granting key-window status to an accessory app — most
     /// often after a long idle pause when the previously-frontmost app refuses
@@ -285,7 +291,7 @@ final class SwitcherPanelController {
 
         let setFrameStart = Date()
         if !framesApproximatelyEqual(panel.frame, result.panelFrame) {
-            panel.setFrame(result.panelFrame, display: false)
+            panel.setFrame(result.panelFrame, display: false, animate: false)
         }
         let setFrameMs = Date().timeIntervalSince(setFrameStart) * 1000
 

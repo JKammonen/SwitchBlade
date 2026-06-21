@@ -41,6 +41,8 @@ enum SwitcherStoreTests {
         ("Store/previewCapture_limitsDeferredBatch", previewCapture_limitsDeferredBatch),
         ("Store/previewCapture_skipsCachedDeferredItems", previewCapture_skipsCachedDeferredItems),
         ("Store/warmPreviewCache_populatesFirstOpen", warmPreviewCache_populatesFirstOpen),
+        ("Store/warmPreviewCache_primesHiddenDisplayItems", warmPreviewCache_primesHiddenDisplayItems),
+        ("Store/warmPreviewCache_limitsBackgroundCaptureBatch", warmPreviewCache_limitsBackgroundCaptureBatch),
         ("Store/warmPreviewCache_iconsOnlySkipsCaptures", warmPreviewCache_iconsOnlySkipsCaptures),
         // handleKeyDown
         ("Store/handleKeyDown_whenNotVisible_false", handleKeyDown_notVisible),
@@ -521,6 +523,7 @@ enum SwitcherStoreTests {
 
         store.requestCycle(forward: true)
         try expectEqual(store.selectedID, 3)
+        try expect(store.isVisible, "second Tab while panel show is delayed should force the panel visible")
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
 
         try? await Task.sleep(nanoseconds: 130_000_000)
@@ -861,9 +864,10 @@ enum SwitcherStoreTests {
         await openSwitcher(store)
         await runPendingMainTasks(20)
 
-        try expectEqual(catalog.captureWindowIDCalls.count, 2)
-        try expectEqual(catalog.captureWindowIDCalls[0], [2, 1, 3, 4, 5, 6, 7, 8, 9, 10].map(CGWindowID.init))
-        try expectEqual(catalog.captureWindowIDCalls[1], [CGWindowID(11), CGWindowID(12), CGWindowID(13)])
+        try expectEqual(catalog.captureWindowIDCalls.count, 3)
+        try expectEqual(catalog.captureWindowIDCalls[0], [CGWindowID(2), CGWindowID(1)])
+        try expectEqual(catalog.captureWindowIDCalls[1], [3, 4, 5, 6, 7, 8, 9, 10].map(CGWindowID.init))
+        try expectEqual(catalog.captureWindowIDCalls[2], [CGWindowID(11), CGWindowID(12), CGWindowID(13)])
     }
 
     @MainActor static func previewCapture_skipsCachedDeferredItems() async throws {
@@ -892,10 +896,11 @@ enum SwitcherStoreTests {
         await openSwitcher(store)
         await runPendingMainTasks(20)
 
-        try expectEqual(catalog.captureWindowIDCalls.count, 3)
+        try expectEqual(catalog.captureWindowIDCalls.count, 4)
         try expectEqual(catalog.captureWindowIDCalls[0], [CGWindowID(11), CGWindowID(12)])
-        try expectEqual(catalog.captureWindowIDCalls[1], [2, 1, 3, 4, 5, 6, 7, 8, 9, 10].map(CGWindowID.init))
-        try expectEqual(catalog.captureWindowIDCalls[2], [CGWindowID(13), CGWindowID(14)])
+        try expectEqual(catalog.captureWindowIDCalls[1], [CGWindowID(2), CGWindowID(1)])
+        try expectEqual(catalog.captureWindowIDCalls[2], [3, 4, 5, 6, 7, 8, 9, 10].map(CGWindowID.init))
+        try expectEqual(catalog.captureWindowIDCalls[3], [CGWindowID(13), CGWindowID(14)])
     }
 
     @MainActor static func warmPreviewCache_populatesFirstOpen() async throws {
@@ -920,6 +925,51 @@ enum SwitcherStoreTests {
 
         try expectEqual(catalog.captureCallCount, 1)
         try expect(store.items.first(where: { $0.id == 1 })?.preview === preview)
+    }
+
+    @MainActor static func warmPreviewCache_primesHiddenDisplayItems() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+        let (store, catalog, _, _) = makeStore()
+        var preparedCounts: [Int] = []
+        store.onPreparePanel = { preparedCounts.append($0) }
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        catalog.previewsToReturn = [1: preview]
+
+        await store.warmPreviewCache(context: "test")
+
+        try expect(!store.isVisible)
+        try expect(!store.isSwitching)
+        try expectEqual(store.items.map(\.id), [1, 2])
+        try expectEqual(store.selectedID, 2)
+        try expect(store.items.first(where: { $0.id == 1 })?.preview === preview)
+        try expectEqual(preparedCounts, [2, 2])
+    }
+
+    @MainActor static func warmPreviewCache_limitsBackgroundCaptureBatch() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let image = NSImage(size: CGSize(width: 8, height: 8))
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...8).map { index in
+            makeItem(id: CGWindowID(index), title: "Window \(index)", isFrontmostApp: index == 1)
+        }
+        catalog.previewsToReturn = Dictionary(uniqueKeysWithValues: (1...8).map { (CGWindowID($0), image) })
+
+        await store.warmPreviewCache(context: "test")
+
+        try expectEqual(catalog.captureCallCount, 1)
+        try expectEqual(catalog.lastCaptureWindowIDs, [1, 2, 3, 4].map(CGWindowID.init))
     }
 
     @MainActor static func warmPreviewCache_iconsOnlySkipsCaptures() async throws {
