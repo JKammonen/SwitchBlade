@@ -25,6 +25,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_slowSnapshotDoesNotPaySecondPanelDelay", requestCycle_slowSnapshotDoesNotPaySecondPanelDelay),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
+        ("Store/requestCycle_staleRefreshDoesNotShowVisiblePanelAgain", requestCycle_staleRefreshDoesNotShowVisiblePanelAgain),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
         ("Store/cachedDelayPath_mergesMinimizedAfterPanelShow", cachedDelayPath_mergesMinimized),
@@ -649,6 +650,38 @@ enum SwitcherStoreTests {
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [3, 4])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
+    }
+
+    @MainActor static func requestCycle_staleRefreshDoesNotShowVisiblePanelAgain() async throws {
+        let (store, catalog, _, _) = makeStore(cachedOpenItemsMaxAge: -1)
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        await seedOpenItemsCache(store)
+
+        var onShowCalls = 0
+        store.onShow = { onShowCalls += 1 }
+        catalog.visibleItems = [
+            makeItem(id: 3, isFrontmostApp: true),
+            makeItem(id: 4)
+        ]
+
+        store.requestCycle(forward: true)
+
+        try expect(store.isVisible)
+        try expectEqual(onShowCalls, 1)
+        try expectEqual(store.items.map(\.id), [1, 2])
+
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [3, 4])
+        try expectEqual(
+            onShowCalls,
+            1,
+            "stale-cache refresh should update the visible panel without ordering it front again"
+        )
     }
 
     @MainActor static func requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit() async throws {

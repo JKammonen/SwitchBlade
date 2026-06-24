@@ -1451,12 +1451,13 @@ final class SwitcherStore: ObservableObject {
         // Carry the incoming display staleness (from .previewHidden / .resolving)
         // into the visible phase below.
         let stale = currentShowingStale
+        let shouldShowPanel = !isVisible
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
             previewGeneration += 1
             let generation = previewGeneration
             hoverEnabled = false
             enterVisible(stale: stale)
-            schedulePanelShow(generation: generation)
+            schedulePanelShow(generation: generation, shouldShowPanel: shouldShowPanel)
             scheduleHoverEnable(generation: previewGeneration)
             scheduleMinimizedMerge()
             return
@@ -1470,7 +1471,7 @@ final class SwitcherStore: ObservableObject {
         guard !windowIDs.isEmpty else {
             hoverEnabled = false
             enterVisible(stale: stale)
-            schedulePanelShow(generation: generation)
+            schedulePanelShow(generation: generation, shouldShowPanel: shouldShowPanel)
             scheduleHoverEnable(generation: generation)
             scheduleMinimizedMerge()
             return
@@ -1490,7 +1491,7 @@ final class SwitcherStore: ObservableObject {
 
         hoverEnabled = false
         enterVisible(stale: stale)
-        schedulePanelShow(generation: generation)
+        schedulePanelShow(generation: generation, shouldShowPanel: shouldShowPanel)
         scheduleHoverEnable(generation: generation)
         scheduleMinimizedMerge()
 
@@ -1657,8 +1658,9 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func schedulePanelShow(generation: Int) {
+    private func schedulePanelShow(generation: Int, shouldShowPanel: Bool) {
         guard isVisible, previewGeneration == generation else { return }
+        guard shouldShowPanel else { return }
         onShow?()
         recordPanelVisibleMetric(itemCount: items.count)
     }
