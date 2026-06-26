@@ -250,7 +250,11 @@ enum CaptureTimeoutTests {
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2, 3])
-        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
+        try expectEqual(
+            catalog.visibleSnapshotCount,
+            baselineSnapshots + 2,
+            "current-app multi-window open should validate the warm cache before showing it"
+        )
     }
 
     @MainActor static func storeForwardsLifecycleInvalidation() async throws {

@@ -225,7 +225,11 @@ final class SwitcherStore: ObservableObject {
         let visibleSnapshot = await snapshotVisibleOnlyOffMain()
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview"))
-        let stabilizedItems = stabilizeBackgroundWarmupOrder(orderedItems, context: context)
+        let stabilizedItems = stabilizeBackgroundWarmupOrder(
+            orderedItems,
+            context: context,
+            retainMissingCurrentAppWindows: true
+        )
         updateCachedOpenItems(stabilizedItems)
         let windowIDs = stabilizedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
@@ -328,7 +332,16 @@ final class SwitcherStore: ObservableObject {
                 Logger.switcher.info(
                     "Bypassing cached open items after external activation changed the frontmost app"
                 )
-                openFromFreshSnapshotOffMain()
+                openFromFreshSnapshotOffMain(
+                    stabilizeWithCachedOrder: cachedOpenItemsRequireFreshSnapshotForCurrentApp()
+                )
+                return
+            }
+            if cachedOpenItemsRequireFreshSnapshotForCurrentApp() {
+                Logger.switcher.info(
+                    "Bypassing cached open items for current multi-window app"
+                )
+                openFromFreshSnapshotOffMain(stabilizeWithCachedOrder: true)
                 return
             }
             let cacheIsFresh = isCachedOpenItemsFresh()
@@ -973,7 +986,7 @@ final class SwitcherStore: ObservableObject {
         // `previewGeneration == generation` would always fail.
     }
 
-    private func openFromFreshSnapshotOffMain() {
+    private func openFromFreshSnapshotOffMain(stabilizeWithCachedOrder: Bool = false) {
         openRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
@@ -992,7 +1005,16 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
 
             let orderStart = Date()
-            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot"))
+            let snapshotOrderedItems = self.orderItems(
+                self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot")
+            )
+            let orderedItems = stabilizeWithCachedOrder
+                ? self.stabilizeBackgroundWarmupOrder(
+                    snapshotOrderedItems,
+                    context: "current-app-cache-validation",
+                    retainMissingCurrentAppWindows: false
+                )
+                : snapshotOrderedItems
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             self.openFromOrderedItems(
                 orderedItems,
@@ -1200,7 +1222,11 @@ final class SwitcherStore: ObservableObject {
                 )
             )
             guard !Task.isCancelled, !orderedItems.isEmpty else { return }
-            let stabilizedItems = self.stabilizeBackgroundWarmupOrder(orderedItems, context: context)
+            let stabilizedItems = self.stabilizeBackgroundWarmupOrder(
+                orderedItems,
+                context: context,
+                retainMissingCurrentAppWindows: true
+            )
             self.updateCachedOpenItems(stabilizedItems)
             let ms = Date().timeIntervalSince(start) * 1000
             if PerformanceLoggingState.mode != .off {
@@ -1211,7 +1237,11 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func stabilizeBackgroundWarmupOrder(_ orderedItems: [WindowItem], context: String) -> [WindowItem] {
+    private func stabilizeBackgroundWarmupOrder(
+        _ orderedItems: [WindowItem],
+        context: String,
+        retainMissingCurrentAppWindows: Bool
+    ) -> [WindowItem] {
         guard let frontmost = orderedItems.first else { return orderedItems }
 
         let cachedSameAppCount = cachedOpenItems.filter { $0.pid == frontmost.pid }.count
@@ -1228,7 +1258,8 @@ final class SwitcherStore: ObservableObject {
                 continue
             }
 
-            guard cachedItem.pid == frontmost.pid,
+            guard retainMissingCurrentAppWindows,
+                  cachedItem.pid == frontmost.pid,
                   usedIDs.insert(cachedItem.id).inserted else { continue }
             stabilized.append(cachedItem)
         }
@@ -1336,6 +1367,11 @@ final class SwitcherStore: ObservableObject {
         let currentItem = items.remove(at: currentIndex)
         items.insert(currentItem, at: 0)
         return items
+    }
+
+    private func cachedOpenItemsRequireFreshSnapshotForCurrentApp() -> Bool {
+        guard let currentAppPID else { return false }
+        return cachedOpenItems.filter { $0.pid == currentAppPID }.count > 1
     }
 
     private func recordPreviousSwitchDispatch(

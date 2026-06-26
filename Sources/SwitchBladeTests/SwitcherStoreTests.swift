@@ -25,6 +25,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_slowSnapshotDoesNotPaySecondPanelDelay", requestCycle_slowSnapshotDoesNotPaySecondPanelDelay),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
+        ("Store/requestCycle_currentAppMultiWindowCacheUsesFreshSnapshot", requestCycle_currentAppMultiWindowCacheUsesFreshSnapshot),
         ("Store/requestCycle_staleRefreshDoesNotShowVisiblePanelAgain", requestCycle_staleRefreshDoesNotShowVisiblePanelAgain),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
@@ -649,6 +650,33 @@ enum SwitcherStoreTests {
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [3, 4])
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
+    }
+
+    @MainActor static func requestCycle_currentAppMultiWindowCacheUsesFreshSnapshot() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, title: "Main", isFrontmostApp: true),
+            makeItem(id: 2, pid: 100, title: "Dialog", isFrontmostApp: true),
+            makeItem(id: 3, pid: 200, title: "Other")
+        ]
+        await seedOpenItemsCache(store)
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, title: "Main", isFrontmostApp: true),
+            makeItem(id: 3, pid: 200, title: "Other")
+        ]
+
+        store.requestCycle(forward: true)
+
+        try expect(!store.isVisible, "current-app multi-window cache should wait for a fresh snapshot")
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [1, 3])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
     }
 
