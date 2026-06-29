@@ -82,7 +82,7 @@ final class MRUTracker {
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
         let currentFrontmostIdentity = appIdentity(for: currentFrontmost)
-        let replayRanks = frontmostConcreteRanksFirst(
+        let replayRanks = replayRanksForDisplay(
             currentFrontmostIdentity: currentFrontmostIdentity
         )
         for (rankIndex, rank) in replayRanks {
@@ -313,22 +313,65 @@ final class MRUTracker {
         item.bundleIdentifier ?? item.appName
     }
 
-    private func frontmostConcreteRanksFirst(
+    private func replayRanksForDisplay(
         currentFrontmostIdentity: String
     ) -> [(offset: Int, element: RankEntry)] {
-        let concreteSameAppRanks = recentRanks.enumerated().filter { _, rank in
-            rank.appIdentity == currentFrontmostIdentity
-                && (rank.windowID != nil || rank.signature != nil)
-        }
-        guard !concreteSameAppRanks.isEmpty else {
-            return Array(recentRanks.enumerated())
+        // Identity-only activation ranks are coarse app-level hints. They may
+        // defer behind the immediately adjacent concrete ranks of the current
+        // frontmost app, but they must not gather every sibling window for that
+        // app from deeper in the MRU chain.
+        var replayRanks: [(offset: Int, element: RankEntry)] = []
+        var index = recentRanks.startIndex
+
+        while index < recentRanks.endIndex {
+            let rank = recentRanks[index]
+
+            if isIdentityOnly(rank), rank.appIdentity != currentFrontmostIdentity {
+                let nextIndex = recentRanks.index(after: index)
+                let frontmostConcreteRun = adjacentFrontmostConcreteRanks(
+                    startingAt: nextIndex,
+                    identity: currentFrontmostIdentity
+                )
+                if let lastRunIndex = frontmostConcreteRun.last?.offset {
+                    replayRanks.append(contentsOf: frontmostConcreteRun)
+                    replayRanks.append((index, rank))
+                    index = recentRanks.index(after: lastRunIndex)
+                    continue
+                }
+            }
+
+            replayRanks.append((index, rank))
+            index = recentRanks.index(after: index)
         }
 
-        let concreteSameAppRankIndexes = Set(concreteSameAppRanks.map(\.offset))
-        let remainingRanks = recentRanks.enumerated().filter { index, _ in
-            !concreteSameAppRankIndexes.contains(index)
+        return replayRanks
+    }
+
+    private func adjacentFrontmostConcreteRanks(
+        startingAt startIndex: Int,
+        identity: String
+    ) -> [(offset: Int, element: RankEntry)] {
+        var ranks: [(offset: Int, element: RankEntry)] = []
+        var index = startIndex
+
+        while index < recentRanks.endIndex {
+            let rank = recentRanks[index]
+            guard rank.appIdentity == identity, isConcrete(rank) else {
+                break
+            }
+            ranks.append((index, rank))
+            index = recentRanks.index(after: index)
         }
-        return concreteSameAppRanks + remainingRanks
+
+        return ranks
+    }
+
+    private func isIdentityOnly(_ rank: RankEntry) -> Bool {
+        rank.windowID == nil && rank.signature == nil
+    }
+
+    private func isConcrete(_ rank: RankEntry) -> Bool {
+        rank.windowID != nil || rank.signature != nil
     }
 
     private func diagnosticEntry(for item: WindowItem, rank: Int, reason: String) -> String {

@@ -7,7 +7,8 @@ enum PerformanceDiagnosticsTests {
         ("PerformanceDiagnostics/metricLine_includesTimestampEventAndFields", lineIncludesTimestampEventAndFields),
         ("PerformanceDiagnostics/metricLine_serializesEachValueType", lineSerializesEachValueType),
         ("PerformanceDiagnostics/metricLine_sortsKeys", lineSortsKeys),
-        ("PerformanceDiagnostics/metricLine_endsWithNewline", lineEndsWithNewline)
+        ("PerformanceDiagnostics/metricLine_endsWithNewline", lineEndsWithNewline),
+        ("PerformanceDiagnostics/panelHideMetric_containsTimingBreakdown", panelHideMetricContainsTimingBreakdown)
     ]
 
     private static func decode(
@@ -84,5 +85,29 @@ enum PerformanceDiagnosticsTests {
         try expectEqual(line.last, 0x0A)
         // Exactly one newline — the line is one JSONL record.
         try expectEqual(line.filter { $0 == 0x0A }.count, 1)
+    }
+
+    static func panelHideMetricContainsTimingBreakdown() throws {
+        let line = try PerformanceDiagnostics.metricLine(
+            event: "panel_hide",
+            fields: [
+                "click_monitor_ms": .double(1.0),
+                "flush_ms": .double(2.0),
+                "milliseconds": .double(7.5),
+                "order_out_ms": .double(3.0),
+                "transaction_ms": .double(1.5),
+                "was_visible": .bool(true)
+            ],
+            timestamp: "2026-06-29T12:00:00.000Z"
+        )
+        let object = try decode(line)
+
+        try expectEqual(object["event"] as? String, "panel_hide")
+        try expectEqual(object["click_monitor_ms"] as? Double, 1.0)
+        try expectEqual(object["flush_ms"] as? Double, 2.0)
+        try expectEqual(object["milliseconds"] as? Double, 7.5)
+        try expectEqual(object["order_out_ms"] as? Double, 3.0)
+        try expectEqual(object["transaction_ms"] as? Double, 1.5)
+        try expectEqual(object["was_visible"] as? Bool, true)
     }
 }

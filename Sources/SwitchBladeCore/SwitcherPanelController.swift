@@ -218,23 +218,43 @@ final class SwitcherPanelController {
     }
 
     func hide() {
+        let panelWasVisible = panel.isVisible
         keyWindowVerificationTask?.cancel()
         keyWindowVerificationTask = nil
         let start = Date()
+        let clickMonitorStart = Date()
         clickMonitor.stop()
+        let clickMonitorMs = Date().timeIntervalSince(clickMonitorStart) * 1000
+        let transactionStart = Date()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         panel.alphaValue = 0
         hostingView.layer?.opacity = 0
         cardMaskLayer.opacity = 0
         CATransaction.commit()
+        let transactionMs = Date().timeIntervalSince(transactionStart) * 1000
+        let orderOutStart = Date()
         panel.orderOut(nil)
+        let orderOutMs = Date().timeIntervalSince(orderOutStart) * 1000
+        let flushStart = Date()
         CATransaction.flush()
+        let flushMs = Date().timeIntervalSince(flushStart) * 1000
 
         let ms = Date().timeIntervalSince(start) * 1000
+        PerformanceDiagnostics.record(
+            "panel_hide",
+            fields: [
+                "click_monitor_ms": .double(clickMonitorMs),
+                "flush_ms": .double(flushMs),
+                "milliseconds": .double(ms),
+                "order_out_ms": .double(orderOutMs),
+                "transaction_ms": .double(transactionMs),
+                "was_visible": .bool(panelWasVisible)
+            ]
+        )
         if ms > 20 {
             Logger.switcher.notice(
-                "Panel hide slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+                "Panel hide slow: \(ms, format: .fixed(precision: 1), privacy: .public) ms; clickMonitor=\(clickMonitorMs, format: .fixed(precision: 1), privacy: .public), transaction=\(transactionMs, format: .fixed(precision: 1), privacy: .public), orderOut=\(orderOutMs, format: .fixed(precision: 1), privacy: .public), flush=\(flushMs, format: .fixed(precision: 1), privacy: .public)"
             )
         }
     }

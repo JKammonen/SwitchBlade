@@ -731,29 +731,41 @@ final class SwitcherStore: ObservableObject {
         updateCachedSelectionState: Bool = false,
         action: @escaping (WindowActivating, WindowItem) -> Void
     ) {
+        let actionStart = Date()
         let liveItems = liveItems ?? items
         let actionSource = source ?? currentOpenSource ?? "unknown"
         Logger.switcher.info(
             "Schedule selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
+        let rememberStart = Date()
         mruTracker.rememberSelection(
             item.id,
             in: liveItems,
             context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
         )
+        let rememberMs = Date().timeIntervalSince(rememberStart) * 1000
+        let cacheSyncStart = Date()
         if updateCachedSelectionState {
             syncCachedOpenStateAfterSelection(item, liveItems: liveItems)
         }
+        let cacheSyncMs = Date().timeIntervalSince(cacheSyncStart) * 1000
         let scheduledAt = Date()
         hide()
         let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
+        let preHideMs = scheduledAt.timeIntervalSince(actionStart) * 1000
+        let totalPrepareMs = Date().timeIntervalSince(actionStart) * 1000
         PerformanceDiagnostics.record(
             "selection_action_dispatch",
             fields: [
                 "action": .string(actionName),
+                "cache_sync_ms": .double(cacheSyncMs),
                 "dispatch_delay_ms": .double(dispatchDelayMs),
+                "hide_ms": .double(dispatchDelayMs),
                 "pid": .int(Int(item.pid)),
+                "pre_hide_ms": .double(preHideMs),
+                "remember_ms": .double(rememberMs),
                 "source": .string(actionSource),
+                "total_prepare_ms": .double(totalPrepareMs),
                 "window_id": .int(Int(item.id))
             ]
         )
