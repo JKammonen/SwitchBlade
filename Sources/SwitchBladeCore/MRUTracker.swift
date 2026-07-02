@@ -101,15 +101,19 @@ final class MRUTracker {
             }
 
             if let signature = rank.signature,
-               var matches = remainingBySignature[signature],
-               let matchIndex = matches.firstIndex(where: { !seen.contains($0.id) }) {
-                let item = matches.remove(at: matchIndex)
-                remainingBySignature[signature] = matches
-                seen.insert(item.id)
-                ordered.append(item)
-                diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "rankSignature:\(rankIndex)"))
-                reasonCounts["rank_signature", default: 0] += 1
-                continue
+               var matches = remainingBySignature[signature] {
+                let unseenSignatureMatches = matches.filter { !seen.contains($0.id) }
+                if unseenSignatureMatches.count == 1,
+                   let item = unseenSignatureMatches.first,
+                   let matchIndex = matches.firstIndex(where: { $0.id == item.id }) {
+                    matches.remove(at: matchIndex)
+                    remainingBySignature[signature] = matches
+                    seen.insert(item.id)
+                    ordered.append(item)
+                    diagnostics.append(diagnosticEntry(for: item, rank: ordered.count - 1, reason: "rankSignature:\(rankIndex)"))
+                    reasonCounts["rank_signature", default: 0] += 1
+                    continue
+                }
             }
 
             let identity = rank.appIdentity

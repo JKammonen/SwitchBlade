@@ -15,6 +15,7 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_sameAppSwitchMovesSelectedWindowOnly", sameAppSwitchMovesSelectedWindowOnly),
         ("MRU/orderedForDisplay_transientMissingWindow_keepsRankWhenItReturns", transientMissingWindowKeepsRank),
         ("MRU/orderedForDisplay_recreatedWindow_keepsRankBySignature", recreatedWindowKeepsRankBySignature),
+        ("MRU/orderedForDisplay_ambiguousDuplicateSignatureDoesNotGuess", ambiguousDuplicateSignatureDoesNotGuess),
         ("MRU/orderedForDisplay_singleWindowTitleChange_keepsRankByAppIdentity", singleWindowTitleChangeKeepsRankByAppIdentity),
         ("MRU/orderedForDisplay_sameAppSiblingSeen_recreatedOtherWindowKeepsRankByIdentity", sameAppSiblingSeenRecreatedOtherWindowKeepsRankByIdentity),
         ("MRU/orderedForDisplay_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowTitleChangeDoesNotGuessByAppIdentity),
@@ -246,6 +247,27 @@ enum MRUTrackerTests {
 
         let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
         try expectEqual(ordered.map(\.id), [1, 20, 3])
+    }
+
+    @MainActor static func ambiguousDuplicateSignatureDoesNotGuess() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 2, pid: 200, appName: "Browser", title: "New Tab"),
+            makeItem(id: 3, pid: 300, appName: "Docs", title: "Guide"),
+            makeItem(id: 4, pid: 200, appName: "Browser", title: "New Tab")
+        ]
+        tracker.rememberSelection(2, in: initialSnapshot)
+
+        let recreatedSnapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", title: "Project", isFrontmostApp: true),
+            makeItem(id: 3, pid: 300, appName: "Docs", title: "Guide"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "New Tab"),
+            makeItem(id: 40, pid: 200, appName: "Browser", title: "New Tab")
+        ]
+
+        let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
+        try expectEqual(ordered.map(\.id), [1, 3, 20, 40])
     }
 
     @MainActor static func singleWindowTitleChangeKeepsRankByAppIdentity() throws {
