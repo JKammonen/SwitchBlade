@@ -35,6 +35,8 @@ enum MRUTrackerTests {
         ("MRU/dropAllRanksForApp_clearsRanksAndBundle", dropAllRanksForApp),
         ("MRU/rememberSelection_nilBundleID_writesRanksSkipsBundleList", rememberSelectionNilBundle),
         ("MRU/rememberSelection_preservesRanksForWindowsMissingFromStaleLiveItems", rememberSelectionPreservesMissing),
+        ("MRU/rememberSelection_staleListMissingWindow_doesNotDemoteItsRank", staleListMissingWindowDoesNotDemoteRank),
+        ("MRU/rememberSelection_movesOnlySelectedRank", rememberSelectionMovesOnlySelectedRank),
         ("MRU/orderedForDisplay_emptySnapshot_returnsEmpty", orderedForDisplayEmpty),
         ("MRU/orderedForDisplay_noFrontmostFlag_usesFirstInSnapshot", orderedForDisplayNoFrontmost)
     ]
@@ -126,6 +128,10 @@ enum MRUTrackerTests {
             makeItem(id: 1, pid: 100),                          // terminal-A
             makeItem(id: 2, pid: 100),                          // terminal-B
         ]
+        // Build the existing chain through real selections (terminal-B, then
+        // browser), so the chain reads [3, 2] before the switch.
+        tracker.rememberSelection(2, in: snapshotFromBrowser)
+        tracker.rememberSelection(3, in: snapshotFromBrowser)
         tracker.rememberSelection(1, in: snapshotFromBrowser)
 
         // After switch: terminal-A is frontmost.
@@ -145,9 +151,9 @@ enum MRUTrackerTests {
     // ovat aiemmin olleet ketjussa eri kohdissa".
     @MainActor static func sameAppWindowsNotBundled() throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
-        // Snapshot in interleaved order: terminal (frontmost), slack, browser-A,
-        // editor, browser-B. After rememberSelection(10) the MRU chain reflects
-        // this interleaving (rememberSelection seeds from liveItems order).
+        // Interleaved usage history: browser-B, editor, browser-A, slack,
+        // terminal — selected oldest-first so the chain interleaves the two
+        // browser windows with other apps.
         let snapshot = [
             makeItem(id: 10, pid: 100, isFrontmostApp: true),  // terminal (frontmost)
             makeItem(id: 40, pid: 400),                          // slack
@@ -155,12 +161,25 @@ enum MRUTrackerTests {
             makeItem(id: 30, pid: 300),                          // editor
             makeItem(id: 21, pid: 200),                          // browser-B
         ]
+        tracker.rememberSelection(21, in: snapshot)
+        tracker.rememberSelection(30, in: snapshot)
+        tracker.rememberSelection(20, in: snapshot)
+        tracker.rememberSelection(40, in: snapshot)
         tracker.rememberSelection(10, in: snapshot)
         // recentWindowIDs = [10, 40, 20, 30, 21] — browser-A and browser-B are
         // at positions 3 and 5, NOT adjacent.
 
-        let ordered = tracker.orderedForDisplay(from: snapshot)
-        // Expected: same interleaved order preserved. browser-A and browser-B
+        // Display snapshot arrives in a different z-order; the chain, not the
+        // snapshot, must drive the result.
+        let displaySnapshot = [
+            makeItem(id: 10, pid: 100, isFrontmostApp: true),
+            makeItem(id: 21, pid: 200),
+            makeItem(id: 20, pid: 200),
+            makeItem(id: 30, pid: 300),
+            makeItem(id: 40, pid: 400),
+        ]
+        let ordered = tracker.orderedForDisplay(from: displaySnapshot)
+        // Expected: interleaved chain order preserved. browser-A and browser-B
         // are NOT bundled adjacent — each keeps its independent MRU rank.
         try expectEqual(ordered.map(\.id), [10, 40, 20, 30, 21])
     }
@@ -454,6 +473,9 @@ enum MRUTrackerTests {
             makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", bundleIdentifier: "com.microsoft.Outlook"),
             makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser")
         ]
+        // Both Outlook windows carry concrete ranks from real selections; the
+        // chain reads [10, 11] before the browser activation.
+        tracker.rememberSelection(11, in: initialSnapshot)
         tracker.rememberSelection(10, in: initialSnapshot)
 
         tracker.trackSystemActivation(200, in: [], bundleIdentifier: "com.example.browser")
@@ -478,6 +500,13 @@ enum MRUTrackerTests {
             makeItem(id: 400, pid: 40, appName: "Safari", title: "Docs", bundleIdentifier: "com.apple.Safari"),
             makeItem(id: 202, pid: 20, appName: "Finder", title: "Documents", bundleIdentifier: "com.apple.finder")
         ]
+        // Interleaved usage history oldest-first so every window holds its own
+        // concrete rank: chain reads [200, 100, 300, 201, 400, 202].
+        tracker.rememberSelection(202, in: initialSnapshot)
+        tracker.rememberSelection(400, in: initialSnapshot)
+        tracker.rememberSelection(201, in: initialSnapshot)
+        tracker.rememberSelection(300, in: initialSnapshot)
+        tracker.rememberSelection(100, in: initialSnapshot)
         tracker.rememberSelection(200, in: initialSnapshot)
 
         tracker.trackSystemActivation(20, in: [], bundleIdentifier: "com.apple.finder")
@@ -528,6 +557,7 @@ enum MRUTrackerTests {
         ]
         tracker.rememberSelection(2, in: snapshot)
         tracker.rememberSelection(3, in: snapshot)
+        tracker.rememberSelection(1, in: snapshot)
 
         // Only item 1 is still alive.
         tracker.pruneToLive([makeItem(id: 1, isFrontmostApp: true)])
@@ -549,6 +579,7 @@ enum MRUTrackerTests {
             makeItem(id: 1, appName: "Terminal", title: "A", isFrontmostApp: true),
             makeItem(id: 2, appName: "Terminal", title: "B")
         ]
+        tracker.rememberSelection(1, in: snapshot)
         tracker.rememberSelection(2, in: snapshot)
         try expect(!tracker.recentWindowSignatures.isEmpty)
         tracker.pruneToLive([makeItem(id: 1, appName: "Terminal", title: "A", isFrontmostApp: true)])
@@ -584,11 +615,13 @@ enum MRUTrackerTests {
             makeItem(id: 3, pid: 300),
             makeItem(id: 4, pid: 400)
         ]
-        // Establish per-window MRU; window 4 holds the tail rank.
+        // Establish per-window MRU through real selections: chain reads [3, 4].
+        tracker.rememberSelection(4, in: fullSnapshot)
         tracker.rememberSelection(3, in: fullSnapshot)
 
         // Stale cached list shown to the user — window 4 is missing (warmup
-        // captured a moment when CGWindowList didn't enumerate it).
+        // captured a moment when CGWindowList didn't enumerate it). Committing
+        // from it must not demote 4's rank.
         let staleLiveItems = [
             makeItem(id: 3, pid: 300, isFrontmostApp: true),
             makeItem(id: 1, pid: 100),
@@ -597,7 +630,8 @@ enum MRUTrackerTests {
         tracker.rememberSelection(2, in: staleLiveItems)
 
         // A brand-new window 5 appears alongside the rediscovered 4. The
-        // genuinely-new window should fall to the tail; 4 must keep its rank.
+        // genuinely-new window falls behind every ranked window; 4 keeps its
+        // chain position right after 3.
         let nextSnapshot = [
             makeItem(id: 2, pid: 200, isFrontmostApp: true),
             makeItem(id: 5, pid: 500),
@@ -606,7 +640,64 @@ enum MRUTrackerTests {
             makeItem(id: 4, pid: 400)
         ]
         let ordered = tracker.orderedForDisplay(from: nextSnapshot)
-        try expectEqual(ordered.map(\.id), [2, 3, 1, 4, 5])
+        try expectEqual(ordered.map(\.id), [2, 3, 4, 5, 1])
+    }
+
+    // THE tail-drift regression: committing from a partial list (minimized
+    // merge pending, other Space filtered, stale cache) must not demote the
+    // ranks of windows that happen to be absent. The old full-rewrite
+    // semantics pushed every absent rank behind all live windows.
+    @MainActor static func staleListMissingWindowDoesNotDemoteRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let fullSnapshot = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300),
+            makeItem(id: 4, pid: 400)
+        ]
+        // Usage history oldest-first: chain reads [4, 3, 2, 1].
+        tracker.rememberSelection(1, in: fullSnapshot)
+        tracker.rememberSelection(2, in: fullSnapshot)
+        tracker.rememberSelection(3, in: fullSnapshot)
+        tracker.rememberSelection(4, in: fullSnapshot)
+
+        // Quick-release commit from a partial list: window 2 is absent.
+        let partialLiveItems = [
+            makeItem(id: 4, pid: 400, isFrontmostApp: true),
+            makeItem(id: 3, pid: 300),
+            makeItem(id: 1, pid: 100)
+        ]
+        tracker.rememberSelection(3, in: partialLiveItems)
+
+        let nextSnapshot = [
+            makeItem(id: 3, pid: 300, isFrontmostApp: true),
+            makeItem(id: 1, pid: 100),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 4, pid: 400)
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+        // Old full-rewrite semantics produced [3, 4, 1, 2] — 2 demoted to the tail.
+        try expectEqual(ordered.map(\.id), [3, 4, 2, 1])
+    }
+
+    // Selecting a window moves exactly one rank; every other rank keeps both
+    // its relative order and its position.
+    @MainActor static func rememberSelectionMovesOnlySelectedRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let fullSnapshot = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300),
+            makeItem(id: 4, pid: 400)
+        ]
+        tracker.rememberSelection(1, in: fullSnapshot)
+        tracker.rememberSelection(2, in: fullSnapshot)
+        tracker.rememberSelection(3, in: fullSnapshot)
+        tracker.rememberSelection(4, in: fullSnapshot)  // chain [4, 3, 2, 1]
+
+        tracker.rememberSelection(1, in: fullSnapshot)  // re-select the tail window
+
+        try expectEqual(tracker.recentWindowIDs, [1, 4, 3, 2])
     }
 
     @MainActor static func orderedForDisplayEmpty() throws {

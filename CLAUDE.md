@@ -143,6 +143,13 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `activation_frontmost_observed`; app activation alone is not enough evidence.
 - **Window scope feels wrong** → Settings → Behavior → Window scope. Choices are
   current Space, all Spaces, and current app.
+- **Windows land in the wrong order / at the tail** → with performance logging on
+  debug, `mru_order` rows in `performance.jsonl` record the reason per window
+  (`frontmost`, `rankID`, `rankSignature`, `rankSingleAppIdentity`,
+  `persistedBundle`, `snapshotFallback`) plus skipped ranks; `mru_remember` rows
+  record each selection commit. `snapshotFallback` = the window had no usable
+  rank. os_log debug lines are NOT persisted — jsonl is the only retrospective
+  channel.
 - **Permission dialog reappears** → never add `CGRequest*` calls. Use `CGPreflight*` +
   NSAlert that links to System Settings.
 - **Single window jumps to switcher tail** → check whether the app recreates its
