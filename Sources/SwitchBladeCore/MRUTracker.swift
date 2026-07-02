@@ -31,6 +31,12 @@ final class MRUTracker {
         recentRanks.compactMap(\.signature)
     }
 
+    /// App identities that currently hold only a coarse activation rank
+    /// (no window ID, no signature). Diagnostic surface for tests and logs.
+    var identityOnlyRankIdentities: [String] {
+        recentRanks.filter(isIdentityOnly).map(\.appIdentity)
+    }
+
     private(set) var recentBundleIDs: [String]
 
     private let maxBundles: Int
@@ -180,24 +186,48 @@ final class MRUTracker {
             return
         }
 
-        // ID match only. Rebinding by signature would let a same-titled
-        // sibling steal the rank of a window that is merely absent from a
-        // partial `liveItems` list (minimized, other Space) — absence here
-        // never proves death. Recreated windows recover via the display-side
-        // signature fallback in `orderedForDisplay` instead.
-        let existingIndex = recentRanks.firstIndex(where: { $0.windowID == item.id })
-        var selectedRank = existingIndex.map { recentRanks.remove(at: $0) }
-            ?? RankEntry(windowID: nil, signature: nil, appIdentity: appIdentity(for: item))
-        selectedRank.windowID = item.id
-        selectedRank.signature = signature(for: item)
-        recentRanks.insert(selectedRank, at: 0)
-
+        let existingIndex = promoteConcreteRank(for: item)
         refreshLiveRankBindings(liveItems: liveItems, excluding: item.id)
         trimRanksToCapacity()
         logRememberSelection(item, movedFromIndex: existingIndex, liveItems: liveItems, context: context)
 
         guard let bundleID = item.bundleIdentifier else { return }
         promoteRecentBundle(bundleID)
+    }
+
+    /// Records a concrete rank for the window an external activation (click,
+    /// Dock) landed on. `trackSystemActivation` records the coarse app-level
+    /// hint immediately; this upgrade replaces it once the focused window has
+    /// been resolved via AX — without it, windows of multi-window apps used
+    /// outside the switcher never gain per-window rank and sink toward the
+    /// snapshot tail.
+    func trackFocusedWindowActivation(_ item: WindowItem, context: String = "system-activation-focus") {
+        let movedFromIndex = promoteConcreteRank(for: item)
+        trimRanksToCapacity()
+        logRememberSelection(item, movedFromIndex: movedFromIndex, liveItems: [item], context: context)
+
+        guard let bundleID = item.bundleIdentifier else { return }
+        promoteRecentBundle(bundleID)
+    }
+
+    /// Moves the concrete rank for `item` to the front, creating it if needed.
+    /// ID match only: rebinding by signature would let a same-titled sibling
+    /// steal the rank of a window that is merely absent from a partial list —
+    /// absence never proves death. Recreated windows recover via the
+    /// display-side signature fallback in `orderedForDisplay` instead.
+    /// Also drops the app's identity-only rank: once the exact window is
+    /// known, the coarse app-level hint would only pull an unrelated sibling
+    /// forward on the next open.
+    private func promoteConcreteRank(for item: WindowItem) -> Int? {
+        let existingIndex = recentRanks.firstIndex(where: { $0.windowID == item.id })
+        var selectedRank = existingIndex.map { recentRanks.remove(at: $0) }
+            ?? RankEntry(windowID: nil, signature: nil, appIdentity: appIdentity(for: item))
+        selectedRank.windowID = item.id
+        selectedRank.signature = signature(for: item)
+        let identity = appIdentity(for: item)
+        recentRanks.removeAll { $0.appIdentity == identity && isIdentityOnly($0) }
+        recentRanks.insert(selectedRank, at: 0)
+        return existingIndex
     }
 
     /// Refreshes the signature bound to each live window's ID-matched rank so

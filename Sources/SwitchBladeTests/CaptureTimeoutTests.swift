@@ -13,6 +13,8 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
         ("ActivationRefresh/handleAppActivation_rewarmsPreviewCacheAfterInvalidation", activationRewarmsPreviewCacheAfterInvalidation),
         ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
+        ("ActivationRefresh/selfInitiatedWindowSwitch_addsNoIdentityRank", activation_selfInitiatedWindowSwitchAddsNoIdentityRank),
+        ("ActivationRefresh/externalActivation_upgradesToFocusedWindowRank", activation_externalActivationUpgradesToFocusedWindowRank),
         ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation)
@@ -207,6 +209,47 @@ enum CaptureTimeoutTests {
         store.handleAppActivation(pid: 300)
         await openSwitcher(store)
         try expectEqual(store.items.map(\.id), [1, 2, 3])
+    }
+
+    /// The activation notification for a window SwitchBlade itself just
+    /// activated must not stack an identity-only rank on top of the concrete
+    /// rank rememberSelection recorded at commit — nor kick the AX upgrade.
+    @MainActor static func activation_selfInitiatedWindowSwitchAddsNoIdentityRank() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser"),
+            makeItem(id: 3, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser")
+        ]
+        await openSwitcher(store)
+        store.selectedID = 2
+        store.commitSelection()
+        await runPendingMainTasks()
+
+        store.handleAppActivation(pid: 200)
+        await runPendingMainTasks()
+
+        try expectEqual(tracker.recentWindowIDs.first, 2)
+        try expectEqual(tracker.identityOnlyRankIdentities, [])
+        try expectEqual(catalog.focusedWindowItemCallCount, 0)
+    }
+
+    /// An external activation (click, Dock) names only the app. The store
+    /// records the coarse identity rank immediately, then upgrades it to the
+    /// AX-resolved focused window so multi-window apps gain per-window rank.
+    @MainActor static func activation_externalActivationUpgradesToFocusedWindowRank() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+        let focused = makeItem(id: 31, pid: 300, appName: "Notes", title: "Plan", bundleIdentifier: "com.example.notes")
+        catalog.focusedWindowItemsByPID[300] = focused
+
+        store.handleAppActivation(pid: 300)
+        await runPendingMainTasks()
+
+        try expectEqual(tracker.recentWindowIDs.first, 31)
+        try expectEqual(tracker.identityOnlyRankIdentities, [])
+        try expectEqual(tracker.recentBundleIDs.first, "com.example.notes")
     }
 
     /// Regression guard: the post-activation open-items warmup is a background

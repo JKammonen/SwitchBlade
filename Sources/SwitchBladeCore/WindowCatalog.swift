@@ -392,6 +392,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     /// Fast path used on the Cmd+Tab critical path. Skips the AX walk for
     /// minimized windows entirely; merge those in lazily via `snapshotMinimized`.
+    /// One AX cost remains: the frontmost app's focused-window probe in
+    /// `normalizeFrontmostWindowOrder`, only when that app has several visible
+    /// windows, bounded by the 0.25 s messaging timeout and reported as
+    /// `ax_ms` in the `frontmost_focus_normalize` metric.
     func snapshotVisibleOnly() -> [WindowItem] {
         snapshotInternal(includeMinimized: false).visible
     }
@@ -511,7 +515,127 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 sharingStateIndex: WindowSharingStateIndex(rawList: rawList)
             )
             : []
-        return SnapshotResult(visible: visibleItems, minimized: minimized)
+        return SnapshotResult(
+            visible: normalizeFrontmostWindowOrder(visibleItems, frontmostPID: frontmostPID),
+            minimized: minimized
+        )
+    }
+
+    /// CGWindowList z-order lags briefly after an activation: the frontmost
+    /// app's previously-front sibling can still be listed first, and
+    /// `orderedForDisplay` anchors slot 0 on the first same-pid row. When the
+    /// frontmost app has several visible windows, resolve its AX-focused
+    /// window and move it ahead of its siblings so slot 0 is the window that
+    /// actually has focus.
+    private func normalizeFrontmostWindowOrder(_ items: [WindowItem], frontmostPID: pid_t?) -> [WindowItem] {
+        guard let frontmostPID else { return items }
+        let siblingCount = items.reduce(0) { $0 + ($1.pid == frontmostPID ? 1 : 0) }
+        guard siblingCount > 1 else { return items }
+
+        let axStart = Date()
+        let focusInfo = focusedAXWindowInfo(pid: frontmostPID)
+        let axMs = Date().timeIntervalSince(axStart) * 1000
+        let focused = focusInfo.flatMap {
+            Self.focusedWindowMatch(
+                in: items,
+                pid: frontmostPID,
+                focusedTitle: $0.title,
+                focusedFrame: $0.frame
+            )
+        }
+        let normalized = focused.map {
+            Self.promotingWindow($0.id, in: items, beforeSiblingsOf: frontmostPID)
+        } ?? items
+        PerformanceDiagnostics.record(
+            "frontmost_focus_normalize",
+            fields: [
+                "ax_ms": .double(axMs),
+                "ax_resolved": .bool(focusInfo != nil),
+                "matched": .bool(focused != nil),
+                "moved": .bool(normalized.map(\.id) != items.map(\.id)),
+                "pid": .int(Int(frontmostPID)),
+                "sibling_count": .int(siblingCount)
+            ]
+        )
+        return normalized
+    }
+
+    /// Matches the AX-focused window info against `items` (same pid, visible
+    /// only). Exact title match first; frame proximity disambiguates
+    /// same-titled siblings. Returns nil when ambiguous — a wrong guess here
+    /// would bake the wrong "active window" into MRU state.
+    static func focusedWindowMatch(
+        in items: [WindowItem],
+        pid: pid_t,
+        focusedTitle: String?,
+        focusedFrame: CGRect?
+    ) -> WindowItem? {
+        let siblings = items.filter { $0.pid == pid && !$0.isMinimized }
+        guard let first = siblings.first else { return nil }
+        guard siblings.count > 1 else { return first }
+
+        var candidates = siblings
+        if let focusedTitle, !focusedTitle.isEmpty {
+            let titleMatches = siblings.filter { $0.title == focusedTitle }
+            if titleMatches.count == 1 { return titleMatches[0] }
+            if !titleMatches.isEmpty { candidates = titleMatches }
+        }
+        guard let focusedFrame else { return nil }
+        let frameMatches = candidates.filter {
+            WindowActivator.framesAreClose($0.bounds, focusedFrame)
+        }
+        return frameMatches.count == 1 ? frameMatches[0] : nil
+    }
+
+    /// Moves `windowID` in front of the first window owned by `pid`, keeping
+    /// every other position stable. No-op when it already leads its app group
+    /// or is absent.
+    static func promotingWindow(
+        _ windowID: CGWindowID,
+        in items: [WindowItem],
+        beforeSiblingsOf pid: pid_t
+    ) -> [WindowItem] {
+        guard let currentIndex = items.firstIndex(where: { $0.id == windowID }),
+              let firstSiblingIndex = items.firstIndex(where: { $0.pid == pid }),
+              currentIndex != firstSiblingIndex else {
+            return items
+        }
+        var reordered = items
+        let item = reordered.remove(at: currentIndex)
+        reordered.insert(item, at: firstSiblingIndex)
+        return reordered
+    }
+
+    /// Resolves the app's AX-focused window and returns the matching item
+    /// from a fresh visible snapshot. Used to upgrade an identity-only
+    /// activation rank to a concrete per-window rank.
+    func focusedWindowItem(pid: pid_t) -> WindowItem? {
+        guard let info = focusedAXWindowInfo(pid: pid) else { return nil }
+        let items = snapshotVisibleOnly()
+        return Self.focusedWindowMatch(
+            in: items,
+            pid: pid,
+            focusedTitle: info.title,
+            focusedFrame: info.frame
+        )
+    }
+
+    /// Reads the focused window's title and frame via AX. Bounded by the same
+    /// 0.25 s messaging timeout as the minimized walk so a hung app cannot
+    /// stall the snapshot path.
+    private func focusedAXWindowInfo(pid: pid_t) -> (title: String?, frame: CGRect?)? {
+        let axTimeoutSeconds: Float = 0.25
+        let appElement = AXUIElementCreateApplication(pid)
+        _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &rawValue) == .success,
+              let rawValue,
+              CFGetTypeID(rawValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let window = rawValue as! AXUIElement
+        _ = AXUIElementSetMessagingTimeout(window, axTimeoutSeconds)
+        return (axString(kAXTitleAttribute, on: window), axFrame(on: window))
     }
 
     func capturePreviews(

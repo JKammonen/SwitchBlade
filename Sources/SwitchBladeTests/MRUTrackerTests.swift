@@ -37,6 +37,9 @@ enum MRUTrackerTests {
         ("MRU/rememberSelection_preservesRanksForWindowsMissingFromStaleLiveItems", rememberSelectionPreservesMissing),
         ("MRU/rememberSelection_staleListMissingWindow_doesNotDemoteItsRank", staleListMissingWindowDoesNotDemoteRank),
         ("MRU/rememberSelection_movesOnlySelectedRank", rememberSelectionMovesOnlySelectedRank),
+        ("MRU/trackFocusedWindowActivation_replacesIdentityRankWithConcrete", focusedActivationReplacesIdentityRank),
+        ("MRU/trackFocusedWindowActivation_movesExistingRankToFront", focusedActivationMovesExistingRank),
+        ("MRU/rememberSelection_dropsIdentityOnlyRankForSelectedApp", rememberSelectionDropsIdentityOnlyRank),
         ("MRU/orderedForDisplay_emptySnapshot_returnsEmpty", orderedForDisplayEmpty),
         ("MRU/orderedForDisplay_noFrontmostFlag_usesFirstInSnapshot", orderedForDisplayNoFrontmost)
     ]
@@ -698,6 +701,52 @@ enum MRUTrackerTests {
         tracker.rememberSelection(1, in: fullSnapshot)  // re-select the tail window
 
         try expectEqual(tracker.recentWindowIDs, [1, 4, 3, 2])
+    }
+
+    // External activation resolved to a concrete window replaces the coarse
+    // identity-only rank — leaving both would let the app-level hint pull an
+    // unrelated sibling forward on the next open.
+    @MainActor static func focusedActivationReplacesIdentityRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        tracker.trackSystemActivation(200, in: [], bundleIdentifier: "com.example.browser")
+        try expectEqual(tracker.identityOnlyRankIdentities, ["com.example.browser"])
+
+        let focused = makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser")
+        tracker.trackFocusedWindowActivation(focused)
+
+        try expectEqual(tracker.recentWindowIDs.first, 20)
+        try expectEqual(tracker.identityOnlyRankIdentities, [])
+        try expectEqual(tracker.recentBundleIDs.first, "com.example.browser")
+    }
+
+    @MainActor static func focusedActivationMovesExistingRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 300)
+        ]
+        tracker.rememberSelection(1, in: snapshot)
+        tracker.rememberSelection(2, in: snapshot)
+        tracker.rememberSelection(3, in: snapshot)  // chain [3, 2, 1]
+
+        tracker.trackFocusedWindowActivation(makeItem(id: 1, pid: 100))
+
+        try expectEqual(tracker.recentWindowIDs, [1, 3, 2])
+    }
+
+    @MainActor static func rememberSelectionDropsIdentityOnlyRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        tracker.trackSystemActivation(100, in: [], bundleIdentifier: "com.example.editor")
+
+        let snapshot = [
+            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 2, pid: 100, appName: "Editor", bundleIdentifier: "com.example.editor")
+        ]
+        tracker.rememberSelection(1, in: snapshot)
+
+        try expectEqual(tracker.identityOnlyRankIdentities, [])
+        try expectEqual(tracker.recentWindowIDs, [1])
     }
 
     @MainActor static func orderedForDisplayEmpty() throws {

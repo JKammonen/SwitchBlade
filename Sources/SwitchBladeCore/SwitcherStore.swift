@@ -62,6 +62,7 @@ final class SwitcherStore: ObservableObject {
     private var panelShowTimer: PanelShowTimer?
     private var panelShowScheduleID = 0
     private var previewWarmupTask: Task<Void, Never>?
+    private var focusedRankUpgradeTask: Task<Void, Never>?
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
     private var pendingOpenRequestedAt: Date?
@@ -96,6 +97,7 @@ final class SwitcherStore: ObservableObject {
     private let cachedOpenItemsMaxAge: TimeInterval
     private let initialPanelShowDelayNanoseconds: UInt64
     private let deferredPreviewCaptureBudget: Int
+    private let focusedRankUpgradeDelayNanoseconds: UInt64
 
     private final class InFlightVisibleSnapshot {
         let task: Task<[WindowItem], Never>
@@ -136,6 +138,7 @@ final class SwitcherStore: ObservableObject {
         cachedOpenItemsMaxAge: TimeInterval = 30,
         initialPanelShowDelayNanoseconds: UInt64 = 0,
         deferredPreviewCaptureBudget: Int = 12,
+        focusedRankUpgradeDelayNanoseconds: UInt64 = 150_000_000,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
     ) {
@@ -150,6 +153,7 @@ final class SwitcherStore: ObservableObject {
         self.cachedOpenItemsMaxAge = cachedOpenItemsMaxAge
         self.initialPanelShowDelayNanoseconds = initialPanelShowDelayNanoseconds
         self.deferredPreviewCaptureBudget = max(0, deferredPreviewCaptureBudget)
+        self.focusedRankUpgradeDelayNanoseconds = focusedRankUpgradeDelayNanoseconds
         self.currentAppPID = initialFrontmostAppPID
         self.switchBladePID = switchBladePID
 
@@ -175,7 +179,7 @@ final class SwitcherStore: ObservableObject {
     /// callable directly from tests so the notification queue / RunLoop
     /// plumbing doesn't have to be exercised under XCTest.
     func handleAppActivation(pid: pid_t) {
-        recordObservedActivationIfNeeded(pid: pid)
+        let pendingSelfActivation = recordObservedActivationIfNeeded(pid: pid)
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
                 // Do NOT discard the backgrounded app's cached preview here.
@@ -187,8 +191,17 @@ final class SwitcherStore: ObservableObject {
                 currentAppPID = pid
                 cachedOpenItemsNeedResnapshot = true
             }
-            let bundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-            mruTracker.trackSystemActivation(pid, in: items, bundleIdentifier: bundleIdentifier)
+            // A window-targeted self-activation was already recorded exactly by
+            // rememberSelection at commit; re-tracking it would only stack an
+            // identity-only rank on top of the concrete one. App-level self
+            // switches (windowID nil, e.g. the fast previous-app path) fall
+            // through on purpose: the exact window is unknown, so they need
+            // the same coarse track + AX upgrade as an external activation.
+            if pendingSelfActivation?.windowID == nil {
+                let bundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+                mruTracker.trackSystemActivation(pid, in: items, bundleIdentifier: bundleIdentifier)
+                scheduleFocusedWindowRankUpgrade(pid: pid)
+            }
         }
         // Opportunistic cache warmup — gated on recent-use so we don't burn
         // cycles for users who haven't touched the switcher in a while.
@@ -205,6 +218,7 @@ final class SwitcherStore: ObservableObject {
         panelShowTimer?.cancel()
         staleCacheHealTask?.cancel()
         previewWarmupTask?.cancel()
+        focusedRankUpgradeTask?.cancel()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
         }
@@ -1409,6 +1423,10 @@ final class SwitcherStore: ObservableObject {
         source: String,
         windowID: WindowItem.ID?
     ) {
+        // A self-initiated focus change makes any pending external-activation
+        // focus upgrade stale — let it die rather than have a delayed AX
+        // resolve overwrite the rank the commit is about to record.
+        focusedRankUpgradeTask?.cancel()
         pruneStaleActivationMeasurements(now: Date())
         let measurement = PendingActivationMeasurement(
             requestedAt: Date(),
@@ -1428,10 +1446,13 @@ final class SwitcherStore: ObservableObject {
         PerformanceDiagnostics.record("activation_request", fields: fields)
     }
 
-    private func recordObservedActivationIfNeeded(pid: pid_t) {
+    /// Consumes and returns the oldest pending self-initiated activation for
+    /// `pid`, or nil when the activation came from outside SwitchBlade.
+    @discardableResult
+    private func recordObservedActivationIfNeeded(pid: pid_t) -> PendingActivationMeasurement? {
         pruneStaleActivationMeasurements(now: Date())
         guard var measurements = pendingActivationMeasurements[pid],
-              !measurements.isEmpty else { return }
+              !measurements.isEmpty else { return nil }
         let measurement = measurements.removeFirst()
         pendingActivationMeasurements[pid] = measurements.isEmpty ? nil : measurements
         var fields: [String: PerformanceMetricValue] = [
@@ -1444,6 +1465,31 @@ final class SwitcherStore: ObservableObject {
             fields["window_id"] = .int(Int(windowID))
         }
         PerformanceDiagnostics.record("activation_frontmost_observed", fields: fields)
+        return measurement
+    }
+
+    /// System activation only names the app. Resolve the focused window via
+    /// AX off-main and upgrade the identity-only rank to a concrete one —
+    /// without this, windows of multi-window apps activated by click/Dock
+    /// never gain per-window rank. The delay lets focus settle after the
+    /// activation notification and coalesces rapid app switches to the last.
+    private func scheduleFocusedWindowRankUpgrade(pid: pid_t) {
+        focusedRankUpgradeTask?.cancel()
+        let catalog = self.catalog
+        let delayNanoseconds = focusedRankUpgradeDelayNanoseconds
+        focusedRankUpgradeTask = Task { @MainActor [weak self] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, !Task.isCancelled else { return }
+            guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else { return }
+            let item = await Task.detached(priority: .utility) {
+                catalog.focusedWindowItem(pid: pid)
+            }.value
+            guard !Task.isCancelled, let item, item.pid == pid else { return }
+            guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else { return }
+            self.mruTracker.trackFocusedWindowActivation(item)
+        }
     }
 
     private func pruneStaleActivationMeasurements(now: Date) {

@@ -112,6 +112,14 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
             _lastInvalidationReason = reason
         }
     }
+
+    var focusedWindowItemsByPID: [pid_t: WindowItem] = [:]
+    private var _focusedWindowItemCallCount = 0
+    var focusedWindowItemCallCount: Int { withLock { _focusedWindowItemCallCount } }
+    func focusedWindowItem(pid: pid_t) -> WindowItem? {
+        withLock { _focusedWindowItemCallCount += 1 }
+        return focusedWindowItemsByPID[pid]
+    }
 }
 
 final class MockWindowActivator: WindowActivating, @unchecked Sendable {
@@ -151,10 +159,12 @@ func makeStore(
     activator: MockWindowActivator = MockWindowActivator(),
     permissions: MockPermissionService = MockPermissionService(),
     userDefaults: UserDefaults = makeIsolatedUserDefaults(),
+    mruTracker: MRUTracker? = nil,
     activationWarmupWindow: TimeInterval = 60,
     cachedOpenItemsMaxAge: TimeInterval = 30,
     initialPanelShowDelayNanoseconds: UInt64 = 0,
     deferredPreviewCaptureBudget: Int = 12,
+    focusedRankUpgradeDelayNanoseconds: UInt64 = 0,
     initialFrontmostAppPID: pid_t? = nil,
     switchBladePID: pid_t = getpid()
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
@@ -163,10 +173,12 @@ func makeStore(
         activator: activator,
         permissionService: permissions,
         userDefaults: userDefaults,
+        mruTracker: mruTracker,
         activationWarmupWindow: activationWarmupWindow,
         cachedOpenItemsMaxAge: cachedOpenItemsMaxAge,
         initialPanelShowDelayNanoseconds: initialPanelShowDelayNanoseconds,
         deferredPreviewCaptureBudget: deferredPreviewCaptureBudget,
+        focusedRankUpgradeDelayNanoseconds: focusedRankUpgradeDelayNanoseconds,
         initialFrontmostAppPID: initialFrontmostAppPID,
         switchBladePID: switchBladePID
     )

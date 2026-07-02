@@ -7,6 +7,9 @@ import CoreGraphics
 protocol WindowSnapshotProviding: Sendable {
     func snapshotVisibleOnly() -> [WindowItem]
     func snapshotMinimized() async -> [WindowItem]
+    /// Resolves the AX-focused window of `pid` against a fresh visible
+    /// snapshot. nil when AX fails or the match is ambiguous.
+    func focusedWindowItem(pid: pid_t) -> WindowItem?
     func capturePreviews(
         for windowIDs: [CGWindowID],
         maxCount: Int?,
