@@ -25,6 +25,7 @@ enum MRUTrackerTests {
         ("MRU/trackSystemActivation_multiWindowAppIsNotGuessed", systemActivationMultiWindowAppIsNotGuessed),
         ("MRU/orderedForDisplay_sameAppConcreteRankBeatsOtherAppIdentityRank", sameAppConcreteRankBeatsOtherAppIdentityRank),
         ("MRU/orderedForDisplay_frontmostAppDoesNotGroupAllSiblingRanks", frontmostAppDoesNotGroupAllSiblingRanks),
+        ("MRU/orderedForDisplay_nonAdjacentFrontmostSiblingsDoNotBeatIdentityRank", nonAdjacentFrontmostSiblingsDoNotBeatIdentityRank),
         ("MRU/pruneToLive_dropsDeadIDs", pruneDeadIDs),
         ("MRU/pruneToLive_emptyList_clearsAllRankData", pruneToLiveEmpty),
         ("MRU/pruneToLive_alsoDropsStaleSignatures", pruneDropsSignatures),
@@ -492,6 +493,30 @@ enum MRUTrackerTests {
         let ordered = tracker.orderedForDisplay(from: nextSnapshot)
 
         try expectEqual(ordered.map(\.id), [200, 100, 300, 201, 400, 202])
+    }
+
+    @MainActor static func nonAdjacentFrontmostSiblingsDoNotBeatIdentityRank() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let initialSnapshot = [
+            makeItem(id: 201, pid: 20, appName: "Finder", title: "Desktop", isFrontmostApp: true, bundleIdentifier: "com.apple.finder"),
+            makeItem(id: 202, pid: 20, appName: "Finder", title: "Documents", isFrontmostApp: true, bundleIdentifier: "com.apple.finder"),
+            makeItem(id: 300, pid: 30, appName: "Claude", title: "Claude", bundleIdentifier: "com.anthropic.claudefordesktop"),
+            makeItem(id: 200, pid: 20, appName: "Finder", title: "Downloads", isFrontmostApp: true, bundleIdentifier: "com.apple.finder")
+        ]
+        tracker.rememberSelection(201, in: initialSnapshot)
+
+        tracker.trackSystemActivation(10, in: [], bundleIdentifier: "com.openai.codex")
+
+        let nextSnapshot = [
+            makeItem(id: 200, pid: 20, appName: "Finder", title: "Downloads", isFrontmostApp: true, bundleIdentifier: "com.apple.finder"),
+            makeItem(id: 100, pid: 10, appName: "Codex", title: "Codex", bundleIdentifier: "com.openai.codex"),
+            makeItem(id: 201, pid: 20, appName: "Finder", title: "Desktop", isFrontmostApp: true, bundleIdentifier: "com.apple.finder"),
+            makeItem(id: 202, pid: 20, appName: "Finder", title: "Documents", isFrontmostApp: true, bundleIdentifier: "com.apple.finder"),
+            makeItem(id: 300, pid: 30, appName: "Claude", title: "Claude", bundleIdentifier: "com.anthropic.claudefordesktop")
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+
+        try expectEqual(ordered.map(\.id), [200, 100, 201, 202, 300])
     }
 
     @MainActor static func pruneDeadIDs() throws {

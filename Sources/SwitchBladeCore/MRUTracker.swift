@@ -81,10 +81,7 @@ final class MRUTracker {
         var remainingBySignature = Dictionary(grouping: snapshot.filter { !seen.contains($0.id) },
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
-        let currentFrontmostIdentity = appIdentity(for: currentFrontmost)
-        let replayRanks = replayRanksForDisplay(
-            currentFrontmostIdentity: currentFrontmostIdentity
-        )
+        let replayRanks = replayRanksForDisplay(currentFrontmost: currentFrontmost)
         for (rankIndex, rank) in replayRanks {
             if let windowID = rank.windowID,
                let item = itemsByID[windowID] {
@@ -313,57 +310,78 @@ final class MRUTracker {
         item.bundleIdentifier ?? item.appName
     }
 
-    private func replayRanksForDisplay(
-        currentFrontmostIdentity: String
-    ) -> [(offset: Int, element: RankEntry)] {
+    private func replayRanksForDisplay(currentFrontmost: WindowItem) -> [(offset: Int, element: RankEntry)] {
         // Identity-only activation ranks are coarse app-level hints. They may
-        // defer behind the immediately adjacent concrete ranks of the current
-        // frontmost app, but they must not gather every sibling window for that
-        // app from deeper in the MRU chain.
-        var replayRanks: [(offset: Int, element: RankEntry)] = []
-        var index = recentRanks.startIndex
-
-        while index < recentRanks.endIndex {
-            let rank = recentRanks[index]
-
-            if isIdentityOnly(rank), rank.appIdentity != currentFrontmostIdentity {
-                let nextIndex = recentRanks.index(after: index)
-                let frontmostConcreteRun = adjacentFrontmostConcreteRanks(
-                    startingAt: nextIndex,
-                    identity: currentFrontmostIdentity
-                )
-                if let lastRunIndex = frontmostConcreteRun.last?.offset {
-                    replayRanks.append(contentsOf: frontmostConcreteRun)
-                    replayRanks.append((index, rank))
-                    index = recentRanks.index(after: lastRunIndex)
-                    continue
-                }
-            }
-
-            replayRanks.append((index, rank))
-            index = recentRanks.index(after: index)
+        // defer behind the concrete same-app rank cluster that contains the
+        // current frontmost window. They must not gather unrelated sibling
+        // windows for that app from elsewhere in the MRU chain.
+        let currentFrontmostIdentity = appIdentity(for: currentFrontmost)
+        guard let frontmostRankIndex = frontmostRankIndex(for: currentFrontmost) else {
+            return Array(recentRanks.enumerated())
+        }
+        let frontmostCluster = concreteRankCluster(
+            containing: frontmostRankIndex,
+            identity: currentFrontmostIdentity
+        )
+        guard frontmostCluster.lowerBound > recentRanks.startIndex else {
+            return Array(recentRanks.enumerated())
         }
 
+        let previousIndex = recentRanks.index(before: frontmostCluster.lowerBound)
+        let previousRank = recentRanks[previousIndex]
+        guard isIdentityOnly(previousRank),
+              previousRank.appIdentity != currentFrontmostIdentity else {
+            return Array(recentRanks.enumerated())
+        }
+
+        var replayRanks: [(offset: Int, element: RankEntry)] = []
+        replayRanks.append(contentsOf: rankEntries(in: recentRanks.startIndex..<previousIndex))
+        replayRanks.append(contentsOf: rankEntries(in: frontmostCluster))
+        replayRanks.append((previousIndex, previousRank))
+        let afterClusterIndex = recentRanks.index(after: frontmostCluster.upperBound)
+        replayRanks.append(contentsOf: rankEntries(in: afterClusterIndex..<recentRanks.endIndex))
         return replayRanks
     }
 
-    private func adjacentFrontmostConcreteRanks(
-        startingAt startIndex: Int,
-        identity: String
-    ) -> [(offset: Int, element: RankEntry)] {
-        var ranks: [(offset: Int, element: RankEntry)] = []
-        var index = startIndex
+    private func rankEntries(in range: Range<Int>) -> [(offset: Int, element: RankEntry)] {
+        range.map { ($0, recentRanks[$0]) }
+    }
 
-        while index < recentRanks.endIndex {
-            let rank = recentRanks[index]
-            guard rank.appIdentity == identity, isConcrete(rank) else {
+    private func rankEntries(in range: ClosedRange<Int>) -> [(offset: Int, element: RankEntry)] {
+        range.map { ($0, recentRanks[$0]) }
+    }
+
+    private func concreteRankCluster(containing rankIndex: Int, identity: String) -> ClosedRange<Int> {
+        var lower = rankIndex
+        while lower > recentRanks.startIndex {
+            let previousIndex = recentRanks.index(before: lower)
+            let previousRank = recentRanks[previousIndex]
+            guard previousRank.appIdentity == identity, isConcrete(previousRank) else {
                 break
             }
-            ranks.append((index, rank))
-            index = recentRanks.index(after: index)
+            lower = previousIndex
         }
 
-        return ranks
+        var upper = rankIndex
+        while upper < recentRanks.index(before: recentRanks.endIndex) {
+            let nextIndex = recentRanks.index(after: upper)
+            let nextRank = recentRanks[nextIndex]
+            guard nextRank.appIdentity == identity, isConcrete(nextRank) else {
+                break
+            }
+            upper = nextIndex
+        }
+
+        return lower...upper
+    }
+
+    private func frontmostRankIndex(for currentFrontmost: WindowItem) -> Int? {
+        if let idIndex = recentRanks.firstIndex(where: { $0.windowID == currentFrontmost.id }) {
+            return idIndex
+        }
+        let currentSignature = signature(for: currentFrontmost)
+        let signatureIndexes = recentRanks.indices.filter { recentRanks[$0].signature == currentSignature }
+        return signatureIndexes.count == 1 ? signatureIndexes[0] : nil
     }
 
     private func isIdentityOnly(_ rank: RankEntry) -> Bool {
