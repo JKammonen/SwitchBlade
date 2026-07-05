@@ -31,7 +31,7 @@ protocol WindowActivating: Sendable {
     func activate(_ item: WindowItem)
     func activateApplication(pid: pid_t)
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool
-    func close(_ item: WindowItem)
+    func close(_ item: WindowItem) -> Bool
     /// Sends NSRunningApplication.terminate(). The whole app quits, not just
     /// the selected window.
     func quit(_ item: WindowItem)

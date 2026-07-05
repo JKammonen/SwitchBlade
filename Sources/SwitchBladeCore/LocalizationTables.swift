@@ -51,6 +51,8 @@ enum L10nTables {
         .actionSnapRight:                 "Right",
         .actionSnapTop:                   "Up",
         .actionSnapBottom:                "Down",
+        .actionCloseWindow:               "Close window",
+        .accessibilityWindowTileHint:     "Selects this window",
         .windowStateMinimized:            "Minimized",
 
         .permissionMessageAccessibility:  "Enable Accessibility for exact window focus.",
@@ -157,6 +159,8 @@ enum L10nTables {
         .actionSnapRight:                 "Oikea",
         .actionSnapTop:                   "Ylös",
         .actionSnapBottom:                "Alas",
+        .actionCloseWindow:               "Sulje ikkuna",
+        .accessibilityWindowTileHint:     "Valitsee tämän ikkunan",
         .windowStateMinimized:            "Minimoitu",
 
         .permissionMessageAccessibility:  "Salli Accessibility tarkkaa ikkunafokusta varten.",

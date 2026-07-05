@@ -272,7 +272,7 @@ final class SwitchBladeSettings: ObservableObject {
         tileMinWidth      = ud.object(forKey: "sb_tileMinWidth")   as? Double ?? 220.0
         modifier   = SBModifier(rawValue:   ud.string(forKey: "sb_modifier")   ?? "") ?? .command
         triggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
-        doubleModifierSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? true
+        doubleModifierSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? false
         doubleModifier = SBModifier(rawValue: ud.string(forKey: "sb_doubleModifier") ?? "") ?? .command
         let currentLaunchStatus = launchAtLoginController.currentStatus()
         launchAtLoginStatus = currentLaunchStatus

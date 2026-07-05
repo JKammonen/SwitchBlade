@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 @testable import SwitchBladeCore
@@ -13,6 +14,9 @@ enum HotkeyMonitorTests {
         ("HotkeyMonitor/tapRecovery_leavesValidEnabledTapAlone", tapRecoveryLeavesValidEnabledTapAlone),
         ("HotkeyMonitor/modifierMouseSwitch_requiresSettingEnabled", modifierMouseSwitchRequiresSettingEnabled),
         ("HotkeyMonitor/modifierMouseSwitch_requiresDoubleTapModifier", modifierMouseSwitchRequiresDoubleTapModifier),
+        ("HotkeyMonitor/modifierMouseSwitch_rejectsCompanionModifiers", modifierMouseSwitchRejectsCompanionModifiers),
+        ("HotkeyMonitor/hotkeyDirection_allowsModifierAndShiftOnly", hotkeyDirectionAllowsModifierAndShiftOnly),
+        ("HotkeyMonitor/hotkeyDirection_rejectsSupersetModifiers", hotkeyDirectionRejectsSupersetModifiers),
         ("HotkeyMonitor/machDelta_clampsFutureTimestamp", machDeltaClampsFutureTimestamp)
     ]
 
@@ -111,6 +115,50 @@ enum HotkeyMonitorTests {
             isEnabled: true,
             flags: [.maskCommand],
             doubleTapModifier: .maskAlternate
+        ))
+    }
+
+    @MainActor static func modifierMouseSwitchRejectsCompanionModifiers() throws {
+        try expect(!HotkeyMonitor.shouldTriggerModifierMouseSwitch(
+            isEnabled: true,
+            flags: [.maskCommand, .maskShift],
+            doubleTapModifier: .maskCommand
+        ))
+    }
+
+    @MainActor static func hotkeyDirectionAllowsModifierAndShiftOnly() throws {
+        try expectEqual(
+            HotkeyMonitor.hotkeyDirection(
+                keyCode: Int64(kVK_Tab),
+                flags: [.maskCommand],
+                configuredKey: Int(kVK_Tab),
+                hotkeyModifier: .maskCommand
+            ),
+            .forward
+        )
+        try expectEqual(
+            HotkeyMonitor.hotkeyDirection(
+                keyCode: Int64(kVK_Tab),
+                flags: [.maskCommand, .maskShift],
+                configuredKey: Int(kVK_Tab),
+                hotkeyModifier: .maskCommand
+            ),
+            .backward
+        )
+    }
+
+    @MainActor static func hotkeyDirectionRejectsSupersetModifiers() throws {
+        try expectNil(HotkeyMonitor.hotkeyDirection(
+            keyCode: Int64(kVK_Tab),
+            flags: [.maskCommand, .maskControl],
+            configuredKey: Int(kVK_Tab),
+            hotkeyModifier: .maskCommand
+        ))
+        try expectNil(HotkeyMonitor.hotkeyDirection(
+            keyCode: Int64(kVK_Tab),
+            flags: [.maskCommand, .maskAlternate, .maskShift],
+            configuredKey: Int(kVK_Tab),
+            hotkeyModifier: .maskCommand
         ))
     }
 

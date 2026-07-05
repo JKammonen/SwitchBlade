@@ -21,6 +21,7 @@ func runAll() async -> Int {
         ("MRUTracker",              MRUTrackerTests.all),
         ("WindowSharingPolicy",     WindowSharingPolicyTests.all),
         ("WindowCatalogFocus",      WindowCatalogFocusTests.all),
+        ("IconNaming",              IconNamingTests.all),
         ("SyntheticWindowID",       SyntheticWindowIDTests.all),
         ("WindowActivator",         WindowActivatorTests.all),
         ("SwitcherStore",           SwitcherStoreTests.all),

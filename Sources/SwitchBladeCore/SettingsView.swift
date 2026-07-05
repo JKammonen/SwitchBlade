@@ -277,6 +277,7 @@ struct SettingsView: View {
                 .font(.system(size: 13))
             Spacer()
             trailing()
+                .accessibilityLabel(Text(label))
         }
         .padding(.horizontal, 12)
         .frame(height: 36)
@@ -299,6 +300,7 @@ struct SettingsView: View {
             }
             Spacer(minLength: 12)
             trailing()
+                .accessibilityLabel(Text(label))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -311,6 +313,7 @@ struct SettingsView: View {
             Text(label)
                 .font(.system(size: 13))
             Slider(value: value, in: range, step: step)
+                .accessibilityLabel(Text(label))
             Text("\(Int(value.wrappedValue * scale))\(unit)")
                 .font(.system(size: 12).monospacedDigit())
                 .foregroundStyle(.secondary)

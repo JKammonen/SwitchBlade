@@ -340,7 +340,10 @@ private struct WindowSharingStateIndex {
 enum IconNaming {
     static func named(_ icon: NSImage?, bundleIdentifier: String?, appName: String) -> NSImage? {
         guard let icon, let copy = icon.copy() as? NSImage else { return icon }
-        copy.setName(bundleIdentifier ?? appName)
+        let baseName = bundleIdentifier ?? appName
+        if !copy.setName(baseName) {
+            copy.setName("\(baseName)-\(UUID().uuidString)")
+        }
         return copy
     }
 }
@@ -667,7 +670,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             return [:]
         }
         guard !Task.isCancelled else { return [:] }
-        let windowsByID = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
+        let windowsByID = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
         let maxDim = 320
         let captureTimeoutMs = 300
         let fallbackTimeoutMs = 300

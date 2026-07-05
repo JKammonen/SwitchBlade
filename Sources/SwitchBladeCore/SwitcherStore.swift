@@ -465,12 +465,22 @@ final class SwitcherStore: ObservableObject {
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) {
         selectedID = item.id
         performSelectionAction(for: item, actionName: "snap-\(edge.rawValue)") { activator, selectedItem in
-            _ = activator.snap(selectedItem, to: edge)
+            let snapped = activator.snap(selectedItem, to: edge)
+            if !snapped {
+                Logger.switcher.notice(
+                    "Snap action failed id=\(selectedItem.id, privacy: .public) pid=\(selectedItem.pid, privacy: .public) edge=\(edge.rawValue, privacy: .public)"
+                )
+            }
         }
     }
 
     func close(_ item: WindowItem) {
-        activator.close(item)
+        guard activator.close(item) else {
+            Logger.switcher.notice(
+                "Close action failed id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); keeping item visible"
+            )
+            return
+        }
         removeItem(withID: item.id)
     }
 
@@ -1273,7 +1283,7 @@ final class SwitcherStore: ObservableObject {
         let cachedSameAppCount = cachedOpenItems.filter { $0.pid == frontmost.pid }.count
         guard cachedSameAppCount > 1 else { return orderedItems }
 
-        let freshByID = Dictionary(uniqueKeysWithValues: orderedItems.map { ($0.id, $0) })
+        let freshByID = Dictionary(orderedItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var usedIDs: Set<WindowItem.ID> = [frontmost.id]
         var stabilized: [WindowItem] = [frontmost]
 

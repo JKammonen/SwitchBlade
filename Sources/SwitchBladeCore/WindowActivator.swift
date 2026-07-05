@@ -3,6 +3,8 @@ import ApplicationServices
 import os.log
 
 final class WindowActivator: WindowActivating, @unchecked Sendable {
+    private static let axMessagingTimeoutSeconds: Float = 0.25
+
     struct ScreenGeometry: Equatable {
         let frame: CGRect
         let visibleFrame: CGRect
@@ -65,7 +67,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
         log(action: "snap \(edge.rawValue)", item: item)
 
-        let appElement = AXUIElementCreateApplication(item.pid)
+        let appElement = appElement(for: item.pid)
         guard let match = matchingWindow(for: appElement, item: item) else {
             return false
         }
@@ -76,9 +78,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
 
         let currentFrame = axFrame(on: window) ?? item.bounds
-        let screenGeometries = NSScreen.screens.map {
-            ScreenGeometry(frame: $0.frame, visibleFrame: $0.visibleFrame)
-        }
+        let screenGeometries = Self.axScreenGeometries(from: NSScreen.screens)
         guard let screen = Self.bestScreen(for: currentFrame, candidates: screenGeometries) else {
             return false
         }
@@ -112,10 +112,14 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return true
     }
 
-    func close(_ item: WindowItem) {
+    func close(_ item: WindowItem) -> Bool {
         log(action: "close", item: item)
         // Only close the window via AX — never terminate the app process.
-        _ = closeMatchingWindow(item)
+        let closed = closeMatchingWindow(item)
+        Logger.activator.info(
+            "close result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) closed=\(closed, privacy: .public)"
+        )
+        return closed
     }
 
     func quit(_ item: WindowItem) {
@@ -141,7 +145,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
     @discardableResult
     private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
-        let appElement = AXUIElementCreateApplication(item.pid)
+        let appElement = appElement(for: item.pid)
         let matchStart = Date()
         guard let match = matchingWindow(
             for: appElement,
@@ -260,7 +264,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     private func closeMatchingWindow(_ item: WindowItem) -> Bool {
-        let appElement = AXUIElementCreateApplication(item.pid)
+        let appElement = appElement(for: item.pid)
         guard let match = matchingWindow(for: appElement, item: item) else {
             return false
         }
@@ -269,6 +273,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     private func pressCloseButton(on window: AXUIElement) -> Bool {
+        applyAXMessagingTimeout(to: window)
         var closeButtonValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &closeButtonValue) == .success,
               let closeButtonValue,
@@ -277,8 +282,19 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
 
         let closeButton = closeButtonValue as! AXUIElement
+        applyAXMessagingTimeout(to: closeButton)
 
         return AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success
+    }
+
+    private func appElement(for pid: pid_t) -> AXUIElement {
+        let appElement = AXUIElementCreateApplication(pid)
+        applyAXMessagingTimeout(to: appElement)
+        return appElement
+    }
+
+    private func applyAXMessagingTimeout(to element: AXUIElement) {
+        _ = AXUIElementSetMessagingTimeout(element, Self.axMessagingTimeoutSeconds)
     }
 
     private func windows(for appElement: AXUIElement) -> [AXUIElement]? {
@@ -305,7 +321,8 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
         let candidatesStart = Date()
         let candidates = windows.map { window in
-            (
+            applyAXMessagingTimeout(to: window)
+            return (
                 element: window,
                 candidate: WindowMatchCandidate(
                     title: axString(kAXTitleAttribute, on: window),
@@ -626,7 +643,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     static func snapFrame(inVisibleFrame visibleFrame: CGRect, screenFrame: CGRect, to edge: WindowSnapEdge) -> CGRect {
         let halfWidth = visibleFrame.width / 2
         let halfHeight = visibleFrame.height / 2
-        let topY = screenFrame.maxY - visibleFrame.maxY
+        let topY = visibleFrame.minY
         let bottomY = topY + halfHeight
 
         switch edge {
@@ -657,6 +674,28 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 y: bottomY,
                 width: visibleFrame.width,
                 height: halfHeight
+            )
+        }
+    }
+
+    static func toAXScreenRect(_ rect: CGRect, rootScreenFrame: CGRect) -> CGRect {
+        CGRect(
+            x: rect.minX,
+            y: rootScreenFrame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+    }
+
+    private static func axScreenGeometries(from screens: [NSScreen]) -> [ScreenGeometry] {
+        let rootScreenFrame = screens.reduce(CGRect.null) { partial, screen in
+            partial.isNull ? screen.frame : partial.union(screen.frame)
+        }
+        guard !rootScreenFrame.isNull else { return [] }
+        return screens.map { screen in
+            ScreenGeometry(
+                frame: toAXScreenRect(screen.frame, rootScreenFrame: rootScreenFrame),
+                visibleFrame: toAXScreenRect(screen.visibleFrame, rootScreenFrame: rootScreenFrame)
             )
         }
     }

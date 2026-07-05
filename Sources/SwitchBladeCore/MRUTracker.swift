@@ -71,7 +71,7 @@ final class MRUTracker {
         // an activation).
         let currentFrontmost = snapshot.first(where: { $0.isFrontmostApp }) ?? snapshot[0]
 
-        let itemsByID = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.id, $0) })
+        let itemsByID = Dictionary(snapshot.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         var ordered: [WindowItem] = [currentFrontmost]
         var seen: Set<WindowItem.ID> = [currentFrontmost.id]

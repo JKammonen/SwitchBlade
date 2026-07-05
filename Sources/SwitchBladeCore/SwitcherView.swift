@@ -47,31 +47,46 @@ enum PreviewScalingPolicy {
 struct SwitcherView: View {
     @ObservedObject var store: SwitcherStore
     @ObservedObject private var settings = SwitchBladeSettings.shared
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
     private var columns: [GridItem] {
         let w = settings.tileMinWidth
         return [GridItem(.adaptive(minimum: w, maximum: w * 1.35), spacing: 10)]
     }
 
+    private var effectiveReduceMotion: Bool {
+        settings.reducedMotion || systemReduceMotion
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             VStack(spacing: 0) {
-                ScrollView(showsIndicators: false) {
-                    LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(store.items) { item in
-                            WindowTile(
-                                item: item,
-                                isSelected: store.selectedID == item.id,
-                                settings: settings,
-                                onSelect: { store.choose(item) },
-                                onHover: { store.hover(item) },
-                                onSnap: { edge in store.snap(item, to: edge) },
-                                onClose: { store.close(item) }
-                            )
+                ScrollViewReader { scrollProxy in
+                    ScrollView(showsIndicators: true) {
+                        LazyVGrid(columns: columns, spacing: 10) {
+                            ForEach(store.items) { item in
+                                WindowTile(
+                                    item: item,
+                                    isSelected: store.selectedID == item.id,
+                                    settings: settings,
+                                    reduceMotion: effectiveReduceMotion,
+                                    onSelect: { store.choose(item) },
+                                    onHover: { store.hover(item) },
+                                    onSnap: { edge in store.snap(item, to: edge) },
+                                    onClose: { store.close(item) }
+                                )
+                                .id(item.id)
+                            }
+                        }
+                        .padding(14)
+                        .padding(.vertical, 6)
+                    }
+                    .onChange(of: store.selectedID) { _, selectedID in
+                        guard let selectedID else { return }
+                        withAnimation(effectiveReduceMotion ? nil : .easeInOut(duration: 0.12)) {
+                            scrollProxy.scrollTo(selectedID, anchor: .center)
                         }
                     }
-                    .padding(14)
-                    .padding(.vertical, 6)
                 }
 
                 if let message = store.permissionState.message {
@@ -115,6 +130,7 @@ private struct WindowTile: View {
     let item: WindowItem
     let isSelected: Bool
     let settings: SwitchBladeSettings
+    let reduceMotion: Bool
     let onSelect: () -> Void
     let onHover: () -> Void
     let onSnap: (WindowSnapEdge) -> Void
@@ -145,12 +161,21 @@ private struct WindowTile: View {
     }
 
     private var selectionVisualState: SelectionVisualState {
-        let animated = isSelected && selectionPulse
+        let animated = isSelected && selectionPulse && !reduceMotion
         let strength = highlightStrength
         let base = highlightOpacity * (0.78 + Double(strength) * 0.10)
         let peak = min(1.0, highlightOpacity * (1.0 + Double(strength) * 0.20))
         let baseWidth = 1.8 + strength * 2.6
         let peakWidth = baseWidth + strength * 0.8
+        if reduceMotion {
+            return SelectionVisualState(
+                scale: 1.0,
+                yOffset: 0,
+                rotation: .degrees(0),
+                borderOpacity: base,
+                borderWidth: baseWidth
+            )
+        }
 
         switch settings.selectionEffect {
         case .pump:
@@ -197,7 +222,7 @@ private struct WindowTile: View {
     }
 
     private var selectionAnimation: Animation {
-        if settings.reducedMotion {
+        if reduceMotion {
             return .linear(duration: 0.01)
         }
 
@@ -234,6 +259,17 @@ private struct WindowTile: View {
     private var effectiveBadgeBackground: some ShapeStyle {
         let base: Color = settings.badgeUseAppColor ? (appDominantColor ?? settings.badgeColor) : settings.badgeColor
         return base.opacity(settings.badgeOpacity)
+    }
+
+    private var tileAccessibilityLabel: String {
+        var parts = [item.displayTitle]
+        if item.subtitle != item.displayTitle {
+            parts.append(item.subtitle)
+        }
+        if item.isMinimized {
+            parts.append(L10n.tr(.windowStateMinimized))
+        }
+        return parts.joined(separator: ", ")
     }
 
     var body: some View {
@@ -327,6 +363,7 @@ private struct WindowTile: View {
                             }
                             .menuStyle(.borderlessButton)
                             .help(L10n.tr(.actionSnapWindow))
+                            .accessibilityLabel(L10n.tr(.actionSnapWindow))
                             Button(action: onClose) {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 9, weight: .bold))
@@ -335,6 +372,8 @@ private struct WindowTile: View {
                                     .background(Color.black.opacity(0.5), in: Circle())
                             }
                             .buttonStyle(.plain)
+                            .help(L10n.tr(.actionCloseWindow))
+                            .accessibilityLabel(L10n.tr(.actionCloseWindow))
                         }
                         Spacer()
                     }
@@ -362,11 +401,15 @@ private struct WindowTile: View {
         .contextMenu {
             snapMenuItems
         }
-        .animation(settings.reducedMotion ? nil : .spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(tileAccessibilityLabel)
+        .accessibilityHint(L10n.tr(.accessibilityWindowTileHint))
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .animation(reduceMotion ? nil : .spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
         .task(id: "\(item.id)-\(isSelected)-\(settings.selectionEffect.rawValue)") {
             selectionPulse = false
 
-            guard isSelected, !settings.reducedMotion else { return }
+            guard isSelected, !reduceMotion else { return }
 
             withAnimation(selectionAnimation) {
                 selectionPulse = true

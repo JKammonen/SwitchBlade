@@ -22,6 +22,7 @@ enum WindowActivatorTests {
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
         ("WindowActivator/shouldActivateApplication_falseForFrontmostAppWindow", shouldSkipActivationForFrontmostAppWindow),
         ("WindowActivator/shouldActivateApplication_trueForBackgroundAppWindow", shouldActivateForBackgroundAppWindow),
+        ("WindowActivator/toAXScreenRect_flipsVerticallyOffsetDisplay", toAXScreenRect_flipsVerticallyOffsetDisplay),
         ("WindowActivator/snapFrame_halvesVisibleFrame", snapFrame_halvesVisibleFrame),
         ("WindowActivator/bestVisibleFrame_prefersLargestIntersection", bestVisibleFrame_prefersLargestIntersection)
     ]
@@ -284,7 +285,7 @@ enum WindowActivatorTests {
 
     static func snapFrame_halvesVisibleFrame() throws {
         let screenFrame = CGRect(x: 0, y: 0, width: 1240, height: 860)
-        let visibleFrame = CGRect(x: 20, y: 40, width: 1200, height: 800)
+        let visibleFrame = CGRect(x: 20, y: 20, width: 1200, height: 800)
 
         try expectEqual(
             WindowActivator.snapFrame(inVisibleFrame: visibleFrame, screenFrame: screenFrame, to: .left),
@@ -301,6 +302,16 @@ enum WindowActivatorTests {
         try expectEqual(
             WindowActivator.snapFrame(inVisibleFrame: visibleFrame, screenFrame: screenFrame, to: .bottom),
             CGRect(x: 20, y: 420, width: 1200, height: 400)
+        )
+    }
+
+    static func toAXScreenRect_flipsVerticallyOffsetDisplay() throws {
+        let rootFrame = CGRect(x: 0, y: 0, width: 1440, height: 1800)
+        let appKitVisibleFrameAboveMain = CGRect(x: 0, y: 900, width: 1440, height: 860)
+
+        try expectEqual(
+            WindowActivator.toAXScreenRect(appKitVisibleFrameAboveMain, rootScreenFrame: rootFrame),
+            CGRect(x: 0, y: 40, width: 1440, height: 860)
         )
     }
 

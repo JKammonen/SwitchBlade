@@ -13,6 +13,7 @@ enum SwitchBladeSettingsTests {
         ("Settings/launchAtLogin_initializesFromLiveStatus", launchAtLogin_initializesFromLiveStatus),
         ("Settings/launchAtLogin_successPersistsActualStatus", launchAtLogin_successPersistsActualStatus),
         ("Settings/launchAtLogin_failureRestoresActualStatus", launchAtLogin_failureRestoresActualStatus),
+        ("Settings/doubleModifierSwitch_defaultsOff", doubleModifierSwitchDefaultsOff),
         ("Settings/windowScope_mirrorsThreadSafeFilterState", windowScope_mirrorsFilterState),
         ("Settings/performanceLogging_mirrorsThreadSafeState", performanceLogging_mirrorsState)
     ]
@@ -149,6 +150,15 @@ enum SwitchBladeSettingsTests {
 
         try expectEqual(enabledSettings.launchAtLogin, true)
         try expectEqual(enabledSettings.launchAtLoginStatus, .updateFailed)
+    }
+
+    @MainActor static func doubleModifierSwitchDefaultsOff() async throws {
+        let settings = SwitchBladeSettings(
+            userDefaults: makeIsolatedUserDefaults(),
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+
+        try expect(!settings.doubleModifierSwitchEnabled)
     }
 
     @MainActor static func windowScope_mirrorsFilterState() async throws {

@@ -78,6 +78,7 @@ enum SwitcherStoreTests {
         ("Store/cancel_hidesWithoutActivating", cancel_hides),
         // close
         ("Store/close_callsActivator_removesFromItems", close_callsActivator),
+        ("Store/close_failureKeepsItemVisible", close_failureKeepsItemVisible),
         ("Store/close_lastItem_hidesPanel", close_lastItem),
         ("Store/close_selectedItem_picksNeighbor", close_picksNeighbor),
         // hover
@@ -1594,6 +1595,24 @@ enum SwitcherStoreTests {
 
         try expectEqual(activator.closedItems.map(\.id), [2])
         try expectEqual(store.items.map(\.id), [1, 3])
+    }
+
+    @MainActor static func close_failureKeepsItemVisible() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.closeSucceeds = false
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        await openSwitcher(store)
+        let toClose = store.items.first(where: { $0.id == 2 })!
+
+        store.close(toClose)
+
+        try expectEqual(activator.closedItems.map(\.id), [2])
+        try expectEqual(store.items.map(\.id), [1, 2, 3])
+        try expect(store.isVisible)
     }
 
     @MainActor static func close_lastItem() async throws {

@@ -106,7 +106,7 @@ final class PreviewCacheStore {
             keepOnlyLive(liveItems)
             return [:]
         }
-        let itemsByID = Dictionary(uniqueKeysWithValues: liveItems.map { ($0.windowID, $0) })
+        let itemsByID = Dictionary(liveItems.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
         let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: liveItems, appIdentity: appIdentity(for:))
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {

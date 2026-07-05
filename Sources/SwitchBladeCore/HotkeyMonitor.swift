@@ -10,7 +10,7 @@ final class HotkeyMonitor {
         case rebuild
     }
 
-    enum Direction {
+    enum Direction: Equatable {
         case forward
         case backward
     }
@@ -34,6 +34,12 @@ final class HotkeyMonitor {
     private var wasHotkeyModifierDown = false
 
     private static let modifierDoubleTapThreshold: TimeInterval = 0.35
+    private static let relevantShortcutFlags: CGEventFlags = [
+        .maskCommand,
+        .maskAlternate,
+        .maskControl,
+        .maskShift
+    ]
 
     private static let machTimebase: mach_timebase_info_data_t = {
         var info = mach_timebase_info_data_t()
@@ -236,13 +242,16 @@ final class HotkeyMonitor {
             // The double-tap modifier was used with another key, so it was not a standalone double-tap.
             lastTapModifierPressTimestamp = nil
         }
-        let flags = event.flags.intersection([hotkeyModifier, .maskShift])
-        guard keyCode == Int64(configuredKey), flags.contains(hotkeyModifier) else {
+        guard let direction = Self.hotkeyDirection(
+            keyCode: keyCode,
+            flags: event.flags,
+            configuredKey: configuredKey,
+            hotkeyModifier: hotkeyModifier
+        ) else {
             return Unmanaged.passUnretained(event)
         }
 
         armHotkeyModifierReleaseTrackingIfNeeded()
-        let direction: Direction = flags.contains(.maskShift) ? .backward : .forward
         let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
         PerformanceDiagnostics.record(
             "hotkey_event",
@@ -294,7 +303,27 @@ final class HotkeyMonitor {
         flags: CGEventFlags,
         doubleTapModifier: CGEventFlags
     ) -> Bool {
-        isEnabled && flags.contains(doubleTapModifier)
+        guard isEnabled else { return false }
+        return flags.intersection(relevantShortcutFlags) == doubleTapModifier
+    }
+
+    static func hotkeyDirection(
+        keyCode: Int64,
+        flags: CGEventFlags,
+        configuredKey: Int,
+        hotkeyModifier: CGEventFlags
+    ) -> Direction? {
+        guard keyCode == Int64(configuredKey) else { return nil }
+        let relevantFlags = flags.intersection(relevantShortcutFlags)
+        if relevantFlags == hotkeyModifier {
+            return .forward
+        }
+        var backwardFlags = hotkeyModifier
+        backwardFlags.insert(.maskShift)
+        if relevantFlags == backwardFlags {
+            return .backward
+        }
+        return nil
     }
 
     private func installEventMonitors() {

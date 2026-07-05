@@ -134,14 +134,19 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
     private(set) var closedItems: [WindowItem] = []
     private(set) var quitItems: [WindowItem] = []
     private(set) var hiddenItems: [WindowItem] = []
+    var closeSucceeds = true
+    var snapSucceeds = true
 
     func activate(_ item: WindowItem) { activatedItems.append(item) }
     func activateApplication(pid: pid_t) { activatedApplicationPIDs.append(pid) }
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
         snapCalls.append(SnapCall(id: item.id, edge: edge))
-        return true
+        return snapSucceeds
     }
-    func close(_ item: WindowItem)    { closedItems.append(item) }
+    func close(_ item: WindowItem) -> Bool {
+        closedItems.append(item)
+        return closeSucceeds
+    }
     func quit(_ item: WindowItem)     { quitItems.append(item) }
     func hide(_ item: WindowItem)     { hiddenItems.append(item) }
 }
