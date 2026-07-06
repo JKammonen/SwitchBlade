@@ -42,6 +42,7 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     var minimizedItems: [WindowItem] = []
     var previewsToReturn: [CGWindowID: NSImage] = [:]
     var visibleSnapshotDelayNanoseconds: UInt64 = 0
+    var minimizedSnapshotDelayNanoseconds: UInt64 = 0
 
     private let lock = NSLock()
     private var _visibleSnapshotCount = 0
@@ -73,6 +74,9 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     }
 
     func snapshotMinimized() async -> [WindowItem] {
+        if minimizedSnapshotDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: minimizedSnapshotDelayNanoseconds)
+        }
         withLock { _minimizedSnapshotCount += 1 }
         return minimizedItems
     }

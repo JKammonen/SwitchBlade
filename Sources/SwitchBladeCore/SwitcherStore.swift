@@ -70,6 +70,8 @@ final class SwitcherStore: ObservableObject {
     private var currentOpenSource: String?
     private var cachedOpenItems: [WindowItem] = []
     private var cachedOpenItemsUpdatedAt: Date?
+    private var cachedMinimizedItems: [WindowItem] = []
+    private var cachedMinimizedItemsUpdatedAt: Date?
     /// Set when app focus changes outside the switcher after the cache was
     /// built. The cached list may still be young by timestamp, but its first
     /// item can now point at the wrong frontmost app for a fast Cmd+Tab.
@@ -244,7 +246,7 @@ final class SwitcherStore: ObservableObject {
             context: context,
             retainMissingCurrentAppWindows: true
         )
-        updateCachedOpenItems(stabilizedItems)
+        let cacheItems = updateCachedOpenItems(stabilizedItems)
         let windowIDs = stabilizedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
             .map(\.windowID)
@@ -261,8 +263,8 @@ final class SwitcherStore: ObservableObject {
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
         let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
         guard !Task.isCancelled, !isVisible, !isSwitching else { return }
-        let acceptedPreviews = previewCache.record(previews, liveItems: stabilizedItems, mostlyWhiteIDs: whiteIDs)
-        primeHiddenDisplayItems(stabilizedItems)
+        let acceptedPreviews = previewCache.record(previews, liveItems: cacheItems, mostlyWhiteIDs: whiteIDs)
+        primeHiddenDisplayItems(cacheItems)
         let ms = Date().timeIntervalSince(start) * 1000
         Logger.switcher.info(
             "Preview cache warmup (\(context, privacy: .public)): \(acceptedPreviews.count, privacy: .public)/\(initialWindowIDs.count, privacy: .public) in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
@@ -932,26 +934,29 @@ final class SwitcherStore: ObservableObject {
         }
 
         currentOpenSource = source
-        if updateCachedItems {
-            updateCachedOpenItems(orderedItems)
-        }
+        let displayOrderedItems = updateCachedItems
+            ? updateCachedOpenItems(orderedItems)
+            : orderedItemsWithRememberedMinimizedItems(
+                orderedItems,
+                context: "cached-open-display"
+            )
         // Display staleness is carried into the visible/previewHidden phase by the
         // mutators at the end of this method (enterPreviewHidden / enterVisible).
-        let preselectedID = defaultSelectedID(in: orderedItems)
+        let preselectedID = defaultSelectedID(in: displayOrderedItems)
 
         // Quick Cmd+Tab release should not pay the panel show or preview path
         // once the target window has already been resolved off-main.
         if case .resolving(let commitWhenReady) = phase, commitWhenReady {
-            logOpenOrdering(source: "\(source)-quick-release", orderedItems: orderedItems, selectedID: preselectedID)
+            logOpenOrdering(source: "\(source)-quick-release", orderedItems: displayOrderedItems, selectedID: preselectedID)
             let quickSwitchMs = Date().timeIntervalSince(openStart) * 1000
             if PerformanceLoggingState.mode != .off {
                 if let queueMs {
                     Logger.switcher.info(
-                        "Quick release before panel show: \(orderedItems.count, privacy: .public) windows ready in \(quickSwitchMs, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+                        "Quick release before panel show: \(displayOrderedItems.count, privacy: .public) windows ready in \(quickSwitchMs, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
                     )
                 } else {
                     Logger.switcher.info(
-                        "Quick release before panel show: \(orderedItems.count, privacy: .public) windows ready in \(quickSwitchMs, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), queue=n/a, permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+                        "Quick release before panel show: \(displayOrderedItems.count, privacy: .public) windows ready in \(quickSwitchMs, format: .fixed(precision: 1), privacy: .public) ms; source=\(source, privacy: .public), queue=n/a, permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
                     )
                 }
             }
@@ -959,7 +964,7 @@ final class SwitcherStore: ObservableObject {
             // commitWhenReady is cleared by the hide() → enterIdle() that follows
             // this activation (or the guard-fail hide() below).
             guard let preselectedID,
-                  let item = orderedItems.first(where: { $0.id == preselectedID }) else {
+                  let item = displayOrderedItems.first(where: { $0.id == preselectedID }) else {
                 Logger.switcher.notice("Quick release aborted: no selected item after snapshot")
                 hide()
                 return
@@ -967,7 +972,7 @@ final class SwitcherStore: ObservableObject {
 
             performSelectionAction(
                 for: item,
-                liveItems: orderedItems,
+                liveItems: displayOrderedItems,
                 actionName: "activate",
                 source: source
             ) { activator, selectedItem in
@@ -977,12 +982,12 @@ final class SwitcherStore: ObservableObject {
         }
 
         let hydrateStart = Date()
-        let hydratedItems = hydratedForDisplay(orderedItems)
+        let hydratedItems = hydratedForDisplay(displayOrderedItems)
         let hydrateMs = Date().timeIntervalSince(hydrateStart) * 1000
         // Preselect the second item so a tap-Cmd+Tab+release toggles between
         // the two most-recent windows. With only one item, select that.
         applyDisplayItems(hydratedItems, selectedID: preselectedID)
-        logOpenOrdering(source: source, orderedItems: orderedItems, selectedID: selectedID)
+        logOpenOrdering(source: source, orderedItems: displayOrderedItems, selectedID: selectedID)
 
         let cachedHits = items.filter { $0.preview != nil }.count
         let coldMs = Date().timeIntervalSince(openStart) * 1000
@@ -994,7 +999,7 @@ final class SwitcherStore: ObservableObject {
             "order_ms": .double(orderMs),
             "permission_ms": .double(permissionMs),
             "source": .string(source),
-            "window_count": .int(orderedItems.count)
+            "window_count": .int(displayOrderedItems.count)
         ]
         if let queueMs {
             coldFields["queue_ms"] = .double(queueMs)
@@ -1004,11 +1009,11 @@ final class SwitcherStore: ObservableObject {
         if PerformanceLoggingState.mode != .off {
             if let queueMs {
                 Logger.switcher.info(
-                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                    "Cold-open: \(displayOrderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=\(queueMs, format: .fixed(precision: 1), privacy: .public), permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
                 )
             } else {
                 Logger.switcher.info(
-                    "Cold-open: \(orderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=n/a, permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
+                    "Cold-open: \(displayOrderedItems.count, privacy: .public) windows in \(coldMs, format: .fixed(precision: 1), privacy: .public) ms, \(cachedHits, privacy: .public) from cache; source=\(source, privacy: .public), queue=n/a, permission=\(permissionMs, format: .fixed(precision: 1), privacy: .public), snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public); rolling n=\(coldSummary.count, privacy: .public), avg=\(coldSummary.average, format: .fixed(precision: 1), privacy: .public), p95=\(coldSummary.p95, format: .fixed(precision: 1), privacy: .public), p99=\(coldSummary.p99, format: .fixed(precision: 1), privacy: .public), max=\(coldSummary.max, format: .fixed(precision: 1), privacy: .public)"
                 )
             }
         }
@@ -1084,21 +1089,21 @@ final class SwitcherStore: ObservableObject {
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             guard !orderedItems.isEmpty else { return }
 
-            self.updateCachedOpenItems(orderedItems)
+            let cacheItems = self.updateCachedOpenItems(orderedItems)
 
             if self.currentShowingStale {
                 let hydrateMs = self.applyStaleCacheRefresh(
-                    orderedItems,
+                    cacheItems,
                     showAfterRefresh: self.isVisible
                 )
                 if PerformanceLoggingState.mode != .off {
                     Logger.switcher.info(
-                        "Open-items refresh after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public)"
+                        "Open-items refresh after stale cache: \(cacheItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public), hydrate=\(hydrateMs, format: .fixed(precision: 1), privacy: .public)"
                     )
                 }
             } else if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
-                    "Open-items cache healed after stale cache: \(orderedItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
+                    "Open-items cache healed after stale cache: \(cacheItems.count, privacy: .public) windows; snapshot=\(snapshotMs, format: .fixed(precision: 1), privacy: .public), order=\(orderMs, format: .fixed(precision: 1), privacy: .public)"
                 )
             }
         }
@@ -1263,11 +1268,11 @@ final class SwitcherStore: ObservableObject {
                 context: context,
                 retainMissingCurrentAppWindows: true
             )
-            self.updateCachedOpenItems(stabilizedItems)
+            let cacheItems = self.updateCachedOpenItems(stabilizedItems)
             let ms = Date().timeIntervalSince(start) * 1000
             if PerformanceLoggingState.mode != .off {
                 Logger.switcher.info(
-                    "Open-items cache warmup (\(context, privacy: .public)): \(stabilizedItems.count, privacy: .public) windows in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
+                    "Open-items cache warmup (\(context, privacy: .public)): \(cacheItems.count, privacy: .public) windows in \(ms, format: .fixed(precision: 1), privacy: .public) ms"
                 )
             }
         }
@@ -1322,11 +1327,55 @@ final class SwitcherStore: ObservableObject {
         )
     }
 
-    private func updateCachedOpenItems(_ orderedItems: [WindowItem]) {
-        cachedOpenItems = orderedItems
-        cachedOpenItemsUpdatedAt = orderedItems.isEmpty ? nil : Date()
+    @discardableResult
+    private func updateCachedOpenItems(_ orderedItems: [WindowItem]) -> [WindowItem] {
+        let cacheItems = orderedItemsWithRememberedMinimizedItems(
+            orderedItems,
+            context: "cached-open-update"
+        )
+        cachedOpenItems = cacheItems
+        cachedOpenItemsUpdatedAt = cacheItems.isEmpty ? nil : Date()
         cachedOpenItemsNeedResnapshot = false
-        primeHiddenDisplayItems(orderedItems)
+        primeHiddenDisplayItems(cacheItems)
+        return cacheItems
+    }
+
+    private func updateCachedMinimizedItems(_ minimizedItems: [WindowItem]) {
+        cachedMinimizedItems = minimizedItems
+        cachedMinimizedItemsUpdatedAt = minimizedItems.isEmpty ? nil : Date()
+    }
+
+    private func freshCachedMinimizedItems(now: Date = Date()) -> [WindowItem] {
+        guard let updatedAt = cachedMinimizedItemsUpdatedAt,
+              now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge else {
+            return []
+        }
+        return cachedMinimizedItems
+    }
+
+    private func orderedItemsWithRememberedMinimizedItems(
+        _ orderedItems: [WindowItem],
+        context: String
+    ) -> [WindowItem] {
+        let rememberedMinimizedItems = freshCachedMinimizedItems()
+        guard !rememberedMinimizedItems.isEmpty else { return orderedItems }
+
+        let existingIDs = Set(orderedItems.map(\.id))
+        let additions = rememberedMinimizedItems
+            .filter { !existingIDs.contains($0.id) }
+            .map { item in
+                SwitchBladeSettings.shared.previewMode == .iconsOnly
+                    ? item
+                    : previewCache.hydrated(item, liveItems: orderedItems + rememberedMinimizedItems)
+            }
+        guard !additions.isEmpty else { return orderedItems }
+
+        return orderItems(
+            mruTracker.orderedForDisplay(
+                from: orderedItems + additions,
+                context: context
+            )
+        )
     }
 
     private func primeHiddenDisplayItems(_ orderedItems: [WindowItem]) {
@@ -1725,24 +1774,26 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) {
-        guard isVisible, previewGeneration == generation, !minimized.isEmpty else { return }
-        let existingIDs = Set(items.map(\.id))
+        guard isVisible, previewGeneration == generation else { return }
+        updateCachedMinimizedItems(minimized)
         let previousSelectedID = selectedID
         let selectionWasDefault = previousSelectedID == defaultSelectedID(in: items)
-        let newItems = minimized
-            .filter { !existingIDs.contains($0.id) }
-            .map { item in
-                SwitchBladeSettings.shared.previewMode == .iconsOnly
-                    ? item
-                    : previewCache.hydrated(item, liveItems: items + minimized)
-            }
-        guard !newItems.isEmpty else { return }
+        let visibleItems = items.filter { !$0.isMinimized }
+        let minimizedItems = minimized.map { item in
+            SwitchBladeSettings.shared.previewMode == .iconsOnly
+                ? item
+                : previewCache.hydrated(item, liveItems: visibleItems + minimized)
+        }
+        let mergedItems = visibleItems + minimizedItems
+        guard !mergedItems.isEmpty else { return }
         let orderedItems = orderItems(
             mruTracker.orderedForDisplay(
-                from: items + newItems,
+                from: mergedItems,
                 context: "minimized-merge"
             )
         )
+        updateCachedOpenItems(orderedItems)
+        guard orderedItems != items else { return }
         items = orderedItems
         if selectionWasDefault {
             selectedID = defaultSelectedID(in: orderedItems)

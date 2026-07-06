@@ -30,6 +30,8 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
         ("Store/cachedDelayPath_mergesMinimizedAfterPanelShow", cachedDelayPath_mergesMinimized),
+        ("Store/requestCycle_cachedOpenIncludesRememberedMinimizedBeforeAXMerge", requestCycle_cachedOpenIncludesRememberedMinimizedBeforeAXMerge),
+        ("Store/minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty", minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty),
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
         // ordering
@@ -386,6 +388,104 @@ enum SwitcherStoreTests {
         try expect(
             store.items.contains(where: { $0.id == 99 }),
             "minimized window must merge into items after the delayed cached open"
+        )
+    }
+
+    @MainActor static func requestCycle_cachedOpenIncludesRememberedMinimizedBeforeAXMerge() async throws {
+        let (store, catalog, _, _) = makeStore()
+        let frontmost = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Codex",
+            title: "Work",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.openai.codex"
+        )
+        let finder = makeItem(
+            id: 2,
+            pid: 200,
+            appName: "Finder",
+            title: "Desktop",
+            bundleIdentifier: "com.apple.finder"
+        )
+        let remindersID = SyntheticWindowID.make(pid: 300, index: 0, title: "Today")
+        let reminders = makeItem(
+            id: remindersID,
+            pid: 300,
+            appName: "Reminders",
+            title: "Today",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.apple.reminders"
+        )
+        catalog.visibleItems = [frontmost, finder]
+        catalog.minimizedItems = [reminders]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == remindersID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(store.items.contains(where: { $0.id == remindersID }))
+
+        store.cancel()
+        await runPendingMainTasks()
+
+        store.scheduleOpenItemsCacheWarmup(context: "test")
+        await runPendingMainTasks()
+
+        catalog.minimizedSnapshotDelayNanoseconds = 200_000_000
+        store.requestCycle(forward: true)
+
+        try expect(store.isVisible)
+        try expect(
+            store.items.contains(where: { $0.id == remindersID }),
+            "remembered minimized row should be present on initial cached paint, before the delayed AX merge returns"
+        )
+    }
+
+    @MainActor static func minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty() async throws {
+        let (store, catalog, _, _) = makeStore()
+        let frontmost = makeItem(id: 1, pid: 100, isFrontmostApp: true)
+        let second = makeItem(id: 2, pid: 200)
+        let minimizedID = SyntheticWindowID.make(pid: 300, index: 0, title: "Today")
+        let minimized = makeItem(
+            id: minimizedID,
+            pid: 300,
+            appName: "Reminders",
+            title: "Today",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.apple.reminders"
+        )
+        catalog.visibleItems = [frontmost, second]
+        catalog.minimizedItems = [minimized]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == minimizedID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(store.items.contains(where: { $0.id == minimizedID }))
+
+        store.cancel()
+        await runPendingMainTasks()
+
+        catalog.minimizedItems = []
+        catalog.minimizedSnapshotDelayNanoseconds = 120_000_000
+        store.requestCycle(forward: true)
+        try expect(
+            store.items.contains(where: { $0.id == minimizedID }),
+            "remembered minimized row should cover the delay before the fresh minimized snapshot returns"
+        )
+
+        for _ in 0 ..< 60 where store.items.contains(where: { $0.id == minimizedID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(
+            !store.items.contains(where: { $0.id == minimizedID }),
+            "empty AX minimized snapshot should remove the remembered minimized row instead of keeping a ghost tile"
         )
     }
 
