@@ -8,9 +8,9 @@ enum PermissionKind: String, CaseIterable {
     var title: String {
         switch self {
         case .accessibility:
-            return "Accessibility"
+            return L10n.tr(.permissionNameAccessibility)
         case .screenRecording:
-            return "Screen Recording"
+            return L10n.tr(.permissionNameScreenRecording)
         }
     }
 
@@ -30,7 +30,10 @@ struct PermissionState: Equatable {
 
     var needsAccessibility: Bool { !hasAccessibility }
     var needsScreenRecording: Bool { !hasScreenRecording }
-    var isReady: Bool { hasAccessibility && hasScreenRecording }
+    /// Accessibility is required for the global switcher. Screen Recording is
+    /// an optional preview capability and is irrelevant in icons-only mode.
+    var isReady: Bool { hasAccessibility }
+    var hasAllCapabilities: Bool { hasAccessibility && hasScreenRecording }
 
     var missingPermissions: [PermissionKind] {
         var permissions: [PermissionKind] = []
@@ -41,12 +44,35 @@ struct PermissionState: Equatable {
 
     var primaryMissingPermission: PermissionKind? { missingPermissions.first }
 
+    func missingPermissions(for previewMode: SBPreviewMode) -> [PermissionKind] {
+        var permissions: [PermissionKind] = []
+        if needsAccessibility { permissions.append(.accessibility) }
+        if previewMode != .iconsOnly, needsScreenRecording {
+            permissions.append(.screenRecording)
+        }
+        return permissions
+    }
+
+    func primaryMissingPermission(for previewMode: SBPreviewMode) -> PermissionKind? {
+        missingPermissions(for: previewMode).first
+    }
+
     var message: String? {
         switch (needsAccessibility, needsScreenRecording) {
         case (false, false): return nil
         case (true, false):  return L10n.tr(.permissionMessageAccessibility)
         case (false, true):  return L10n.tr(.permissionMessageScreenRecording)
         default:             return L10n.tr(.permissionMessageBoth)
+        }
+    }
+
+    func message(for previewMode: SBPreviewMode) -> String? {
+        let relevant = missingPermissions(for: previewMode)
+        switch (relevant.contains(.accessibility), relevant.contains(.screenRecording)) {
+        case (false, false): return nil
+        case (true, false):  return L10n.tr(.permissionMessageAccessibility)
+        case (false, true):  return L10n.tr(.permissionMessageScreenRecording)
+        case (true, true):   return L10n.tr(.permissionMessageBoth)
         }
     }
 }
@@ -61,18 +87,13 @@ final class PermissionService: PermissionProviding, Sendable {
         )
     }
 
-    func requestIfNeeded() {
-        let state = currentState()
-
-        // Accessibility: AXIsProcessTrustedWithOptions shows the standard system
-        // prompt safely — this is the documented, idempotent way to request it.
-        if state.needsAccessibility {
+    /// Called only from an explicit user action in a visible recovery surface.
+    /// AppDelegate follows this with the relevant System Settings deep link for
+    /// both permissions, because macOS may suppress a previously denied prompt.
+    func request(_ permission: PermissionKind) {
+        if permission == .accessibility, currentState().needsAccessibility {
             let options = [accessibilityPromptKey: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         }
-
-        // Screen Recording: do NOT call CGRequestScreenCaptureAccess().
-        // It triggers an OS dialog on every call when TCC doesn't recognize the
-        // binary. Instead we show our own NSAlert that opens System Settings.
     }
 }

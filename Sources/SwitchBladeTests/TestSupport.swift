@@ -47,6 +47,8 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     private let lock = NSLock()
     private var _visibleSnapshotCount = 0
     private var _minimizedSnapshotCount = 0
+    private var _minimizedSnapshotStartCount = 0
+    private var _minimizedSnapshotCancellationCount = 0
     private var _captureCallCount = 0
     private var _lastCaptureWindowIDs: [CGWindowID] = []
     private var _captureWindowIDCalls: [[CGWindowID]] = []
@@ -60,6 +62,8 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
 
     var visibleSnapshotCount: Int { withLock { _visibleSnapshotCount } }
     var minimizedSnapshotCount: Int { withLock { _minimizedSnapshotCount } }
+    var minimizedSnapshotStartCount: Int { withLock { _minimizedSnapshotStartCount } }
+    var minimizedSnapshotCancellationCount: Int { withLock { _minimizedSnapshotCancellationCount } }
     var captureCallCount: Int { withLock { _captureCallCount } }
     var lastCaptureWindowIDs: [CGWindowID] { withLock { _lastCaptureWindowIDs } }
     var captureWindowIDCalls: [[CGWindowID]] { withLock { _captureWindowIDCalls } }
@@ -67,15 +71,28 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
 
     func snapshotVisibleOnly() -> [WindowItem] {
         withLock { _visibleSnapshotCount += 1 }
+        let snapshot = visibleItems
         if visibleSnapshotDelayNanoseconds > 0 {
             Thread.sleep(forTimeInterval: Double(visibleSnapshotDelayNanoseconds) / 1_000_000_000)
         }
-        return visibleItems
+        return snapshot
     }
 
-    func snapshotMinimized() async -> [WindowItem] {
-        if minimizedSnapshotDelayNanoseconds > 0 {
-            try? await Task.sleep(nanoseconds: minimizedSnapshotDelayNanoseconds)
+    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> [WindowItem] {
+        withLock { _minimizedSnapshotStartCount += 1 }
+        var remainingDelay = minimizedSnapshotDelayNanoseconds
+        while remainingDelay > 0 {
+            if cancellation.isCancelled {
+                withLock { _minimizedSnapshotCancellationCount += 1 }
+                return []
+            }
+            let slice = min(remainingDelay, 5_000_000)
+            try? await Task.sleep(nanoseconds: slice)
+            remainingDelay -= slice
+        }
+        if cancellation.isCancelled {
+            withLock { _minimizedSnapshotCancellationCount += 1 }
+            return []
         }
         withLock { _minimizedSnapshotCount += 1 }
         return minimizedItems
@@ -132,27 +149,107 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
         let edge: WindowSnapEdge
     }
 
-    private(set) var activatedItems: [WindowItem] = []
-    private(set) var activatedApplicationPIDs: [pid_t] = []
-    private(set) var snapCalls: [SnapCall] = []
-    private(set) var closedItems: [WindowItem] = []
-    private(set) var quitItems: [WindowItem] = []
-    private(set) var hiddenItems: [WindowItem] = []
-    var closeSucceeds = true
-    var snapSucceeds = true
+    private struct State {
+        var activatedItems: [WindowActionTarget] = []
+        var activatedApplicationPIDs: [pid_t] = []
+        var snapCalls: [SnapCall] = []
+        var closedItems: [WindowActionTarget] = []
+        var quitItems: [WindowActionTarget] = []
+        var hiddenItems: [WindowActionTarget] = []
+        var closeSucceeds = true
+        var snapSucceeds = true
+        var activationSucceeds = true
+        var applicationActivationSucceeds = true
+        var quitSucceeds = true
+        var hideSucceeds = true
+        var actionDelayNanoseconds: UInt64 = 0
+    }
 
-    func activate(_ item: WindowItem) { activatedItems.append(item) }
-    func activateApplication(pid: pid_t) { activatedApplicationPIDs.append(pid) }
-    func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
-        snapCalls.append(SnapCall(id: item.id, edge: edge))
-        return snapSucceeds
+    private let state = LockedValue(State())
+    var activatedItems: [WindowActionTarget] { state.value.activatedItems }
+    var activatedApplicationPIDs: [pid_t] { state.value.activatedApplicationPIDs }
+    var snapCalls: [SnapCall] { state.value.snapCalls }
+    var closedItems: [WindowActionTarget] { state.value.closedItems }
+    var quitItems: [WindowActionTarget] { state.value.quitItems }
+    var hiddenItems: [WindowActionTarget] { state.value.hiddenItems }
+    var closeSucceeds: Bool {
+        get { state.value.closeSucceeds }
+        set { state.withValue { $0.closeSucceeds = newValue } }
     }
-    func close(_ item: WindowItem) -> Bool {
-        closedItems.append(item)
-        return closeSucceeds
+    var snapSucceeds: Bool {
+        get { state.value.snapSucceeds }
+        set { state.withValue { $0.snapSucceeds = newValue } }
     }
-    func quit(_ item: WindowItem)     { quitItems.append(item) }
-    func hide(_ item: WindowItem)     { hiddenItems.append(item) }
+    var activationSucceeds: Bool {
+        get { state.value.activationSucceeds }
+        set { state.withValue { $0.activationSucceeds = newValue } }
+    }
+    var applicationActivationSucceeds: Bool {
+        get { state.value.applicationActivationSucceeds }
+        set { state.withValue { $0.applicationActivationSucceeds = newValue } }
+    }
+    var quitSucceeds: Bool {
+        get { state.value.quitSucceeds }
+        set { state.withValue { $0.quitSucceeds = newValue } }
+    }
+    var hideSucceeds: Bool {
+        get { state.value.hideSucceeds }
+        set { state.withValue { $0.hideSucceeds = newValue } }
+    }
+    var actionDelayNanoseconds: UInt64 {
+        get { state.value.actionDelayNanoseconds }
+        set { state.withValue { $0.actionDelayNanoseconds = newValue } }
+    }
+
+    private func delayIfNeeded() {
+        let delay = state.value.actionDelayNanoseconds
+        if delay > 0 {
+            Thread.sleep(forTimeInterval: Double(delay) / 1_000_000_000)
+        }
+    }
+
+    func activate(_ item: WindowActionTarget) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.activatedItems.append(item)
+            return $0.activationSucceeds
+        }
+    }
+    func activateApplication(pid: pid_t) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.activatedApplicationPIDs.append(pid)
+            return $0.applicationActivationSucceeds
+        }
+    }
+    func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.snapCalls.append(SnapCall(id: item.id, edge: edge))
+            return $0.snapSucceeds
+        }
+    }
+    func close(_ item: WindowActionTarget) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.closedItems.append(item)
+            return $0.closeSucceeds
+        }
+    }
+    func quit(_ item: WindowActionTarget) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.quitItems.append(item)
+            return $0.quitSucceeds
+        }
+    }
+    func hide(_ item: WindowActionTarget) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.hiddenItems.append(item)
+            return $0.hideSucceeds
+        }
+    }
 }
 
 final class MockPermissionService: PermissionProviding, @unchecked Sendable {

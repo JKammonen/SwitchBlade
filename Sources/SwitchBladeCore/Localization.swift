@@ -198,6 +198,7 @@ public enum L10n {
     public enum Key: String, CaseIterable {
         // SettingsView — sections
         case settingsLanguage
+        case settingsPermissions
         case settingsBehavior
         case settingsHotkey
         case settingsPrivacy
@@ -214,11 +215,14 @@ public enum L10n {
         case launchAtLoginStatusRequiresApproval
         case launchAtLoginStatusUnavailable
         case launchAtLoginStatusUpdateFailed
+        case actionOpenLoginItemsSettings
         case fieldShowMenuBarIcon
         case fieldWindowScope
         case fieldPreviewMode
         case fieldSortOrder
         case fieldHiddenApps
+        case fieldHiddenAppsHelp
+        case hiddenAppsParsedSummary
         case fieldReducedMotion
         case fieldPerformanceLogging
         case fieldResetAppearance
@@ -230,8 +234,11 @@ public enum L10n {
         case fieldActiveCombo
         case fieldDoubleModifierSwitch
         case fieldDoubleModifier
+        case shortcutConflictSpotlight
+        case shortcutConflictInputSource
         case fieldColor
         case fieldOpacity
+        case fieldColorStrength
         case fieldPosition
         case fieldAppIconColor
         case fieldIconSize
@@ -254,16 +261,16 @@ public enum L10n {
         case permissionMessageAccessibility
         case permissionMessageScreenRecording
         case permissionMessageBoth
+        case permissionNameAccessibility
+        case permissionNameScreenRecording
+        case permissionActionOpenSettings
+        case permissionActionOpenSettingsShort
 
         // Permission alert (AppDelegate)
         case alertPermissionTitle           // formatted with permission title
         case alertPermissionBody            // formatted with missing list
         case alertOpenSettings
         case alertLater
-
-        // Permission kind titles (kept in English because they mirror macOS
-        // System Settings labels — translating would actively confuse).
-        // Not part of this table; rendered via PermissionKind.title verbatim.
 
         // Modifiers
         case modifierCommand
@@ -312,13 +319,34 @@ public enum L10n {
         case menuSecureInputStale
         case menuSecureInputClear
         case menuSecureInputClearUnavailable
+        case menuPermissions
+        case menuOpenPermissionSettings
         case menuSettings
         case menuAbout
         case menuQuit
         case menuSettingsWindowTitle
+        case menuEdit
+        case menuWindow
+        case menuHelp
+        case menuServices
+        case menuHide
+        case menuHideOthers
+        case menuShowAll
+        case menuUndo
+        case menuRedo
+        case menuCut
+        case menuCopy
+        case menuPaste
+        case menuSelectAll
+        case menuMinimize
+        case menuZoom
+        case menuBringAllToFront
         case tooltipSettings
         case tooltipSecureInputActive
         case tooltipSecureInputStale
+        case accessibilityStatusItemLabel
+        case accessibilityStatusItemHelp
+        case accessibilitySwitcherPanelLabel
         case aboutBuiltAt
     }
 

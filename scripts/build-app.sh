@@ -1,6 +1,11 @@
 #!/bin/zsh
 
+if [[ -z "${ZSH_VERSION:-}" ]]; then
+    exec /bin/zsh "$0" "$@"
+fi
+
 set -euo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 app_name="SwitchBlade"
@@ -10,6 +15,13 @@ build_number="${APP_BUILD_NUMBER:-1}"
 build_timestamp="${APP_BUILD_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 
 source "$repo_root/scripts/signing-config.sh"
+source "$repo_root/scripts/signing-safety.sh"
+
+original_user_keychains="$(switchblade_capture_user_keychain_search_list)" || {
+    echo "ERROR: unable to capture the original user keychain search list." >&2
+    exit 1
+}
+switchblade_assert_user_keychain_search_list_sane
 
 normalize_sha1() {
     tr -d ':\n\r ' | tr 'A-F' 'a-f'
@@ -25,22 +37,6 @@ expected_signing_fingerprint() {
         return
     fi
     certificate_sha1 "$SWITCHBLADE_CODESIGN_CERTIFICATE"
-}
-
-assert_keychain_search_list_sane() {
-    local keychain_count
-    keychain_count="$(security list-keychains -d user | wc -l | tr -d ' ')"
-    if (( keychain_count > 3 )); then
-        echo "ERROR: keychain search list has $keychain_count entries; possible build signing regression." >&2
-        security list-keychains -d user >&2
-        exit 1
-    fi
-
-    if security list-keychains -d user | grep -Eq '"/Users/[^"]+/Library/Application"$|"/Users/[^"]+/Library/Keychains/Support/'; then
-        echo "ERROR: keychain search list contains broken SwitchBlade path fragments." >&2
-        security list-keychains -d user >&2
-        exit 1
-    fi
 }
 
 assert_expected_signature() {
@@ -71,46 +67,35 @@ assert_expected_signature() {
     fi
 }
 
-sign_with_local_identity() {
+sign_with_explicit_identity() {
     local expected_fingerprint="$1"
-    local keychain_password
-    keychain_password="$(<"$SWITCHBLADE_CODESIGN_PASSWORD_FILE")"
+    local transient_password="switchblade-transient"
 
     (
         set +e
 
-        local temp_dir temp_keychain identity_hash expected_fingerprint_upper
-        temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/switchblade-codesign.XXXXXX")"
+        local temp_dir temp_keychain temp_archive sign_status cleanup_status
+        temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/switchblade-codesign.XXXXXX")" || exit 1
         temp_keychain="$temp_dir/SwitchBladeCodesign.keychain"
-        expected_fingerprint_upper="$(printf '%s' "$expected_fingerprint" | tr 'a-f' 'A-F')"
-        local original_keychains=()
-        while IFS= read -r keychain; do
-            [[ -n "$keychain" ]] && original_keychains+=("$keychain")
-        done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//')
-
-        restore_original_keychains() {
-            if (( ${#original_keychains[@]} > 0 )); then
-                security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
-            else
-                security list-keychains -d user -s >/dev/null 2>&1 || true
-            fi
-        }
+        temp_archive="$temp_dir/identity.p12"
 
         cleanup_signing_state() {
-            restore_original_keychains
+            security delete-keychain "$temp_keychain" >/dev/null 2>&1 || true
             rm -rf "$temp_dir"
         }
 
-        # EXIT trap makes the restore path run even when signing is interrupted.
         trap cleanup_signing_state EXIT
         trap 'exit 129' HUP
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        security create-keychain -p "$keychain_password" "$temp_keychain" >/dev/null
-        local sign_status=$?
+        # The temporary keychain and temporary archive live in a mode-0700
+        # directory. This fixed disposable value is not a persistent secret;
+        # the actual archive password never appears in process arguments.
+        security create-keychain -p "$transient_password" "$temp_keychain" >/dev/null
+        sign_status=$?
         if (( sign_status == 0 )); then
-            security unlock-keychain -p "$keychain_password" "$temp_keychain" >/dev/null
+            security unlock-keychain -p "$transient_password" "$temp_keychain" >/dev/null
             sign_status=$?
         fi
         if (( sign_status == 0 )); then
@@ -118,59 +103,101 @@ sign_with_local_identity() {
             sign_status=$?
         fi
         if (( sign_status == 0 )); then
-            if (( ${#original_keychains[@]} > 0 )); then
-                security list-keychains -d user -s "$temp_keychain" "${original_keychains[@]}" >/dev/null
-                sign_status=$?
-            else
-                security list-keychains -d user -s "$temp_keychain" >/dev/null
-                sign_status=$?
-            fi
-        fi
-        if (( sign_status == 0 )); then
-            security import "$SWITCHBLADE_CODESIGN_ARCHIVE" \
-            -k "$temp_keychain" \
-            -P "$keychain_password" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security >/dev/null
+            openssl pkcs12 -export \
+                -inkey "$SWITCHBLADE_CODESIGN_PRIVATE_KEY" \
+                -in "$SWITCHBLADE_CODESIGN_CERTIFICATE" \
+                -out "$temp_archive" \
+                -passout pass:"$transient_password" >/dev/null 2>&1
             sign_status=$?
         fi
         if (( sign_status == 0 )); then
-            security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$temp_keychain" >/dev/null
-            sign_status=$?
-        fi
-
-        if (( sign_status == 0 )); then
-            identity_hash="$(
-                security find-identity -v -p codesigning "$temp_keychain" \
-                    | awk -v hash="$expected_fingerprint_upper" '$2 == hash { print $2; exit }'
-            )"
-            [[ -n "$identity_hash" ]]
+            chmod 600 "$temp_archive"
+            # The key is broadly accessible only inside this short-lived,
+            # unlisted keychain so the local helper can use its explicit
+            # identity without a SecurityAgent prompt.
+            security import "$temp_archive" \
+                -k "$temp_keychain" \
+                -P "$transient_password" \
+                -A >/dev/null
             sign_status=$?
         fi
         if (( sign_status == 0 )); then
-            codesign --force --deep --sign "$identity_hash" --keychain "$temp_keychain" "$app_bundle"
+            "$signing_helper_binary" "$temp_keychain" "$expected_fingerprint" "$app_bundle"
             sign_status=$?
         fi
 
+        trap - EXIT HUP INT TERM
+        cleanup_signing_state
+        cleanup_status=$?
+        (( cleanup_status == 0 )) || exit "$cleanup_status"
         exit "$sign_status"
     )
 }
 
 output_dir="$repo_root/dist"
-app_bundle="$output_dir/$app_name.app"
+final_app_bundle="$output_dir/$app_name.app"
+staging_app_bundle="$output_dir/.$app_name.app.staging.$$"
+app_bundle="$staging_app_bundle"
 contents_dir="$app_bundle/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
 plist_path="$contents_dir/Info.plist"
 binary_path="$repo_root/.build/release/$app_name"
+signing_helper_source="$repo_root/scripts/sign-app-with-keychain.c"
+signing_helper_binary="$repo_root/.build/signing-tools/sign-app-with-keychain"
+atomic_replace_source="$repo_root/scripts/atomic-replace.c"
+atomic_replace_binary="$repo_root/.build/signing-tools/atomic-replace"
+
+identity_name=""
+expected_fingerprint=""
+if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" != "1" ]]; then
+    identity_name="$($repo_root/scripts/setup-local-codesign.sh)" || {
+        echo "ERROR: local codesign setup failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
+        exit 1
+    }
+    expected_fingerprint="$(expected_signing_fingerprint)"
+fi
+
+switchblade_acquire_signing_lock
 
 mkdir -p "$output_dir"
+switchblade_secure_signing_material_permissions
+switchblade_cleanup_stale_build_artifacts "${TMPDIR:-/tmp}" "$output_dir"
+
+cleanup_staging_bundle() {
+    rm -rf "$staging_app_bundle"
+}
+
+cleanup_staging_bundle
+trap cleanup_staging_bundle EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir -p "$(dirname "$signing_helper_binary")"
+if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" != "1" ]]; then
+    xcrun clang \
+        -std=c11 \
+        -Wall \
+        -Wextra \
+        -Werror \
+        -Wno-deprecated-declarations \
+        -framework CoreFoundation \
+        -framework Security \
+        "$signing_helper_source" \
+        -o "$signing_helper_binary"
+fi
+xcrun clang \
+    -std=c11 \
+    -Wall \
+    -Wextra \
+    -Werror \
+    "$atomic_replace_source" \
+    -o "$atomic_replace_binary"
 
 cd "$repo_root"
 swift build -c release --product "$app_name"
 
-rm -rf "$app_bundle"
-mkdir -p "$macos_dir" "$resources_dir"
+mkdir -p "$macos_dir" "$resources_dir/en.lproj" "$resources_dir/fi.lproj"
 
 cp "$binary_path" "$macos_dir/$app_name"
 chmod +x "$macos_dir/$app_name"
@@ -214,10 +241,16 @@ cat > "$plist_path" <<EOF
     <string>NSApplication</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>SwitchBlade uses Screen Recording to show live window previews in the app switcher.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>SwitchBlade uses Accessibility to switch and manage windows.</string>
 </dict>
 </plist>
+EOF
+
+cat > "$resources_dir/en.lproj/InfoPlist.strings" <<'EOF'
+"NSScreenCaptureUsageDescription" = "SwitchBlade uses Screen Recording to show live window previews in the app switcher.";
+EOF
+
+cat > "$resources_dir/fi.lproj/InfoPlist.strings" <<'EOF'
+"NSScreenCaptureUsageDescription" = "SwitchBlade käyttää näytön tallennusta ikkunoiden elävien esikatselujen näyttämiseen.";
 EOF
 
 if ! command -v codesign >/dev/null 2>&1; then
@@ -228,20 +261,24 @@ fi
 if [[ "${SWITCHBLADE_FORCE_ADHOC_SIGN:-0}" == "1" ]]; then
     codesign --force --deep --sign - "$app_bundle"
     echo "Signed ad-hoc because SWITCHBLADE_FORCE_ADHOC_SIGN=1"
-elif identity_name="$($repo_root/scripts/setup-local-codesign.sh)"; then
-    expected_fingerprint="$(expected_signing_fingerprint)"
-    if sign_with_local_identity "$expected_fingerprint"; then
+else
+    if sign_with_explicit_identity "$expected_fingerprint"; then
         echo "Signed with identity: $identity_name ($expected_fingerprint)"
     else
-        echo "ERROR: local identity signing failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
+        echo "ERROR: stable local identity signing failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
         exit 1
     fi
-else
-    echo "ERROR: local codesign setup failed; refusing ad-hoc fallback because it would reset TCC permissions. Use SWITCHBLADE_FORCE_ADHOC_SIGN=1 only for an explicit clean repro." >&2
-    exit 1
 fi
 
 assert_expected_signature
-assert_keychain_search_list_sane
+switchblade_assert_user_keychain_search_list_unchanged "$original_user_keychains"
+switchblade_assert_user_keychain_search_list_sane
+if [[ "${SWITCHBLADE_FAIL_BEFORE_PUBLISH:-0}" == "1" ]]; then
+    echo "ERROR: injected failure before atomic app publication." >&2
+    exit 1
+fi
+"$atomic_replace_binary" "$staging_app_bundle" "$final_app_bundle"
+rm -rf "$staging_app_bundle"
+trap - EXIT HUP INT TERM
 
-echo "Built $app_bundle"
+echo "Built $final_app_bundle"

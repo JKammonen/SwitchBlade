@@ -13,7 +13,13 @@ enum SwitchBladeSettingsTests {
         ("Settings/launchAtLogin_initializesFromLiveStatus", launchAtLogin_initializesFromLiveStatus),
         ("Settings/launchAtLogin_successPersistsActualStatus", launchAtLogin_successPersistsActualStatus),
         ("Settings/launchAtLogin_failureRestoresActualStatus", launchAtLogin_failureRestoresActualStatus),
+        ("Settings/launchAtLogin_refreshReadsLiveStatus", launchAtLoginRefreshReadsLiveStatus),
         ("Settings/doubleModifierSwitch_defaultsOff", doubleModifierSwitchDefaultsOff),
+        ("Settings/hotkey_reservedSpaceCombosAreRejected", reservedSpaceCombosAreRejected),
+        ("Settings/hotkey_persistedReservedComboFallsBackSafely", persistedReservedComboFallsBackSafely),
+        ("Settings/appearance_persistedValuesAreSanitized", persistedAppearanceValuesAreSanitized),
+        ("Settings/appearance_runtimeValuesAreSanitized", runtimeAppearanceValuesAreSanitized),
+        ("Settings/hiddenApps_reportsParsedRuleCounts", hiddenAppsReportsParsedRuleCounts),
         ("Settings/windowScope_mirrorsThreadSafeFilterState", windowScope_mirrorsFilterState),
         ("Settings/performanceLogging_mirrorsThreadSafeState", performanceLogging_mirrorsState)
     ]
@@ -152,6 +158,27 @@ enum SwitchBladeSettingsTests {
         try expectEqual(enabledSettings.launchAtLoginStatus, .updateFailed)
     }
 
+    @MainActor static func launchAtLoginRefreshReadsLiveStatus() async throws {
+        var liveStatus = LaunchAtLoginStatus.disabled
+        let settings = SwitchBladeSettings(
+            userDefaults: makeIsolatedUserDefaults(),
+            launchAtLoginController: LaunchAtLoginController(
+                currentStatus: { liveStatus },
+                setEnabled: { enabled in .success(enabled ? .enabled : .disabled) }
+            )
+        )
+
+        liveStatus = .requiresApproval
+        settings.refreshLaunchAtLoginStatus()
+        try expectEqual(settings.launchAtLoginStatus, .requiresApproval)
+        try expect(!settings.launchAtLogin)
+
+        liveStatus = .enabled
+        settings.refreshLaunchAtLoginStatus()
+        try expectEqual(settings.launchAtLoginStatus, .enabled)
+        try expect(settings.launchAtLogin)
+    }
+
     @MainActor static func doubleModifierSwitchDefaultsOff() async throws {
         let settings = SwitchBladeSettings(
             userDefaults: makeIsolatedUserDefaults(),
@@ -159,6 +186,125 @@ enum SwitchBladeSettingsTests {
         )
 
         try expect(!settings.doubleModifierSwitchEnabled)
+    }
+
+    @MainActor static func reservedSpaceCombosAreRejected() async throws {
+        try expectEqual(
+            ShortcutConflictPolicy.conflict(modifier: .command, triggerKey: .space),
+            .spotlight
+        )
+        try expectEqual(
+            ShortcutConflictPolicy.conflict(modifier: .control, triggerKey: .space),
+            .inputSource
+        )
+        try expectNil(ShortcutConflictPolicy.conflict(modifier: .option, triggerKey: .space))
+        try expectNil(ShortcutConflictPolicy.conflict(modifier: .command, triggerKey: .tab))
+
+        let defaults = makeIsolatedUserDefaults()
+        let settings = SwitchBladeSettings(
+            userDefaults: defaults,
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+        settings.triggerKey = .space
+        try expectEqual(settings.triggerKey, .tab)
+        try expectEqual(settings.shortcutConflict, .spotlight)
+        try expectEqual(defaults.string(forKey: "sb_triggerKey"), SBTriggerKey.tab.rawValue)
+
+        settings.modifier = .option
+        settings.triggerKey = .space
+        try expectEqual(settings.modifier, .option)
+        try expectEqual(settings.triggerKey, .space)
+        try expectNil(settings.shortcutConflict)
+    }
+
+    @MainActor static func persistedReservedComboFallsBackSafely() async throws {
+        let defaults = makeIsolatedUserDefaults()
+        defaults.set(SBModifier.command.rawValue, forKey: "sb_modifier")
+        defaults.set(SBTriggerKey.space.rawValue, forKey: "sb_triggerKey")
+
+        let settings = SwitchBladeSettings(
+            userDefaults: defaults,
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+
+        try expectEqual(settings.modifier, .command)
+        try expectEqual(settings.triggerKey, .tab)
+        try expectEqual(defaults.string(forKey: "sb_triggerKey"), SBTriggerKey.tab.rawValue)
+    }
+
+    @MainActor static func persistedAppearanceValuesAreSanitized() async throws {
+        let defaults = makeIsolatedUserDefaults()
+        defaults.set(-5.0, forKey: "sb_bgR")
+        defaults.set(5.0, forKey: "sb_bgG")
+        defaults.set(Double.nan, forKey: "sb_bgB")
+        defaults.set(4.0, forKey: "sb_bgOpacity")
+        defaults.set(-1.0, forKey: "sb_badgeR")
+        defaults.set(Double.nan, forKey: "sb_badgeG")
+        defaults.set(2.0, forKey: "sb_badgeB")
+        defaults.set(-3.0, forKey: "sb_badgeOpacity")
+        defaults.set(-2.0, forKey: "sb_highlightR")
+        defaults.set(2.0, forKey: "sb_highlightG")
+        defaults.set(Double.nan, forKey: "sb_highlightB")
+        defaults.set(-5.0, forKey: "sb_highlightStrength")
+        defaults.set(Double.infinity, forKey: "sb_highlightOpacity")
+        defaults.set(999.0, forKey: "sb_tileMinWidth")
+        defaults.set(1.0, forKey: "sb_badgeIconSize")
+        defaults.set(99.0, forKey: "sb_badgeFontSize")
+        defaults.set(-1.0, forKey: "sb_badgeVPad")
+
+        let settings = SwitchBladeSettings(
+            userDefaults: defaults,
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+
+        try expectEqual(settings.bgRed, 0)
+        try expectEqual(settings.bgGreen, 1)
+        try expectEqual(settings.bgBlue, 0)
+        try expectEqual(settings.backgroundOpacity, 1)
+        try expectEqual(settings.badgeRed, 0)
+        try expectEqual(settings.badgeGreen, 0)
+        try expectEqual(settings.badgeBlue, 1)
+        try expectEqual(settings.badgeOpacity, 0)
+        try expectEqual(settings.highlightRed, 0)
+        try expectEqual(settings.highlightGreen, 1)
+        try expectEqual(settings.highlightBlue, 1)
+        try expectEqual(settings.highlightStrength, 0.2)
+        try expectEqual(settings.highlightOpacity, 0.85)
+        try expectEqual(settings.tileMinWidth, 380)
+        try expectEqual(settings.badgeIconSize, 12)
+        try expectEqual(settings.badgeFontSize, 16)
+        try expectEqual(settings.badgeVerticalPadding, 2)
+        try expectEqual(defaults.double(forKey: "sb_tileMinWidth"), 380)
+    }
+
+    @MainActor static func runtimeAppearanceValuesAreSanitized() async throws {
+        let defaults = makeIsolatedUserDefaults()
+        let settings = SwitchBladeSettings(
+            userDefaults: defaults,
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+
+        settings.highlightStrength = -20
+        settings.badgeOpacity = 10
+        settings.badgeBlue = .nan
+        settings.tileMinWidth = .infinity
+
+        try expectEqual(settings.highlightStrength, 0.2)
+        try expectEqual(settings.badgeOpacity, 1)
+        try expectEqual(settings.badgeBlue, 0)
+        try expectEqual(settings.tileMinWidth, 220)
+        try expectEqual(defaults.double(forKey: "sb_highlightStrength"), 0.2)
+    }
+
+    @MainActor static func hiddenAppsReportsParsedRuleCounts() async throws {
+        let settings = SwitchBladeSettings(
+            userDefaults: makeIsolatedUserDefaults(),
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+        settings.hiddenAppsText = "Safari, =Code; com.apple.Terminal, =Slack"
+
+        try expectEqual(settings.hiddenAppRuleCounts.substring, 2)
+        try expectEqual(settings.hiddenAppRuleCounts.exact, 2)
     }
 
     @MainActor static func windowScope_mirrorsFilterState() async throws {

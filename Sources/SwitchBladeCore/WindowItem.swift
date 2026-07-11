@@ -1,5 +1,20 @@
 import AppKit
 
+/// Immutable, image-free payload safe to send to an off-main AX worker.
+/// NSImage-backed WindowItem stays on MainActor/UI paths.
+struct WindowActionTarget: Identifiable, Equatable, Sendable {
+    let windowID: CGWindowID
+    let pid: pid_t
+    let appName: String
+    let title: String
+    let bounds: CGRect
+    let isFrontmostApp: Bool
+    let isMinimized: Bool
+    let bundleIdentifier: String?
+
+    var id: CGWindowID { windowID }
+}
+
 struct WindowItem: Identifiable, Equatable {
     let windowID: CGWindowID
     let pid: pid_t
@@ -25,6 +40,19 @@ struct WindowItem: Identifiable, Equatable {
 
     var subtitle: String {
         isTitleRedacted || title.isEmpty ? "App" : appName
+    }
+
+    var actionTarget: WindowActionTarget {
+        WindowActionTarget(
+            windowID: windowID,
+            pid: pid,
+            appName: appName,
+            title: title,
+            bounds: bounds,
+            isFrontmostApp: isFrontmostApp,
+            isMinimized: isMinimized,
+            bundleIdentifier: bundleIdentifier
+        )
     }
 
     func withPreview(_ preview: NSImage?) -> Self {

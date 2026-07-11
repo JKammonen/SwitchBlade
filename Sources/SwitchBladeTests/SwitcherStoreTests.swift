@@ -15,7 +15,10 @@ enum SwitcherStoreTests {
         ("Store/cycle_selectionWrapsAtEnd", cycle_selectionWraps),
         ("Store/requestCycle_marksSwitchingSynchronously", requestCycle_marksSwitchingSynchronously),
         ("Store/requestCycle_fastReleaseCommitsWithoutShowingPanel", requestCycle_fastReleaseCommitsWithoutShowingPanel),
-        ("Store/requestCycle_doubleCallDroppedWhenAlreadySwitching", requestCycle_doubleCallDropped),
+        ("Store/requestCycle_fastReleaseActivationFailure_showsPanel", requestCycle_fastReleaseActivationFailureShowsPanel),
+        ("Store/requestCycle_rapidInputQueuesWhileResolving", requestCycleRapidInputQueuesWhileResolving),
+        ("Store/requestCycle_mixedDirectionsCanReturnToFrontmost", requestCycleMixedDirectionsCanReturnToFrontmost),
+        ("Store/requestCycle_backwardColdOpenWrapsToLast", requestCycleBackwardColdOpenWrapsToLast),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
         ("Store/requestCycle_bypassesFreshCacheAfterExternalActivation", requestCycle_bypassesFreshCacheAfterExternalActivation),
         ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
@@ -34,6 +37,7 @@ enum SwitcherStoreTests {
         ("Store/minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty", minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty),
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
+        ("Store/minimizedMerge_cancellationStopsUnderlyingAXWork", minimizedMergeCancellationStopsUnderlyingWork),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
         ("Store/ordering_recentlyUsedAfterFrontmost", ordering_recent),
@@ -41,6 +45,9 @@ enum SwitcherStoreTests {
         ("Store/ordering_appGroupedKeepsFrontmostFirst", ordering_appGroupedKeepsFrontmostFirst),
         // preview modes
         ("Store/previewMode_iconsOnlySkipsCaptures", previewMode_iconsOnlySkipsCaptures),
+        ("Store/previewMode_iconsOnlyDropsCachedPreviews", previewModeIconsOnlyDropsCachedPreviews),
+        ("Store/filterSettingChange_invalidatesCachedWindowList", filterSettingChangeInvalidatesCachedWindowList),
+        ("Store/filterSettingChange_rejectsInFlightWarmupSnapshot", filterSettingChangeRejectsInFlightWarmupSnapshot),
         ("Store/previewCapture_skipsUncapturableItems", previewCapture_skipsUncapturableItems),
         ("Store/previewCapture_limitsDeferredBatch", previewCapture_limitsDeferredBatch),
         ("Store/previewCapture_skipsCachedDeferredItems", previewCapture_skipsCachedDeferredItems),
@@ -61,8 +68,15 @@ enum SwitcherStoreTests {
         ("Store/handleKeyDown_cmdQ_quitsSelectedApp", handleKeyDown_cmdQ),
         ("Store/handleKeyDown_cmdH_hidesSelectedApp", handleKeyDown_cmdH),
         ("Store/handleKeyDown_cmdComma_opensSettings", handleKeyDown_cmdComma),
+        ("Store/permissionRecovery_opensRelevantCapability", permissionRecoveryOpensRelevantCapability),
         ("Store/handleKeyDown_optionArrow_snapsSelectedWindow", handleKeyDown_optionArrowSnaps),
+        ("Store/handleKeyDown_companionModifiers_rejected", handleKeyDown_companionModifiersRejected),
+        ("Store/handleKeyDown_voiceOverChordsPassThroughForEveryModifier", handleKeyDownVoiceOverChordsPassThroughForEveryModifier),
+        ("Store/handleKeyDown_controlModifierUsesShiftSnapWithoutStealingVoiceOver", controlModifierUsesShiftForSnapWithoutStealingVoiceOver),
+        ("Store/gridNavigation_matchesRenderedColumns", gridNavigationMatchesRenderedColumns),
         ("Store/quit_removesAllWindowsOfThatPid", quit_removesAllPidWindows),
+        ("Store/quit_failure_keepsPanelState", quit_failureKeepsPanelState),
+        ("Store/hide_failure_keepsPanelVisible", hide_failureKeepsPanelVisible),
         ("Store/switchToPreviousApplication_activatesPreviousPid", switchToPreviousApplication_activatesPreviousPid),
         ("Store/switchToPreviousApplication_disabledSetting_skipsActivation", switchToPreviousApplication_disabledSetting),
         ("Store/switchToPreviousApplication_infersPreviousPidWhenUntracked", switchToPreviousApplication_infersPreviousPid),
@@ -71,11 +85,14 @@ enum SwitcherStoreTests {
         ("Store/switchToPreviousApplication_repeatedCallsCanBounceBetweenTwoApps", switchToPreviousApplication_bouncesBetweenTwoApps),
         ("Store/switchToPreviousApplication_concurrentGestureDropped", switchToPreviousApplication_concurrentGestureDropped),
         ("Store/switchToPreviousApplication_singleWindowCachedPreviousPidSkipsSnapshot", switchToPreviousApplication_singleWindowCachedPreviousPidSkipsSnapshot),
+        ("Store/switchToPreviousApplication_failure_preservesHistory", switchToPreviousApplication_failurePreservesHistory),
         ("Store/handleModifierMouseSwitch_visible_commitsSelection", handleModifierMouseSwitch_visibleCommitsSelection),
         ("Store/snap_item_hidesAndRoutesToActivator", snap_itemRoutesToActivator),
+        ("Store/snap_failure_keepsPanelVisible", snap_failureKeepsPanelVisible),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
-        ("Store/commitSelection_dispatchesActivationSynchronously", commit_dispatchesActivationSynchronously),
+        ("Store/commitSelection_runsActivationOffMainBeforeHiding", commit_runsActivationOffMainBeforeHiding),
+        ("Store/commitSelection_activationFailure_keepsPanelVisible", commit_activationFailureKeepsPanelVisible),
         ("Store/commitSelection_withNoSelection_hides", commit_noSelection),
         ("Store/cancel_hidesWithoutActivating", cancel_hides),
         // close
@@ -213,24 +230,82 @@ enum SwitcherStoreTests {
         try expectEqual(catalog.captureCallCount, 0)
     }
 
-    @MainActor static func requestCycle_doubleCallDropped() async throws {
-        let (store, catalog, _, _) = makeStore()
+    @MainActor static func requestCycle_fastReleaseActivationFailureShowsPanel() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.activationSucceeds = false
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
+        var onShowCalls = 0
+        store.onShow = { onShowCalls += 1 }
 
         store.requestCycle(forward: true)
-        // Second call while isSwitching=true should be dropped — only one cycle() task fires.
-        store.requestCycle(forward: true)
-
-        await runPendingMainTasks()
-        try? await Task.sleep(nanoseconds: 130_000_000)
+        store.commitSelection()
         await runPendingMainTasks()
 
-        // Panel opened exactly once: one items load, one show.
+        try expectEqual(activator.activatedItems.map(\.id), [2])
         try expect(store.isVisible)
-        try expectEqual(store.items.count, 2)
+        try expectEqual(onShowCalls, 1)
+        try expectEqual(store.selectedID, 2)
+    }
+
+    @MainActor static func requestCycleRapidInputQueuesWhileResolving() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        catalog.visibleSnapshotDelayNanoseconds = 100_000_000
+
+        store.requestCycle(forward: true)
+        store.requestCycle(forward: true)
+
+        await runPendingMainTasks()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.selectedID, 3)
+        try expectEqual(catalog.visibleSnapshotCount, 1)
+    }
+
+    @MainActor static func requestCycleBackwardColdOpenWrapsToLast() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+
+        store.requestCycle(forward: false)
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(store.selectedID, 3)
+    }
+
+    @MainActor static func requestCycleMixedDirectionsCanReturnToFrontmost() async throws {
+        for directions in [[true, false], [false, true]] {
+            let (store, catalog, _, _) = makeStore()
+            catalog.visibleItems = [
+                makeItem(id: 1, isFrontmostApp: true),
+                makeItem(id: 2),
+                makeItem(id: 3)
+            ]
+            catalog.visibleSnapshotDelayNanoseconds = 80_000_000
+
+            for forward in directions {
+                store.requestCycle(forward: forward)
+            }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            await runPendingMainTasks()
+
+            try expect(store.isVisible)
+            try expectEqual(store.selectedID, 1)
+            store.cancel()
+        }
     }
 
     @MainActor static func requestCycle_usesCachedItemsWithoutSnapshot() async throws {
@@ -609,6 +684,27 @@ enum SwitcherStoreTests {
         try expectNil(merged.preview)
     }
 
+    @MainActor static func minimizedMergeCancellationStopsUnderlyingWork() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [makeItem(id: 1, isFrontmostApp: true)]
+        catalog.minimizedSnapshotDelayNanoseconds = 200_000_000
+        await openSwitcher(store)
+        for _ in 0 ..< 50 where catalog.minimizedSnapshotStartCount == 0 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try expectGreaterThanOrEqual(catalog.minimizedSnapshotStartCount, 1)
+
+        store.cancel()
+        for _ in 0 ..< 50 where catalog.minimizedSnapshotCancellationCount == 0 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+
+        try expectGreaterThanOrEqual(catalog.minimizedSnapshotCancellationCount, 1)
+        try expectEqual(catalog.minimizedSnapshotCount, 0)
+    }
+
     @MainActor static func requestCycle_cachedSecondTabMovesSelectionBeforePanelShows() async throws {
         let (store, catalog, _, _) = makeStore(initialPanelShowDelayNanoseconds: 120_000_000)
         catalog.visibleItems = [
@@ -648,6 +744,7 @@ enum SwitcherStoreTests {
         store.selectedID = 3
 
         store.commitSelection()
+        await runPendingMainTasks()
 
         try expectEqual(activator.activatedItems.map(\.id), [3])
         try expect(!store.isVisible)
@@ -1010,6 +1107,80 @@ enum SwitcherStoreTests {
         try expect(!capturedIDs.contains(2), "uncapturable item should not be requested")
     }
 
+    @MainActor static func previewModeIconsOnlyDropsCachedPreviews() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        catalog.previewsToReturn = [1: preview, 2: preview]
+        await store.warmPreviewCache(context: "seed-live-preview")
+        try expect(store.items.contains(where: { $0.preview != nil }))
+
+        settings.previewMode = .iconsOnly
+        await openSwitcher(store)
+        await runPendingMainTasks()
+
+        try expect(store.items.allSatisfy { $0.preview == nil })
+    }
+
+    @MainActor static func filterSettingChangeInvalidatesCachedWindowList() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldHiddenAppsText = settings.hiddenAppsText
+        settings.hiddenAppsText = ""
+        defer { settings.hiddenAppsText = oldHiddenAppsText }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, appName: "Front", isFrontmostApp: true),
+            makeItem(id: 2, appName: "Slack")
+        ]
+        await seedOpenItemsCache(store)
+        let baselineSnapshots = catalog.visibleSnapshotCount
+
+        settings.hiddenAppsText = "=Slack"
+        catalog.visibleItems = [makeItem(id: 1, appName: "Front", isFrontmostApp: true)]
+        await openSwitcher(store)
+
+        try expectGreaterThan(catalog.visibleSnapshotCount, baselineSnapshots)
+        try expectEqual(store.items.map(\.id), [1])
+    }
+
+    @MainActor static func filterSettingChangeRejectsInFlightWarmupSnapshot() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldHiddenAppsText = settings.hiddenAppsText
+        settings.hiddenAppsText = ""
+        defer { settings.hiddenAppsText = oldHiddenAppsText }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, appName: "Front", isFrontmostApp: true),
+            makeItem(id: 2, appName: "Slack")
+        ]
+        catalog.visibleSnapshotDelayNanoseconds = 120_000_000
+        store.scheduleOpenItemsCacheWarmup(context: "pre-filter")
+        for _ in 0 ..< 50 where catalog.visibleSnapshotCount == 0 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try expectEqual(catalog.visibleSnapshotCount, 1)
+
+        settings.hiddenAppsText = "=Slack"
+        catalog.visibleItems = [makeItem(id: 1, appName: "Front", isFrontmostApp: true)]
+        await openSwitcher(store)
+        try? await Task.sleep(nanoseconds: 140_000_000)
+        await runPendingMainTasks()
+
+        try expectGreaterThanOrEqual(catalog.visibleSnapshotCount, 2)
+        try expectEqual(store.items.map(\.id), [1])
+    }
+
     @MainActor static func previewCapture_limitsDeferredBatch() async throws {
         let settings = SwitchBladeSettings.shared
         let oldPreviewMode = settings.previewMode
@@ -1189,15 +1360,19 @@ enum SwitcherStoreTests {
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2),
-            makeItem(id: 3)
+            makeItem(id: 3),
+            makeItem(id: 4),
+            makeItem(id: 5),
+            makeItem(id: 6)
         ]
         await openSwitcher(store)
+        store.updatePanelColumnCount(3)
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_RightArrow))
         try expectEqual(store.selectedID, 3)
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_LeftArrow))
         try expectEqual(store.selectedID, 2)
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_DownArrow))
-        try expectEqual(store.selectedID, 3)
+        try expectEqual(store.selectedID, 5)
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_UpArrow))
         try expectEqual(store.selectedID, 2)
     }
@@ -1212,8 +1387,8 @@ enum SwitcherStoreTests {
         await openSwitcher(store)
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_Return))
         try expect(handled)
-        try expect(!store.isVisible)
         await runPendingMainTasks()
+        try expect(!store.isVisible)
         try expectEqual(activator.activatedItems.last?.id, 2)
     }
 
@@ -1277,6 +1452,7 @@ enum SwitcherStoreTests {
 
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
         try expect(handled)
+        await runPendingMainTasks()
         try expectEqual(activator.quitItems.map(\.id), [2])
         try expect(!store.isVisible)
     }
@@ -1292,6 +1468,7 @@ enum SwitcherStoreTests {
 
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_H, modifiers: .command))
         try expect(handled)
+        await runPendingMainTasks()
         try expectEqual(activator.hiddenItems.map(\.id), [2])
         try expect(!store.isVisible)
     }
@@ -1313,6 +1490,26 @@ enum SwitcherStoreTests {
         try expectEqual(openSettingsCalls, 1)
     }
 
+    @MainActor static func permissionRecoveryOpensRelevantCapability() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        defer { settings.previewMode = oldPreviewMode }
+
+        settings.previewMode = .livePreviews
+        let permissions = MockPermissionService()
+        permissions.state = PermissionState(hasAccessibility: true, hasScreenRecording: false)
+        let (store, _, _, _) = makeStore(permissions: permissions)
+        var opened: [PermissionKind] = []
+        store.onOpenPermissionSettings = { opened.append($0) }
+
+        store.openPrimaryPermissionSettings()
+        try expectEqual(opened, [.screenRecording])
+
+        settings.previewMode = .iconsOnly
+        store.openPrimaryPermissionSettings()
+        try expectEqual(opened, [.screenRecording], "icons-only mode must not request Screen Recording")
+    }
+
     @MainActor static func handleKeyDown_optionArrowSnaps() async throws {
         let (store, catalog, activator, _) = makeStore()
         catalog.visibleItems = [
@@ -1325,9 +1522,126 @@ enum SwitcherStoreTests {
         let handled = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_LeftArrow, modifiers: .option))
 
         try expect(handled)
+        await runPendingMainTasks()
         try expect(!store.isVisible)
+        try expectEqual(activator.snapCalls, [.init(id: 2, edge: .left)])
+    }
+
+    @MainActor static func handleKeyDown_companionModifiersRejected() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldModifier = settings.modifier
+        settings.modifier = .command
+        defer { settings.modifier = oldModifier }
+
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        await openSwitcher(store)
+        store.selectedID = 2
+
+        let handled = store.handleKeyDown(
+            makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: [.command, .shift])
+        )
+
+        try expect(!handled)
+        try expect(activator.quitItems.isEmpty)
+        try expect(store.isVisible)
+        try expect(
+            SwitcherStore.panelShortcutMatches(
+                flags: [.command, .option],
+                required: .option,
+                switcherModifier: .command
+            )
+        )
+        try expect(
+            !SwitcherStore.panelShortcutMatches(
+                flags: [.command, .option, .shift],
+                required: .option,
+                switcherModifier: .command
+            )
+        )
+    }
+
+    @MainActor static func handleKeyDownVoiceOverChordsPassThroughForEveryModifier() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldModifier = settings.modifier
+        defer { settings.modifier = oldModifier }
+
+        for modifier in SBModifier.allCases {
+            settings.modifier = modifier
+            let (store, catalog, activator, _) = makeStore()
+            catalog.visibleItems = [
+                makeItem(id: 1, isFrontmostApp: true),
+                makeItem(id: 2, pid: 200),
+                makeItem(id: 3)
+            ]
+            await openSwitcher(store)
+            let selectedBefore = store.selectedID
+            let voiceOverFlags: NSEvent.ModifierFlags = [.control, .option]
+
+            for keyCode in [kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow, kVK_Space, kVK_Tab] {
+                let handled = store.handleKeyDown(
+                    makeKeyDownEvent(keyCode: keyCode, modifiers: voiceOverFlags)
+                )
+                try expect(!handled, "VoiceOver chord was consumed with switcher modifier \(modifier)")
+                try expectEqual(store.selectedID, selectedBefore)
+                try expect(store.isVisible)
+            }
+            try expect(activator.snapCalls.isEmpty)
+            try expect(activator.activatedItems.isEmpty)
+        }
+    }
+
+    @MainActor static func controlModifierUsesShiftForSnapWithoutStealingVoiceOver() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldModifier = settings.modifier
+        defer { settings.modifier = oldModifier }
+        settings.modifier = .control
+
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        await openSwitcher(store)
+
+        let voiceOverHandled = store.handleKeyDown(
+            makeKeyDownEvent(keyCode: kVK_LeftArrow, modifiers: [.control, .option])
+        )
+        try expect(!voiceOverHandled)
+        try expect(activator.snapCalls.isEmpty)
+
+        let snapHandled = store.handleKeyDown(
+            makeKeyDownEvent(keyCode: kVK_LeftArrow, modifiers: [.control, .shift])
+        )
+        try expect(snapHandled)
         await runPendingMainTasks()
         try expectEqual(activator.snapCalls, [.init(id: 2, edge: .left)])
+    }
+
+    @MainActor static func gridNavigationMatchesRenderedColumns() throws {
+        try expectEqual(
+            SwitcherStore.gridNavigationIndex(from: 1, itemCount: 8, columns: 4, direction: .down),
+            5
+        )
+        try expectEqual(
+            SwitcherStore.gridNavigationIndex(from: 5, itemCount: 8, columns: 4, direction: .up),
+            1
+        )
+        try expectEqual(
+            SwitcherStore.gridNavigationIndex(from: 3, itemCount: 8, columns: 4, direction: .right),
+            3
+        )
+        try expectEqual(
+            SwitcherStore.gridNavigationIndex(from: 4, itemCount: 8, columns: 4, direction: .left),
+            4
+        )
+        try expectEqual(
+            SwitcherStore.gridNavigationIndex(from: 6, itemCount: 7, columns: 4, direction: .down),
+            6
+        )
     }
 
     @MainActor static func quit_removesAllPidWindows() async throws {
@@ -1343,10 +1657,45 @@ enum SwitcherStoreTests {
         store.selectedID = 2
 
         _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
+        await runPendingMainTasks()
 
         // Both pid-200 windows are gone; other apps remain in the list state.
         try expectEqual(activator.quitItems.map(\.pid), [200])
         try expect(!store.items.contains(where: { $0.pid == 200 }))
+    }
+
+    @MainActor static func quit_failureKeepsPanelState() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.quitSucceeds = false
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200),
+            makeItem(id: 3, pid: 200)
+        ]
+        await openSwitcher(store)
+        store.selectedID = 2
+
+        _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_Q, modifiers: .command))
+
+        try expectEqual(store.items.map(\.id), [1, 2, 3])
+        try expect(store.isVisible)
+    }
+
+    @MainActor static func hide_failureKeepsPanelVisible() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.hideSucceeds = false
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2, pid: 200)
+        ]
+        await openSwitcher(store)
+        store.selectedID = 2
+
+        _ = store.handleKeyDown(makeKeyDownEvent(keyCode: kVK_ANSI_H, modifiers: .command))
+        await runPendingMainTasks()
+
+        try expectEqual(activator.hiddenItems.map(\.id), [2])
+        try expect(store.isVisible)
     }
 
     @MainActor static func switchToPreviousApplication_activatesPreviousPid() async throws {
@@ -1572,9 +1921,29 @@ enum SwitcherStoreTests {
         store.handleAppActivation(pid: 202)
 
         store.switchToPreviousApplication()
+        await runPendingMainTasks()
 
         try expectEqual(activator.activatedApplicationPIDs, [101])
         try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots)
+    }
+
+    @MainActor static func switchToPreviousApplication_failurePreservesHistory() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldValue = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = oldValue }
+
+        let (store, _, activator, _) = makeStore(initialFrontmostAppPID: 101, switchBladePID: 999)
+        store.handleAppActivation(pid: 202)
+        activator.applicationActivationSucceeds = false
+
+        store.switchToPreviousApplication()
+        await runPendingMainTasks()
+        activator.applicationActivationSucceeds = true
+        store.switchToPreviousApplication()
+        await runPendingMainTasks()
+
+        try expectEqual(activator.activatedApplicationPIDs, [101, 101])
     }
 
     @MainActor static func handleModifierMouseSwitch_visibleCommitsSelection() async throws {
@@ -1612,9 +1981,26 @@ enum SwitcherStoreTests {
 
         store.snap(makeItem(id: 3), to: .bottom)
 
-        try expect(!store.isVisible)
         await runPendingMainTasks()
+        try expect(!store.isVisible)
         try expectEqual(activator.snapCalls, [.init(id: 3, edge: .bottom)])
+    }
+
+    @MainActor static func snap_failureKeepsPanelVisible() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.snapSucceeds = false
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2),
+            makeItem(id: 3)
+        ]
+        await openSwitcher(store)
+
+        store.snap(store.items[1], to: .bottom)
+        await runPendingMainTasks()
+
+        try expectEqual(activator.snapCalls, [.init(id: 2, edge: .bottom)])
+        try expect(store.isVisible)
     }
 
     // MARK: commit / cancel
@@ -1629,13 +2015,14 @@ enum SwitcherStoreTests {
         store.selectedID = 1
 
         store.commitSelection()
-        try expect(!store.isVisible)
         await runPendingMainTasks()
+        try expect(!store.isVisible)
         try expectEqual(activator.activatedItems.map(\.id), [1])
     }
 
-    @MainActor static func commit_dispatchesActivationSynchronously() async throws {
+    @MainActor static func commit_runsActivationOffMainBeforeHiding() async throws {
         let (store, catalog, activator, _) = makeStore()
+        activator.actionDelayNanoseconds = 100_000_000
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
@@ -1645,12 +2032,37 @@ enum SwitcherStoreTests {
 
         store.commitSelection()
 
+        // The AX worker is delayed, but MainActor remains free and the panel
+        // stays visible until the confirmed result returns.
+        var mainActorProgressed = false
+        Task { @MainActor in mainActorProgressed = true }
+        await Task.yield()
+        try expect(mainActorProgressed)
+        try expect(store.isVisible)
+        try expect(activator.activatedItems.isEmpty)
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        await runPendingMainTasks()
+        try expectEqual(activator.activatedItems.map(\.id), [1])
         try expect(!store.isVisible)
-        try expectEqual(
-            activator.activatedItems.map(\.id),
-            [1],
-            "selection activation should not wait for a deferred MainActor sleep"
-        )
+    }
+
+    @MainActor static func commit_activationFailureKeepsPanelVisible() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.activationSucceeds = false
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        await openSwitcher(store)
+        store.selectedID = 2
+
+        store.commitSelection()
+        await runPendingMainTasks()
+
+        try expectEqual(activator.activatedItems.map(\.id), [2])
+        try expect(store.isVisible)
+        try expectEqual(store.selectedID, 2)
     }
 
     @MainActor static func commit_noSelection() async throws {
@@ -1692,6 +2104,7 @@ enum SwitcherStoreTests {
         let toClose = store.items.first(where: { $0.id == 2 })!
 
         store.close(toClose)
+        await runPendingMainTasks()
 
         try expectEqual(activator.closedItems.map(\.id), [2])
         try expectEqual(store.items.map(\.id), [1, 3])
@@ -1709,6 +2122,7 @@ enum SwitcherStoreTests {
         let toClose = store.items.first(where: { $0.id == 2 })!
 
         store.close(toClose)
+        await runPendingMainTasks()
 
         try expectEqual(activator.closedItems.map(\.id), [2])
         try expectEqual(store.items.map(\.id), [1, 2, 3])
@@ -1720,6 +2134,7 @@ enum SwitcherStoreTests {
         catalog.visibleItems = [makeItem(id: 1, isFrontmostApp: true)]
         await openSwitcher(store)
         store.close(store.items[0])
+        await runPendingMainTasks()
         try expect(store.items.isEmpty)
         try expect(!store.isVisible)
     }
@@ -1735,6 +2150,7 @@ enum SwitcherStoreTests {
         store.selectedID = 2
         let toClose = store.items.first(where: { $0.id == 2 })!
         store.close(toClose)
+        await runPendingMainTasks()
         try expectNotNil(store.selectedID)
         try expect(store.selectedID != 2)
     }
@@ -1768,8 +2184,8 @@ enum SwitcherStoreTests {
         let target = store.items.first(where: { $0.id == 3 })!
 
         store.choose(target)
-        try expect(!store.isVisible)
         await runPendingMainTasks()
+        try expect(!store.isVisible)
         try expectEqual(activator.activatedItems.last?.id, 3)
     }
 }

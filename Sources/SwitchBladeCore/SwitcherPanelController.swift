@@ -7,6 +7,7 @@ import SwiftUI
 final class SwitcherPanelController {
     private let panel: SwitcherPanel
     private let hostingView: NSHostingView<SwitcherView>
+    private weak var store: SwitcherStore?
     // CAShapeLayer mask is the only reliable way to get antialiased transparent
     // corners on macOS. clipShape/RoundedRectangle in SwiftUI uses a CGContext
     // software mask whose edges aren't composited cleanly against a clear window.
@@ -23,18 +24,22 @@ final class SwitcherPanelController {
         let visibleFrame: CGRect
         let tileMinWidth: CGFloat
         let tileAspectRatio: CGFloat
+        let showsPermissionFooter: Bool
         let panelFrame: CGRect
+        let columns: Int
 
         func matches(
             itemCount: Int,
             mouseLocation: CGPoint,
             tileMinWidth: CGFloat,
-            tileAspectRatio: CGFloat
+            tileAspectRatio: CGFloat,
+            showsPermissionFooter: Bool
         ) -> Bool {
             self.itemCount == itemCount
                 && screenFrame.contains(mouseLocation)
                 && abs(self.tileMinWidth - tileMinWidth) < 0.5
                 && abs(self.tileAspectRatio - tileAspectRatio) < 0.001
+                && self.showsPermissionFooter == showsPermissionFooter
         }
     }
 
@@ -67,6 +72,9 @@ final class SwitcherPanelController {
         let hasCardMask: Bool
         let panelLevel: NSWindow.Level
         let panelIsOpaque: Bool
+        let panelFrame: CGRect
+        let accessibilityRole: NSAccessibility.Role?
+        let accessibilitySubrole: NSAccessibility.Subrole?
     }
 
     var constructionProbe: ConstructionProbe {
@@ -74,12 +82,16 @@ final class SwitcherPanelController {
             contentViewIsHostingView: panel.contentView === hostingView,
             hasCardMask: hostingView.layer?.mask === cardMaskLayer,
             panelLevel: panel.level,
-            panelIsOpaque: panel.isOpaque
+            panelIsOpaque: panel.isOpaque,
+            panelFrame: panel.frame,
+            accessibilityRole: panel.accessibilityRole(),
+            accessibilitySubrole: panel.accessibilitySubrole()
         )
     }
 #endif
 
     init(store: SwitcherStore) {
+        self.store = store
         panel = SwitcherPanel(
             contentRect: NSRect(origin: .zero, size: CGSize(width: 1200, height: 800)),
             styleMask: [.borderless, .fullSizeContentView],
@@ -95,6 +107,9 @@ final class SwitcherPanelController {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovable = false
+        panel.setAccessibilityRole(.window)
+        panel.setAccessibilitySubrole(.floatingWindow)
+        panel.setAccessibilityLabel(L10n.tr(.accessibilitySwitcherPanelLabel))
 
         hostingView = NSHostingView(rootView: SwitcherView(store: store))
         hostingView.wantsLayer = true
@@ -175,6 +190,16 @@ final class SwitcherPanelController {
     func invalidateLayoutCache(reason: String) {
         cachedLayout = nil
         Logger.switcher.info("Panel layout cache invalidated: \(reason, privacy: .public)")
+    }
+
+    /// Permission state can change while the panel is already visible. Re-size
+    /// immediately so adding/removing the fixed footer never steals grid height
+    /// or leaves stale blank space until the next invocation.
+    func permissionStateDidChange() {
+        cachedLayout = nil
+        _ = sizeAndCenter(itemCount: store?.items.count ?? 0)
+        hostingView.needsLayout = true
+        hostingView.layoutSubtreeIfNeeded()
     }
 
     func prepare(itemCount: Int) {
@@ -263,6 +288,7 @@ final class SwitcherPanelController {
         let start = Date()
         let tileMinWidth = SwitchBladeSettings.shared.tileMinWidth
         let tileAspectRatio = SwitcherLayout.tileAspectRatio
+        let showsPermissionFooter = store?.primaryMissingPermission != nil
         let mouseLocation = NSEvent.mouseLocation
 
         if let cachedLayout,
@@ -270,9 +296,11 @@ final class SwitcherPanelController {
                itemCount: itemCount,
                mouseLocation: mouseLocation,
                tileMinWidth: tileMinWidth,
-               tileAspectRatio: tileAspectRatio
+               tileAspectRatio: tileAspectRatio,
+               showsPermissionFooter: showsPermissionFooter
            ),
            framesApproximatelyEqual(panel.frame, cachedLayout.panelFrame) {
+            store?.updatePanelColumnCount(cachedLayout.columns)
             return PanelSizingMetrics(
                 totalMs: Date().timeIntervalSince(start) * 1000,
                 screenMs: 0,
@@ -305,9 +333,11 @@ final class SwitcherPanelController {
             visibleFrame: geometry.visibleFrame,
             tileMinWidth: tileMinWidth,
             itemCount: itemCount,
-            tileAspectRatio: tileAspectRatio
+            tileAspectRatio: tileAspectRatio,
+            showsPermissionFooter: showsPermissionFooter
         ))
         let calcMs = Date().timeIntervalSince(calcStart) * 1000
+        store?.updatePanelColumnCount(result.columns)
 
         let setFrameStart = Date()
         if !framesApproximatelyEqual(panel.frame, result.panelFrame) {
@@ -326,7 +356,9 @@ final class SwitcherPanelController {
             visibleFrame: geometry.visibleFrame,
             tileMinWidth: tileMinWidth,
             tileAspectRatio: tileAspectRatio,
-            panelFrame: result.panelFrame
+            showsPermissionFooter: showsPermissionFooter,
+            panelFrame: result.panelFrame,
+            columns: result.columns
         )
 
         return PanelSizingMetrics(

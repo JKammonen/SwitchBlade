@@ -15,11 +15,16 @@ enum WindowActivatorTests {
         ("WindowActivator/bestMatchIndex_emptyCandidates_returnsNil", bestMatchEmptyCandidatesReturnsNil),
         ("WindowActivator/bestMatchIndex_emptyItemTitle_matchesByFrameOnly", bestMatchEmptyItemTitleMatchesByFrameOnly),
         ("WindowActivator/bestMatchIndex_nilFrameCandidates_fallBackToTitleMatch", bestMatchNilFrameCandidatesFallBackToTitleMatch),
+        ("WindowActivator/bestMatchIndex_strictAmbiguousEvidence_returnsNil", bestMatchStrictAmbiguousEvidenceReturnsNil),
+        ("WindowActivator/bestMatchIndex_strictDuplicateTitle_usesUniqueFrame", bestMatchStrictDuplicateTitleUsesUniqueFrame),
         ("WindowActivator/bestScreen_emptyCandidates_returnsNil", bestScreenEmptyCandidatesReturnsNil),
         ("WindowActivator/bestScreen_windowOffAllScreens_picksNearestByCenter", bestScreenWindowOffAllScreensPicksNearestByCenter),
         ("WindowActivator/activate_frontmostWindow_skipsAppActivation", activateFrontmostWindowSkipsAppActivation),
         ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
+        ("WindowActivator/activate_backgroundWindow_requiresRaiseAndAppActivation", activateBackgroundWindowRequiresBothSteps),
+        ("WindowActivator/activationConfirmation_waitsForObservedActiveState", activationConfirmationWaitsForObservedState),
+        ("WindowActivator/activationConfirmation_rejectsUnconfirmedRequest", activationConfirmationRejectsUnconfirmedRequest),
         ("WindowActivator/shouldActivateApplication_falseForFrontmostAppWindow", shouldSkipActivationForFrontmostAppWindow),
         ("WindowActivator/shouldActivateApplication_trueForBackgroundAppWindow", shouldActivateForBackgroundAppWindow),
         ("WindowActivator/toAXScreenRect_flipsVerticallyOffsetDisplay", toAXScreenRect_flipsVerticallyOffsetDisplay),
@@ -190,6 +195,49 @@ enum WindowActivatorTests {
         try expectEqual(WindowActivator.bestMatchIndex(for: item, candidates: candidates), 1)
     }
 
+    static func bestMatchStrictAmbiguousEvidenceReturnsNil() throws {
+        let item = makeItem(
+            id: 13,
+            pid: 100,
+            title: "Untitled",
+            bounds: CGRect(x: 100, y: 100, width: 800, height: 600)
+        )
+        let candidates = [
+            matchCandidate(title: "Untitled", frame: CGRect(x: 102, y: 100, width: 800, height: 600)),
+            matchCandidate(title: "Untitled", frame: CGRect(x: 105, y: 102, width: 800, height: 600))
+        ]
+
+        try expectNil(
+            WindowActivator.bestMatchIndex(
+                for: item,
+                candidates: candidates,
+                requireUniqueEvidence: true
+            )
+        )
+    }
+
+    static func bestMatchStrictDuplicateTitleUsesUniqueFrame() throws {
+        let item = makeItem(
+            id: 14,
+            pid: 100,
+            title: "Untitled",
+            bounds: CGRect(x: 100, y: 100, width: 800, height: 600)
+        )
+        let candidates = [
+            matchCandidate(title: "Untitled", frame: CGRect(x: 600, y: 500, width: 800, height: 600)),
+            matchCandidate(title: "Untitled", frame: CGRect(x: 104, y: 102, width: 800, height: 600))
+        ]
+
+        try expectEqual(
+            WindowActivator.bestMatchIndex(
+                for: item,
+                candidates: candidates,
+                requireUniqueEvidence: true
+            ),
+            1
+        )
+    }
+
     static func bestScreenEmptyCandidatesReturnsNil() throws {
         try expectNil(
             WindowActivator.bestScreen(
@@ -233,8 +281,9 @@ enum WindowActivatorTests {
             }
         )
 
-        activator.activate(makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true))
+        let succeeded = activator.activate(makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true).actionTarget)
 
+        try expect(succeeded)
         try expectEqual(raisedItems, [2])
         try expectEqual(activatedPIDs, [])
     }
@@ -253,8 +302,9 @@ enum WindowActivatorTests {
             }
         )
 
-        activator.activate(makeItem(id: 3, pid: 200, title: "Background", isFrontmostApp: false))
+        let succeeded = activator.activate(makeItem(id: 3, pid: 200, title: "Background", isFrontmostApp: false).actionTarget)
 
+        try expect(succeeded)
         try expectEqual(raisedItems, [3])
         try expectEqual(activatedPIDs, [200])
     }
@@ -268,9 +318,56 @@ enum WindowActivatorTests {
             }
         )
 
-        activator.activateApplication(pid: 300)
+        let succeeded = activator.activateApplication(pid: 300)
 
+        try expect(succeeded)
         try expectEqual(activatedPIDs, [300])
+    }
+
+    static func activateBackgroundWindowRequiresBothSteps() throws {
+        let activator = WindowActivator(
+            raiseWindowOverride: { _ in true },
+            activateApplicationOverride: { _ in false }
+        )
+
+        let succeeded = activator.activate(
+            makeItem(id: 4, pid: 400, title: "Background", isFrontmostApp: false).actionTarget
+        )
+
+        try expect(!succeeded)
+    }
+
+    static func activationConfirmationWaitsForObservedState() throws {
+        var observations = [false, false, true]
+        var waits = 0
+        let confirmed = WindowActivator.confirmActivationRequest(
+            requestAccepted: true,
+            attempts: 3,
+            isActive: { observations.removeFirst() },
+            wait: { waits += 1 }
+        )
+        try expect(confirmed)
+        try expectEqual(waits, 2)
+    }
+
+    static func activationConfirmationRejectsUnconfirmedRequest() throws {
+        var observations = 0
+        let rejected = WindowActivator.confirmActivationRequest(
+            requestAccepted: false,
+            attempts: 3,
+            isActive: { observations += 1; return true },
+            wait: {}
+        )
+        try expect(!rejected)
+        try expectEqual(observations, 0)
+
+        let neverConfirmed = WindowActivator.confirmActivationRequest(
+            requestAccepted: true,
+            attempts: 3,
+            isActive: { false },
+            wait: {}
+        )
+        try expect(!neverConfirmed)
     }
 
     static func shouldSkipActivationForFrontmostAppWindow() throws {

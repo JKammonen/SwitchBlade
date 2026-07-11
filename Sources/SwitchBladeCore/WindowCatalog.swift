@@ -45,7 +45,7 @@ actor SCContentCache {
             }
         } catch {
             lastRefreshFailedAt = Date()
-            Logger.capture.error("SCShareableContent refresh failed: \(error.localizedDescription, privacy: .public)")
+            Logger.capture.error("SCShareableContent refresh failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -94,11 +94,18 @@ actor SCContentCache {
         case success(NSImage)
         case failed
         case timedOut
+        case resourceLimited
     }
 
     enum SoftTimeoutResult<Value: Sendable>: Sendable {
         case completed(Value)
         case timedOut
+    }
+
+    enum PermitBoundOperationResult<Value: Sendable>: Sendable {
+        case completed(Value)
+        case timedOut
+        case resourceLimited
     }
 
     static func awaitTaskWithSoftTimeout<Value: Sendable>(
@@ -121,6 +128,32 @@ actor SCContentCache {
         }
     }
 
+    /// Starts work only when a global capture permit is available. The caller
+    /// may stop waiting at the UX timeout, but the permit is released by the
+    /// underlying operation itself, never by the timeout path. A blocked Apple
+    /// API therefore consumes one bounded slot instead of allowing new orphaned
+    /// work to accumulate across retries and switcher opens.
+    static func runPermitBoundOperation<Value: Sendable>(
+        permitPool: CapturePermitPool,
+        timeoutMs: Int,
+        operation: @escaping @Sendable () async -> Value
+    ) async -> PermitBoundOperationResult<Value> {
+        guard permitPool.tryAcquire() else {
+            return .resourceLimited
+        }
+
+        let operationTask = Task.detached(priority: .userInitiated) {
+            defer { permitPool.release() }
+            return await operation()
+        }
+        switch await awaitTaskWithSoftTimeout(operationTask, timeoutMs: timeoutMs) {
+        case .completed(let value):
+            return .completed(value)
+        case .timedOut:
+            return .timedOut
+        }
+    }
+
     /// Captures the window or stops waiting after `timeoutMs`.
     ///
     /// Important: this is a UX timeout, not a hard resource kill. We cancel our
@@ -131,30 +164,26 @@ actor SCContentCache {
         window: SCWindow,
         maxDim: Int,
         timeoutMs: Int,
-        permitPool: CapturePermitPool? = nil
+        permitPool: CapturePermitPool
     ) async -> CaptureAttemptResult {
-        if let permitPool {
-            await permitPool.acquire()
-        }
-        defer {
-            if let permitPool {
-                permitPool.release()
-            }
-        }
         nonisolated(unsafe) let capturedWindow = window
-        let captureTask = Task.detached(priority: .userInitiated) { () -> CaptureAttemptResult in
-            do {
-                return .success(try await SCContentCache.capture(window: capturedWindow, maxDim: maxDim))
-            } catch {
-                return .failed
+        switch await runPermitBoundOperation(
+            permitPool: permitPool,
+            timeoutMs: timeoutMs,
+            operation: { () async -> CaptureAttemptResult in
+                do {
+                    return .success(try await SCContentCache.capture(window: capturedWindow, maxDim: maxDim))
+                } catch {
+                    return .failed
+                }
             }
-        }
-
-        switch await awaitTaskWithSoftTimeout(captureTask, timeoutMs: timeoutMs) {
+        ) {
         case .completed(let result):
             return result
         case .timedOut:
             return .timedOut
+        case .resourceLimited:
+            return .resourceLimited
         }
     }
 }
@@ -195,6 +224,14 @@ final class CapturePermitPool: @unchecked Sendable {
         }
     }
 
+    func tryAcquire() -> Bool {
+        state.withValue { state in
+            guard state.availablePermits > 0 else { return false }
+            state.availablePermits -= 1
+            return true
+        }
+    }
+
     func release() {
         let waiter: CheckedContinuation<Void, Never>? = state.withValue { state in
             if let waiter = state.waiters.first {
@@ -225,6 +262,85 @@ private final class OneShotContinuation<Value: Sendable>: @unchecked Sendable {
         lock.unlock()
         continuation?.resume(returning: value)
     }
+}
+
+actor InFlightTaskCoalescer<Key: Hashable & Sendable, Value: Sendable> {
+    private struct Entry {
+        let id: UUID
+        let key: Key
+        let task: Task<Value, Never>
+    }
+
+    private var inFlight: Entry?
+
+    func value(
+        for key: Key,
+        priority: TaskPriority = .utility,
+        operation: @escaping @Sendable () async -> Value
+    ) async -> Value? {
+        while let active = inFlight {
+            let value = await active.task.value
+            if inFlight?.id == active.id {
+                inFlight = nil
+            }
+            guard !Task.isCancelled else { return nil }
+            if active.key == key {
+                return value
+            }
+        }
+
+        guard !Task.isCancelled else { return nil }
+        let entry = Entry(
+            id: UUID(),
+            key: key,
+            task: Task.detached(priority: priority, operation: operation)
+        )
+        inFlight = entry
+        let value = await entry.task.value
+        if inFlight?.id == entry.id {
+            inFlight = nil
+        }
+        return Task.isCancelled ? nil : value
+    }
+}
+
+struct AXScanBudget: Sendable {
+    let maximumApplications: Int
+    let maximumWindows: Int
+    let maximumElapsedSeconds: TimeInterval
+    let startedAt: TimeInterval
+    private(set) var scannedApplications = 0
+    private(set) var scannedWindows = 0
+    private(set) var isExhausted = false
+
+    mutating func beginApplication(now: TimeInterval) -> Bool {
+        guard !isExhausted,
+              scannedApplications < maximumApplications,
+              now - startedAt < maximumElapsedSeconds else {
+            isExhausted = true
+            return false
+        }
+        scannedApplications += 1
+        return true
+    }
+
+    mutating func beginWindow(now: TimeInterval) -> Bool {
+        guard !isExhausted,
+              scannedWindows < maximumWindows,
+              now - startedAt < maximumElapsedSeconds else {
+            isExhausted = true
+            return false
+        }
+        scannedWindows += 1
+        return true
+    }
+}
+
+private struct MinimizedSnapshotContext: Hashable, Sendable {
+    let requestEpoch: UInt64
+    let frontmostPID: pid_t?
+    let scope: SBWindowScope
+    let hiddenAppTokens: Set<HiddenAppToken>
 }
 
 private struct WindowCaptureOutcome {
@@ -280,6 +396,19 @@ enum WindowSharingPolicy {
         let normalizedBundle = (bundleIdentifier ?? "").lowercased()
         return normalizedName.contains("teams")
             && normalizedBundle.hasPrefix("com.microsoft.teams")
+    }
+}
+
+enum WindowEligibilityPolicy {
+    static func canIncludeApplication(
+        processIdentifier: pid_t,
+        currentProcessIdentifier: pid_t,
+        activationPolicy: NSApplication.ActivationPolicy,
+        isFinishedLaunching: Bool
+    ) -> Bool {
+        isFinishedLaunching
+            && processIdentifier != currentProcessIdentifier
+            && activationPolicy == .regular
     }
 }
 
@@ -353,6 +482,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         case success(NSImage)
         case failed
         case timedOut
+        case resourceLimited
     }
 
     private let excludedBundleIdentifiers: Set<String> = [
@@ -361,9 +491,16 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         "com.apple.Safari.PasswordBreachAgent"
     ]
 
-    private let contentCache = SCContentCache()
+    private static let processCapturePermitPool = CapturePermitPool(limit: 6)
 
-    init() {}
+    private let contentCache = SCContentCache()
+    private let capturePermitPool: CapturePermitPool
+    private let minimizedSnapshotCoalescer = InFlightTaskCoalescer<MinimizedSnapshotContext, [WindowItem]>()
+    private let minimizedSnapshotEpoch = LockedValue<UInt64>(0)
+
+    init() {
+        capturePermitPool = Self.processCapturePermitPool
+    }
 
     /// Re-warms the cache after a capture session so the next Cmd+Tab is fast.
     func refreshContentCache() async {
@@ -406,13 +543,29 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// Returns minimized windows from an AX walk. ~150–500ms with many running
     /// apps — call from a background task and merge into items after the panel
     /// is already on screen. Safe to call AX read APIs off the main thread.
-    func snapshotMinimized() async -> [WindowItem] {
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        return minimizedItems(
-            excluding: Set(),
-            frontmostPID: frontmostPID,
-            sharingStateIndex: WindowSharingStateIndex.fromCurrentWindowList()
+    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> [WindowItem] {
+        guard !cancellation.isCancelled else { return [] }
+        let requestEpoch = minimizedSnapshotEpoch.withValue { epoch in
+            epoch &+= 1
+            return epoch
+        }
+        let context = MinimizedSnapshotContext(
+            requestEpoch: requestEpoch,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            scope: WindowFilterState.scope,
+            hiddenAppTokens: HiddenAppFilterState.normalizedTokens
         )
+        return await minimizedSnapshotCoalescer.value(for: context) { [self] in
+            guard !cancellation.isCancelled else { return [] }
+            return minimizedItems(
+                excluding: Set(),
+                frontmostPID: context.frontmostPID,
+                sharingStateIndex: WindowSharingStateIndex.fromCurrentWindowList(),
+                scope: context.scope,
+                hiddenAppTokens: context.hiddenAppTokens,
+                cancellation: cancellation
+            )
+        } ?? []
     }
 
     func snapshot() -> [WindowItem] {
@@ -515,7 +668,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             ? minimizedItems(
                 excluding: visibleWindowIDs,
                 frontmostPID: frontmostPID,
-                sharingStateIndex: WindowSharingStateIndex(rawList: rawList)
+                sharingStateIndex: WindowSharingStateIndex(rawList: rawList),
+                scope: windowScope,
+                hiddenAppTokens: HiddenAppFilterState.normalizedTokens,
+                cancellation: CooperativeCancellationToken()
             )
             : []
         return SnapshotResult(
@@ -696,16 +852,19 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             return [:]
         }
         let captureStart = Date()
-        let permitPool = CapturePermitPool(limit: maxConcurrentCaptures)
+        let permitPool = capturePermitPool
 
         return await withTaskGroup(of: WindowCaptureOutcome.self) { group in
             var nextIndex = 0
             var firstAttemptTimeouts = 0
             var firstAttemptFailures = 0
+            var firstAttemptResourceLimits = 0
             var secondAttemptTimeouts = 0
             var secondAttemptFailures = 0
+            var secondAttemptResourceLimits = 0
             var fallbackTimeouts = 0
             var fallbackFailures = 0
+            var fallbackResourceLimits = 0
 
             func enqueueNextCapture() -> Bool {
                 guard !Task.isCancelled, nextIndex < captureTargets.count else { return false }
@@ -713,12 +872,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 nextIndex += 1
                 nonisolated(unsafe) let capturedWindow = window
                 group.addTask {
-                    // First attempt usually succeeds, but SCKit's first call
-                    // after an idle period can either fail or time out while
-                    // the capture pipeline warms up. Both outcomes get one
-                    // retry: cold pipelines return .timedOut more often than
-                    // .failed, and skipping the retry on timeout is what left
-                    // post-idle Cmd+Tab showing empty tiles.
+                    // Retry only a completed failure. A timed-out framework call
+                    // still owns its global permit until Apple's API returns, so
+                    // starting another call for the same window would compound
+                    // the stall this limiter exists to contain.
                     let first = await SCContentCache.captureWithSoftTimeout(
                         window: capturedWindow,
                         maxDim: maxDim,
@@ -743,10 +900,29 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             fallbackAttempt: nil
                         )
                     }
+                    if case .timedOut = first {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: nil,
+                            fallbackAttempt: nil
+                        )
+                    }
+                    if case .resourceLimited = first {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: nil,
+                            fallbackAttempt: nil
+                        )
+                    }
                     let reason: String = switch first {
-                    case .timedOut: "timed out"
                     case .failed: "failed"
                     case .success: "succeeded" // unreachable; success returned above
+                    case .timedOut: "timed out" // returned above
+                    case .resourceLimited: "resource limited" // returned above
                     }
                     Logger.capture.notice(
                         "First capture \(reason, privacy: .public) for windowID=\(windowID, privacy: .public) — retrying"
@@ -767,6 +943,24 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         )
                     }
                     if Task.isCancelled {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: second,
+                            fallbackAttempt: nil
+                        )
+                    }
+                    if case .timedOut = second {
+                        return WindowCaptureOutcome(
+                            windowID: windowID,
+                            image: nil,
+                            firstAttempt: first,
+                            secondAttempt: second,
+                            fallbackAttempt: nil
+                        )
+                    }
+                    if case .resourceLimited = second {
                         return WindowCaptureOutcome(
                             windowID: windowID,
                             image: nil,
@@ -796,6 +990,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     if case .timedOut = fallback {
                         Logger.capture.error(
                             "CGWindowList fallback timed out for windowID=\(windowID, privacy: .public)"
+                        )
+                    } else if case .resourceLimited = fallback {
+                        Logger.capture.notice(
+                            "CGWindowList fallback skipped by global capture limit for windowID=\(windowID, privacy: .public)"
                         )
                     } else {
                         Logger.capture.error(
@@ -828,6 +1026,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     firstAttemptFailures += 1
                 case .timedOut:
                     firstAttemptTimeouts += 1
+                case .resourceLimited:
+                    firstAttemptResourceLimits += 1
                 }
 
                 if let secondAttempt = captureResult.secondAttempt {
@@ -838,6 +1038,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         secondAttemptFailures += 1
                     case .timedOut:
                         secondAttemptTimeouts += 1
+                    case .resourceLimited:
+                        secondAttemptResourceLimits += 1
                     }
                 }
 
@@ -849,6 +1051,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         fallbackFailures += 1
                     case .timedOut:
                         fallbackTimeouts += 1
+                    case .resourceLimited:
+                        fallbackResourceLimits += 1
                     }
                 }
 
@@ -859,7 +1063,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             }
 
             if !Task.isCancelled, !scMissingIDs.isEmpty {
-                await withTaskGroup(of: (CGWindowID, NSImage?).self) { fallbackGroup in
+                await withTaskGroup(of: (CGWindowID, FallbackAttemptResult).self) { fallbackGroup in
                     for windowID in scMissingIDs {
                         let wid = windowID
                         fallbackGroup.addTask {
@@ -869,20 +1073,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                                 timeoutMs: fallbackTimeoutMs,
                                 permitPool: permitPool
                             )
-                            let image: NSImage? = if case .success(let image) = fallback {
-                                image
-                            } else {
-                                nil
-                            }
-                            return (wid, image)
+                            return (wid, fallback)
                         }
                     }
-                    for await (windowID, image) in fallbackGroup {
-                        if let image {
+                    for await (windowID, fallback) in fallbackGroup {
+                        switch fallback {
+                        case .success(let image):
                             Logger.capture.notice(
                                 "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — not in SCShareableContent"
                             )
                             result[windowID] = image
+                        case .failed:
+                            fallbackFailures += 1
+                        case .timedOut:
+                            fallbackTimeouts += 1
+                        case .resourceLimited:
+                            fallbackResourceLimits += 1
                         }
                     }
                 }
@@ -893,6 +1099,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 fields: [
                     "captured": .int(result.count),
                     "first_failures": .int(firstAttemptFailures),
+                    "first_resource_limited": .int(firstAttemptResourceLimits),
                     "first_timeouts": .int(firstAttemptTimeouts),
                     "max_concurrent": .int(maxConcurrentCaptures),
                     "milliseconds": .double(ms),
@@ -900,14 +1107,16 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     "sc_missing": .int(scMissingIDs.count),
                     "screen_recording": .bool(true),
                     "fallback_failures": .int(fallbackFailures),
+                    "fallback_resource_limited": .int(fallbackResourceLimits),
                     "fallback_timeouts": .int(fallbackTimeouts),
                     "second_failures": .int(secondAttemptFailures),
+                    "second_resource_limited": .int(secondAttemptResourceLimits),
                     "second_timeouts": .int(secondAttemptTimeouts)
                 ]
             )
             if PerformanceLoggingState.mode == .debug {
                 Logger.capture.info(
-                    "Captured \(result.count, privacy: .public)/\(requestedIDs.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public), fallbackTimeouts=\(fallbackTimeouts, privacy: .public), fallbackFailures=\(fallbackFailures, privacy: .public)"
+                    "Captured \(result.count, privacy: .public)/\(requestedIDs.count, privacy: .public) previews in \(ms, format: .fixed(precision: 1), privacy: .public) ms; firstTimeouts=\(firstAttemptTimeouts, privacy: .public), firstFailures=\(firstAttemptFailures, privacy: .public), firstLimited=\(firstAttemptResourceLimits, privacy: .public), secondTimeouts=\(secondAttemptTimeouts, privacy: .public), secondFailures=\(secondAttemptFailures, privacy: .public), secondLimited=\(secondAttemptResourceLimits, privacy: .public), fallbackTimeouts=\(fallbackTimeouts, privacy: .public), fallbackFailures=\(fallbackFailures, privacy: .public), fallbackLimited=\(fallbackResourceLimits, privacy: .public)"
                 )
             }
             return result
@@ -927,7 +1136,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // sharing state, and switching to them is more important than showing
         // a live preview. Those tiles fall back to the app-icon treatment.
         guard let application,
-              application.isFinishedLaunching else {
+              WindowEligibilityPolicy.canIncludeApplication(
+                  processIdentifier: application.processIdentifier,
+                  currentProcessIdentifier: getpid(),
+                  activationPolicy: application.activationPolicy,
+                  isFinishedLaunching: application.isFinishedLaunching
+              ) else {
             return false
         }
         guard WindowSharingPolicy.canListWindow(
@@ -938,13 +1152,6 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         ) else {
             return false
         }
-        // Allow .regular apps and also our own .accessory process (settings window etc.)
-        let isRegular = application.activationPolicy == .regular
-        let isOwnProcess = application.processIdentifier == getpid()
-        guard isRegular || isOwnProcess else {
-            return false
-        }
-
         if let bundleIdentifier = application.bundleIdentifier,
            excludedBundleIdentifiers.contains(bundleIdentifier) {
             return false
@@ -966,7 +1173,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private func minimizedItems(
         excluding visibleWindowIDs: Set<CGWindowID>,
         frontmostPID: pid_t?,
-        sharingStateIndex: WindowSharingStateIndex
+        sharingStateIndex: WindowSharingStateIndex,
+        scope: SBWindowScope,
+        hiddenAppTokens: Set<HiddenAppToken>,
+        cancellation: CooperativeCancellationToken
     ) -> [WindowItem] {
         // Soft bound on AX IPC. Per Apple's AXUIElement header, a timeout set
         // on a specific element only governs calls to *that* element — it does
@@ -976,17 +1186,28 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // framework returns; this only bounds new IPC, same as the
         // capture soft-timeout pattern.
         let axTimeoutSeconds: Float = 0.25
+        // Real local telemetry: 9,977 activation samples, p95=3 candidate
+        // windows and max=11. These ceilings are deliberately above that
+        // observed scale while preventing a pathological app from running an
+        // abandoned AX sweep without an aggregate bound.
+        var budget = AXScanBudget(
+            maximumApplications: 32,
+            maximumWindows: 128,
+            maximumElapsedSeconds: 2.0,
+            startedAt: ProcessInfo.processInfo.systemUptime
+        )
         var result: [WindowItem] = []
-        for application in NSWorkspace.shared.runningApplications {
+        applicationLoop: for application in NSWorkspace.shared.runningApplications {
             // Bypass the rest of the sweep if the merge consumer already lost
             // interest (panel hidden, generation bumped). Won't unstick an
             // already-blocked AX call; only stops *new* per-app iterations.
-            if Task.isCancelled { break }
-            guard shouldIncludeApplication(application) else { continue }
-            if WindowFilterState.scope == .currentApp,
+            if cancellation.isCancelled { break }
+            guard shouldIncludeApplication(application, hiddenAppTokens: hiddenAppTokens) else { continue }
+            if scope == .currentApp,
                application.processIdentifier != frontmostPID {
                 continue
             }
+            guard budget.beginApplication(now: ProcessInfo.processInfo.systemUptime) else { break }
 
             let appElement = AXUIElementCreateApplication(application.processIdentifier)
             _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
@@ -994,6 +1215,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
             let appName = application.localizedName ?? application.bundleIdentifier ?? "Application"
             for (index, window) in windows.enumerated() {
+                guard !cancellation.isCancelled else { break applicationLoop }
+                guard budget.beginWindow(now: ProcessInfo.processInfo.systemUptime) else {
+                    break applicationLoop
+                }
                 _ = AXUIElementSetMessagingTimeout(window, axTimeoutSeconds)
                 guard axBool(kAXMinimizedAttribute, on: window) == true else { continue }
 
@@ -1032,15 +1257,24 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 ))
             }
         }
+        if budget.isExhausted {
+            Logger.capture.notice(
+                "Minimized AX scan stopped at budget apps=\(budget.scannedApplications, privacy: .public) windows=\(budget.scannedWindows, privacy: .public)"
+            )
+        }
         return result
     }
 
-    private func shouldIncludeApplication(_ application: NSRunningApplication) -> Bool {
-        guard application.isFinishedLaunching else { return false }
-
-        let isRegular = application.activationPolicy == .regular
-        let isOwnProcess = application.processIdentifier == getpid()
-        guard isRegular || isOwnProcess else { return false }
+    private func shouldIncludeApplication(
+        _ application: NSRunningApplication,
+        hiddenAppTokens: Set<HiddenAppToken>
+    ) -> Bool {
+        guard WindowEligibilityPolicy.canIncludeApplication(
+            processIdentifier: application.processIdentifier,
+            currentProcessIdentifier: getpid(),
+            activationPolicy: application.activationPolicy,
+            isFinishedLaunching: application.isFinishedLaunching
+        ) else { return false }
 
         if let bundleIdentifier = application.bundleIdentifier,
            excludedBundleIdentifiers.contains(bundleIdentifier) {
@@ -1049,7 +1283,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
         if isHiddenByUser(
             appName: application.localizedName ?? application.bundleIdentifier ?? "",
-            bundleIdentifier: application.bundleIdentifier
+            bundleIdentifier: application.bundleIdentifier,
+            tokens: hiddenAppTokens
         ) {
             return false
         }
@@ -1057,8 +1292,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return true
     }
 
-    private func isHiddenByUser(appName: String, bundleIdentifier: String?) -> Bool {
-        let tokens = HiddenAppFilterState.normalizedTokens
+    private func isHiddenByUser(
+        appName: String,
+        bundleIdentifier: String?,
+        tokens: Set<HiddenAppToken> = HiddenAppFilterState.normalizedTokens
+    ) -> Bool {
         guard !tokens.isEmpty else { return false }
         return tokens.contains { token in
             token.matches(appName: appName, bundleIdentifier: bundleIdentifier)
@@ -1118,27 +1356,29 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     // Used as a last-resort fallback when both SCKit capture attempts time out
     // or fail: SCKit can be flaky on off-screen / multi-Space / recently-created
     // windows, while the legacy API often succeeds where SCKit stalls. The
-    // fallback itself is bounded: if the legacy API wedges, we stop waiting and
-    // let the orphaned work finish in the background instead of freezing the
-    // whole preview batch.
+    // fallback itself is UX-bounded. If the legacy API wedges, its underlying
+    // work retains one global permit until it really returns, preventing later
+    // batches from accumulating more than the fixed process-wide limit.
     private static func captureFallbackWithSoftTimeout(
         windowID: CGWindowID,
         maxDim: Int,
         timeoutMs: Int,
         permitPool: CapturePermitPool
     ) async -> FallbackAttemptResult {
-        await permitPool.acquire()
-        defer {
-            permitPool.release()
-        }
-        let fallbackTask = Task.detached(priority: .userInitiated) {
-            WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
-        }
-        switch await SCContentCache.awaitTaskWithSoftTimeout(fallbackTask, timeoutMs: timeoutMs) {
-        case .completed(let image):
-            return image.map(FallbackAttemptResult.success) ?? .failed
+        switch await SCContentCache.runPermitBoundOperation(
+            permitPool: permitPool,
+            timeoutMs: timeoutMs,
+            operation: { () async -> FallbackAttemptResult in
+                WindowCatalog.captureWithCGWindowList(windowID: windowID, maxDim: maxDim)
+                    .map(FallbackAttemptResult.success) ?? .failed
+            }
+        ) {
+        case .completed(let result):
+            return result
         case .timedOut:
             return .timedOut
+        case .resourceLimited:
+            return .resourceLimited
         }
     }
 

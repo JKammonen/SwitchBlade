@@ -4,6 +4,10 @@ import os.log
 
 final class WindowActivator: WindowActivating, @unchecked Sendable {
     private static let axMessagingTimeoutSeconds: Float = 0.25
+    private static let maximumAXCandidateWindows = 32
+    private static let maximumAXCandidateScanSeconds: TimeInterval = 2.0
+    private static let activationConfirmationAttempts = 100
+    private static let activationConfirmationIntervalMicroseconds: useconds_t = 20_000
 
     struct ScreenGeometry: Equatable {
         let frame: CGRect
@@ -33,48 +37,61 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let candidateCount: Int
     }
 
-    private let raiseWindowOverride: ((WindowItem) -> Bool)?
+    private let raiseWindowOverride: ((WindowActionTarget) -> Bool)?
     private let activateApplicationOverride: ((pid_t) -> Bool)?
 
     init(
-        raiseWindowOverride: ((WindowItem) -> Bool)? = nil,
+        raiseWindowOverride: ((WindowActionTarget) -> Bool)? = nil,
         activateApplicationOverride: ((pid_t) -> Bool)? = nil
     ) {
         self.raiseWindowOverride = raiseWindowOverride
         self.activateApplicationOverride = activateApplicationOverride
     }
 
-    func activate(_ item: WindowItem) {
+    func activate(_ item: WindowActionTarget) -> Bool {
         log(action: "activate", item: item)
         // Select the target window first, then activate the app. AX raise/focus
         // alone does not make many apps frontmost, while app activation before
         // AX targeting can raise the app's previously-main sibling window.
         let raised = raiseWindow(item)
-        let activated = Self.shouldActivateApplication(afterTargeting: item)
+        let requiresApplicationActivation = Self.shouldActivateApplication(afterTargeting: item)
+        let activated = requiresApplicationActivation
             ? performApplicationActivation(pid: item.pid)
-            : false
+            : true
+        let succeeded = raised && activated
         Logger.activator.info(
-            "activate result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) raised=\(raised, privacy: .public) appActivated=\(activated, privacy: .public)"
+            "activate result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) raised=\(raised, privacy: .public) appActivated=\(activated, privacy: .public) succeeded=\(succeeded, privacy: .public)"
         )
+        return succeeded
     }
 
-    func activateApplication(pid: pid_t) {
+    func activateApplication(pid: pid_t) -> Bool {
         Logger.activator.info("activate app pid=\(pid, privacy: .public)")
         let activated = performApplicationActivation(pid: pid)
         Logger.activator.info("activate app result pid=\(pid, privacy: .public) appActivated=\(activated, privacy: .public)")
+        return activated
     }
 
-    func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool {
+    func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool {
         log(action: "snap \(edge.rawValue)", item: item)
 
         let appElement = appElement(for: item.pid)
-        guard let match = matchingWindow(for: appElement, item: item) else {
+        guard let match = matchingWindow(
+            for: appElement,
+            item: item,
+            requireUniqueEvidence: true
+        ) else {
             return false
         }
         let window = match.element
 
+        var unminimized = true
         if item.isMinimized {
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            unminimized = AXUIElementSetAttributeValue(
+                window,
+                kAXMinimizedAttribute as CFString,
+                kCFBooleanFalse
+            ) == .success
         }
 
         let currentFrame = axFrame(on: window) ?? item.bounds
@@ -95,9 +112,15 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        let activated = Self.shouldActivateApplication(afterTargeting: item)
+        let requiresApplicationActivation = Self.shouldActivateApplication(afterTargeting: item)
+        let activated = requiresApplicationActivation
             ? performApplicationActivation(pid: item.pid)
-            : false
+            : true
+        let succeeded = unminimized
+            && raiseResult == .success
+            && mainResult == .success
+            && focusResult == .success
+            && activated
         logMatchDecision(
             action: "snap",
             item: item,
@@ -107,12 +130,12 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             focusResult: focusResult
         )
         Logger.activator.info(
-            "snap result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appActivated=\(activated, privacy: .public)"
+            "snap result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) unminimized=\(unminimized, privacy: .public) appActivated=\(activated, privacy: .public) succeeded=\(succeeded, privacy: .public)"
         )
-        return true
+        return succeeded
     }
 
-    func close(_ item: WindowItem) -> Bool {
+    func close(_ item: WindowActionTarget) -> Bool {
         log(action: "close", item: item)
         // Only close the window via AX — never terminate the app process.
         let closed = closeMatchingWindow(item)
@@ -122,29 +145,51 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return closed
     }
 
-    func quit(_ item: WindowItem) {
+    func quit(_ item: WindowActionTarget) -> Bool {
         log(action: "quit", item: item)
         // Never quit SwitchBlade itself.
-        guard item.pid != getpid() else { return }
-        NSRunningApplication(processIdentifier: item.pid)?.terminate()
+        guard item.pid != getpid(),
+              let app = NSRunningApplication(processIdentifier: item.pid) else { return false }
+        let requestAccepted = app.terminate()
+        let confirmed = Self.confirmRequest(
+            requestAccepted: requestAccepted,
+            attempts: Self.activationConfirmationAttempts,
+            isComplete: { app.isTerminated },
+            wait: { usleep(Self.activationConfirmationIntervalMicroseconds) }
+        )
+        Logger.activator.info(
+            "quit result pid=\(item.pid, privacy: .public) requestAccepted=\(requestAccepted, privacy: .public) confirmed=\(confirmed, privacy: .public)"
+        )
+        return confirmed
     }
 
-    func hide(_ item: WindowItem) {
+    func hide(_ item: WindowActionTarget) -> Bool {
         log(action: "hide", item: item)
-        guard item.pid != getpid() else { return }
-        NSRunningApplication(processIdentifier: item.pid)?.hide()
+        guard item.pid != getpid(),
+              let app = NSRunningApplication(processIdentifier: item.pid) else { return false }
+        let requestAccepted = app.hide()
+        let confirmed = Self.confirmRequest(
+            requestAccepted: requestAccepted,
+            attempts: Self.activationConfirmationAttempts,
+            isComplete: { app.isHidden },
+            wait: { usleep(Self.activationConfirmationIntervalMicroseconds) }
+        )
+        Logger.activator.info(
+            "hide result pid=\(item.pid, privacy: .public) requestAccepted=\(requestAccepted, privacy: .public) confirmed=\(confirmed, privacy: .public)"
+        )
+        return confirmed
     }
 
     /// One log helper for all four actions so the format stays consistent and
     /// we never accidentally log a pid without a title.
-    private func log(action: String, item: WindowItem) {
+    private func log(action: String, item: WindowActionTarget) {
         Logger.activator.info(
             "\(action, privacy: .public) pid=\(item.pid, privacy: .public) title=\(item.title, privacy: .private)"
         )
     }
 
     @discardableResult
-    private func raiseMatchingWindow(_ item: WindowItem) -> Bool {
+    private func raiseMatchingWindow(_ item: WindowActionTarget) -> Bool {
         let appElement = appElement(for: item.pid)
         let matchStart = Date()
         guard let match = matchingWindow(
@@ -216,7 +261,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     @discardableResult
-    private func raiseWindow(_ item: WindowItem) -> Bool {
+    private func raiseWindow(_ item: WindowActionTarget) -> Bool {
         if let raiseWindowOverride {
             return raiseWindowOverride(item)
         }
@@ -232,20 +277,58 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
 
         let start = Date()
-        let activated = app.activate(options: [])
+        let requestAccepted = app.activate(options: [])
+        // NSRunningApplication.activate only acknowledges the request. Real
+        // telemetry has p95=84ms and p99=1.79s from request to frontmost
+        // observation, so wait up to 2s before mutating MRU/hiding the panel.
+        let activated = Self.confirmRequest(
+            requestAccepted: requestAccepted,
+            attempts: Self.activationConfirmationAttempts,
+            isComplete: { app.isActive },
+            wait: { usleep(Self.activationConfirmationIntervalMicroseconds) }
+        )
         let elapsedMs = Date().timeIntervalSince(start) * 1000
         PerformanceDiagnostics.record(
             "activation_app_activate",
             fields: [
                 "activated": .bool(activated),
                 "app_activate_ms": .double(elapsedMs),
-                "pid": .int(Int(pid))
+                "pid": .int(Int(pid)),
+                "request_accepted": .bool(requestAccepted)
             ]
         )
         Logger.activator.info(
-            "App activate timing pid=\(pid, privacy: .public) activated=\(activated, privacy: .public) elapsed=\(elapsedMs, format: .fixed(precision: 1), privacy: .public)ms"
+            "App activate timing pid=\(pid, privacy: .public) requestAccepted=\(requestAccepted, privacy: .public) confirmed=\(activated, privacy: .public) elapsed=\(elapsedMs, format: .fixed(precision: 1), privacy: .public)ms"
         )
         return activated
+    }
+
+    static func confirmActivationRequest(
+        requestAccepted: Bool,
+        attempts: Int,
+        isActive: () -> Bool,
+        wait: () -> Void
+    ) -> Bool {
+        confirmRequest(
+            requestAccepted: requestAccepted,
+            attempts: attempts,
+            isComplete: isActive,
+            wait: wait
+        )
+    }
+
+    static func confirmRequest(
+        requestAccepted: Bool,
+        attempts: Int,
+        isComplete: () -> Bool,
+        wait: () -> Void
+    ) -> Bool {
+        guard requestAccepted, attempts > 0 else { return false }
+        for attempt in 0 ..< attempts {
+            if isComplete() { return true }
+            if attempt + 1 < attempts { wait() }
+        }
+        return false
     }
 
     @discardableResult
@@ -256,20 +339,43 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return activateRunningApplication(pid: pid)
     }
 
-    static func shouldActivateApplication(afterTargeting item: WindowItem) -> Bool {
+    static func shouldActivateApplication(afterTargeting item: WindowActionTarget) -> Bool {
         // Same-app window switches already target the frontmost app. Re-running
         // app activation there can hand focus back to the app's previously-main
         // sibling window and undo the AX-targeted selection we just made.
         return !item.isFrontmostApp
     }
 
-    private func closeMatchingWindow(_ item: WindowItem) -> Bool {
+    static func shouldActivateApplication(afterTargeting item: WindowItem) -> Bool {
+        shouldActivateApplication(afterTargeting: item.actionTarget)
+    }
+
+    private func closeMatchingWindow(_ item: WindowActionTarget) -> Bool {
         let appElement = appElement(for: item.pid)
-        guard let match = matchingWindow(for: appElement, item: item) else {
+        guard let match = matchingWindow(
+            for: appElement,
+            item: item,
+            requireUniqueEvidence: true
+        ) else {
             return false
         }
 
-        return pressCloseButton(on: match.element)
+        let requestAccepted = pressCloseButton(on: match.element)
+        return Self.confirmRequest(
+            requestAccepted: requestAccepted,
+            attempts: 20,
+            isComplete: { Self.isInvalidAXElement(match.element) },
+            wait: { usleep(Self.activationConfirmationIntervalMicroseconds) }
+        )
+    }
+
+    private static func isInvalidAXElement(_ element: AXUIElement) -> Bool {
+        var role: CFTypeRef?
+        return AXUIElementCopyAttributeValue(
+            element,
+            kAXRoleAttribute as CFString,
+            &role
+        ) == .invalidUIElement
     }
 
     private func pressCloseButton(on window: AXUIElement) -> Bool {
@@ -310,8 +416,9 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
     private func matchingWindow(
         for appElement: AXUIElement,
-        item: WindowItem,
-        preferNonMainOnTies: Bool = false
+        item: WindowActionTarget,
+        preferNonMainOnTies: Bool = false,
+        requireUniqueEvidence: Bool = false
     ) -> MatchedWindow? {
         let windowsStart = Date()
         guard let windows = windows(for: appElement) else {
@@ -320,9 +427,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let windowsMs = Date().timeIntervalSince(windowsStart) * 1000
 
         let candidatesStart = Date()
-        let candidates = windows.map { window in
+        let candidateDeadline = ProcessInfo.processInfo.systemUptime
+            + Self.maximumAXCandidateScanSeconds
+        var candidates: [(element: AXUIElement, candidate: WindowMatchCandidate)] = []
+        for window in windows.prefix(Self.maximumAXCandidateWindows) {
+            guard ProcessInfo.processInfo.systemUptime < candidateDeadline else { break }
             applyAXMessagingTimeout(to: window)
-            return (
+            candidates.append((
                 element: window,
                 candidate: WindowMatchCandidate(
                     title: axString(kAXTitleAttribute, on: window),
@@ -330,21 +441,25 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                     isMain: axBool(kAXMainAttribute, on: window),
                     isFocused: axBool(kAXFocusedAttribute, on: window)
                 )
-            )
+            ))
         }
         let candidatesMs = Date().timeIntervalSince(candidatesStart) * 1000
+        let candidateScanWasBounded = candidates.count < windows.count
 
         let decisionStart = Date()
         if let decision = Self.bestMatchDecision(
             for: item,
             candidates: candidates.map(\.candidate),
-            preferNonMainOnTies: preferNonMainOnTies
+            preferNonMainOnTies: preferNonMainOnTies,
+            requireUniqueEvidence: requireUniqueEvidence
         ) {
             let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
             PerformanceDiagnostics.record(
                 "activation_ax_match",
                 fields: [
                     "candidate_count": .int(candidates.count),
+                    "candidate_scan_bounded": .bool(candidateScanWasBounded),
+                    "candidate_total": .int(windows.count),
                     "candidates_ms": .double(candidatesMs),
                     "decision_ms": .double(decisionMs),
                     "matched": .bool(true),
@@ -369,14 +484,14 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return count + (Self.framesAreClose(frame, item.bounds) ? 1 : 0)
         }
         Logger.activator.notice(
-            "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public) windowsMs=\(windowsMs, format: .fixed(precision: 1), privacy: .public) candidatesMs=\(candidatesMs, format: .fixed(precision: 1), privacy: .public) decisionMs=\(decisionMs, format: .fixed(precision: 1), privacy: .public)"
+            "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) scanned=\(candidates.count, privacy: .public) bounded=\(candidateScanWasBounded, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public) windowsMs=\(windowsMs, format: .fixed(precision: 1), privacy: .public) candidatesMs=\(candidatesMs, format: .fixed(precision: 1), privacy: .public) decisionMs=\(decisionMs, format: .fixed(precision: 1), privacy: .public)"
         )
         return nil
     }
 
     private func logMatchDecision(
         action: String,
-        item: WindowItem,
+        item: WindowActionTarget,
         match: MatchedWindow,
         raiseResult: AXError,
         mainResult: AXError,
@@ -456,27 +571,52 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     static func bestMatchIndex(
-        for item: WindowItem,
+        for item: WindowActionTarget,
         candidates: [WindowMatchCandidate],
-        preferNonMainOnTies: Bool = false
+        preferNonMainOnTies: Bool = false,
+        requireUniqueEvidence: Bool = false
     ) -> Int? {
         bestMatchDecision(
             for: item,
             candidates: candidates,
-            preferNonMainOnTies: preferNonMainOnTies
+            preferNonMainOnTies: preferNonMainOnTies,
+            requireUniqueEvidence: requireUniqueEvidence
         )?.index
     }
 
-    static func bestMatchDecision(
+    static func bestMatchIndex(
         for item: WindowItem,
         candidates: [WindowMatchCandidate],
-        preferNonMainOnTies: Bool = false
+        preferNonMainOnTies: Bool = false,
+        requireUniqueEvidence: Bool = false
+    ) -> Int? {
+        bestMatchIndex(
+            for: item.actionTarget,
+            candidates: candidates,
+            preferNonMainOnTies: preferNonMainOnTies,
+            requireUniqueEvidence: requireUniqueEvidence
+        )
+    }
+
+    static func bestMatchDecision(
+        for item: WindowActionTarget,
+        candidates: [WindowMatchCandidate],
+        preferNonMainOnTies: Bool = false,
+        requireUniqueEvidence: Bool = false
     ) -> WindowMatchDecision? {
         guard !candidates.isEmpty else { return nil }
 
         let indexedCandidates = candidates.enumerated().map { (index: $0.offset, candidate: $0.element) }
         let exactTitleMatches = indexedCandidates.filter {
             titleMatches(item.title, candidateTitle: $0.candidate.title)
+        }
+
+        if requireUniqueEvidence {
+            return uniqueEvidenceDecision(
+                for: item,
+                indexedCandidates: indexedCandidates,
+                exactTitleMatches: exactTitleMatches
+            )
         }
         let titleFiltered = exactTitleMatches.isEmpty ? indexedCandidates : exactTitleMatches
 
@@ -527,9 +667,58 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         )
     }
 
+    private static func uniqueEvidenceDecision(
+        for item: WindowActionTarget,
+        indexedCandidates: [(index: Int, candidate: WindowMatchCandidate)],
+        exactTitleMatches: [(index: Int, candidate: WindowMatchCandidate)]
+    ) -> WindowMatchDecision? {
+        let frameMatches = indexedCandidates.filter { indexedCandidate in
+            guard let frame = indexedCandidate.candidate.frame else { return false }
+            return framesAreClose(frame, item.bounds)
+        }
+
+        if !item.title.isEmpty, exactTitleMatches.count == 1, let match = exactTitleMatches.first {
+            return decision(
+                match,
+                reason: "unique-title",
+                item: item,
+                titleMatchCount: 1,
+                frameMatchCount: frameMatches.count
+            )
+        }
+
+        if !item.title.isEmpty, exactTitleMatches.count > 1 {
+            let titleAndFrameMatches = exactTitleMatches.filter { indexedCandidate in
+                guard let frame = indexedCandidate.candidate.frame else { return false }
+                return framesAreClose(frame, item.bounds)
+            }
+            guard titleAndFrameMatches.count == 1, let match = titleAndFrameMatches.first else {
+                return nil
+            }
+            return decision(
+                match,
+                reason: "unique-title-frame",
+                item: item,
+                titleMatchCount: exactTitleMatches.count,
+                frameMatchCount: 1
+            )
+        }
+
+        guard frameMatches.count == 1, let match = frameMatches.first else {
+            return nil
+        }
+        return decision(
+            match,
+            reason: "unique-frame",
+            item: item,
+            titleMatchCount: item.title.isEmpty ? 0 : exactTitleMatches.count,
+            frameMatchCount: 1
+        )
+    }
+
     private static func bestFrameCandidate(
         in candidates: [(index: Int, candidate: WindowMatchCandidate)],
-        for item: WindowItem,
+        for item: WindowActionTarget,
         preferNonMainOnTies: Bool
     ) -> (index: Int, candidate: WindowMatchCandidate)? {
         guard !candidates.isEmpty else { return nil }
@@ -558,7 +747,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
     private static func bestFallbackCandidate(
         in candidates: [(index: Int, candidate: WindowMatchCandidate)],
-        for item: WindowItem,
+        for item: WindowActionTarget,
         preferNonMainOnTies: Bool
     ) -> (index: Int, candidate: WindowMatchCandidate)? {
         guard !candidates.isEmpty else { return nil }
@@ -602,7 +791,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     private static func decision(
         _ match: (index: Int, candidate: WindowMatchCandidate),
         reason: String,
-        item: WindowItem,
+        item: WindowActionTarget,
         titleMatchCount: Int,
         frameMatchCount: Int
     ) -> WindowMatchDecision {

@@ -7,9 +7,9 @@ import CoreGraphics
 /// 2. Fallback key — "pid::displayTitle" signature. Hits when the windowID
 ///    changed (window recreated, e.g. after a doc reload) but the same
 ///    process is still showing the same title; bounds may differ.
-/// 3. Narrow app-identity fallback. If an app currently has exactly one live
-///    window, a recreated window can reuse that app's last preview even when
-///    both ID and title changed.
+/// 3. Narrow app-process fallback. If an app currently has exactly one live
+///    window, a recreated window in the same process can reuse that process's
+///    last preview even when both ID and title changed.
 /// 4. Retained exact signature for minimized AX rows. Visible-only snapshots
 ///    prune normal live keys once a window is minimized, but a recent
 ///    pid+bundle/title match can still safely show the last real preview.
@@ -21,7 +21,7 @@ import CoreGraphics
 final class PreviewCacheStore {
     private var byID: LRUDictionary<CGWindowID, CachedPreview>
     private var bySignature: LRUDictionary<String, CachedPreview>
-    private var byAppIdentity: LRUDictionary<String, CachedPreview>
+    private var byAppProcessIdentity: LRUDictionary<String, CachedPreview>
     private var byRecentlySeenSignature: LRUDictionary<String, CachedPreview>
     /// Window IDs whose last capture was mostly-white and was deferred once.
     /// A second consecutive white capture for the same window is then accepted
@@ -37,7 +37,7 @@ final class PreviewCacheStore {
     ) {
         byID = LRUDictionary(capacity: capacity)
         bySignature = LRUDictionary(capacity: capacity)
-        byAppIdentity = LRUDictionary(capacity: capacity)
+        byAppProcessIdentity = LRUDictionary(capacity: capacity)
         byRecentlySeenSignature = LRUDictionary(capacity: capacity)
         self.retainedPreviewMaxAge = retainedPreviewMaxAge
         self.now = now
@@ -79,7 +79,8 @@ final class PreviewCacheStore {
         }
         let identity = appIdentity(for: item)
         if liveItems.filter({ appIdentity(for: $0) == identity }).count == 1,
-           let cached = byAppIdentity[identity] {
+           let cached = byAppProcessIdentity[appProcessIdentity(for: item)],
+           isFreshEnough(cached) {
             return item.withPreview(cached.image)
         }
         return item
@@ -123,12 +124,11 @@ final class PreviewCacheStore {
                 // real white content reproduces every capture, so a white window
                 // stops being a permanent icon placeholder after one extra open
                 // instead of re-capturing forever.
-                if byID[windowID] != nil {
-                    continue
-                }
                 if whiteDeferredIDs.insert(windowID).inserted {
                     continue
                 }
+            } else {
+                whiteDeferredIDs.remove(windowID)
             }
             whiteDeferredIDs.remove(windowID)
             let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
@@ -136,7 +136,7 @@ final class PreviewCacheStore {
             bySignature[signature(for: item)] = cached
             byRecentlySeenSignature[recentSignature(for: item)] = cached
             if singleWindowAppIdentities.contains(appIdentity(for: item)) {
-                byAppIdentity[appIdentity(for: item)] = cached
+                byAppProcessIdentity[appProcessIdentity(for: item)] = cached
             }
             accepted[windowID] = image
         }
@@ -154,19 +154,32 @@ final class PreviewCacheStore {
         let windowIDs = Set(items.map(\.windowID))
         let signatures = Set(items.map(signature(for:)))
         let recentSignatures = Set(items.map(recentSignature(for:)))
-        let appIdentities = Set(items.map(appIdentity(for:)))
+        let appProcessIdentities = Set(items.map(appProcessIdentity(for:)))
         byID.removeAll { windowIDs.contains($0) }
         bySignature.removeAll { signatures.contains($0) }
         byRecentlySeenSignature.removeAll { recentSignatures.contains($0) }
-        byAppIdentity.removeAll { appIdentities.contains($0) }
+        byAppProcessIdentity.removeAll { appProcessIdentities.contains($0) }
         whiteDeferredIDs.subtract(windowIDs)
+    }
+
+    func removeAll() {
+        byID.keepOnly([])
+        bySignature.keepOnly([])
+        byRecentlySeenSignature.keepOnly([])
+        byAppProcessIdentity.keepOnly([])
+        whiteDeferredIDs.removeAll()
     }
 
     private func keepOnlyLive(_ items: [WindowItem]) {
         let liveWindowIDs = Set(items.map(\.windowID))
         byID.keepOnly(liveWindowIDs)
         bySignature.keepOnly(Set(items.map(signature(for:))))
-        byAppIdentity.keepOnly(Self.singleWindowAppIdentities(in: items, appIdentity: appIdentity(for:)))
+        let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: items, appIdentity: appIdentity(for:))
+        byAppProcessIdentity.keepOnly(Set(
+            items
+                .filter { singleWindowAppIdentities.contains(appIdentity(for: $0)) }
+                .map(appProcessIdentity(for:))
+        ))
         whiteDeferredIDs.formIntersection(liveWindowIDs)
     }
 
@@ -180,6 +193,10 @@ final class PreviewCacheStore {
 
     private func appIdentity(for item: WindowItem) -> String {
         item.bundleIdentifier ?? item.appName
+    }
+
+    private func appProcessIdentity(for item: WindowItem) -> String {
+        "\(item.pid)::\(appIdentity(for: item))"
     }
 
     private func isFreshEnough(_ cached: CachedPreview) -> Bool {

@@ -8,7 +8,10 @@ enum PerformanceDiagnosticsTests {
         ("PerformanceDiagnostics/metricLine_serializesEachValueType", lineSerializesEachValueType),
         ("PerformanceDiagnostics/metricLine_sortsKeys", lineSortsKeys),
         ("PerformanceDiagnostics/metricLine_endsWithNewline", lineEndsWithNewline),
-        ("PerformanceDiagnostics/panelHideMetric_containsTimingBreakdown", panelHideMetricContainsTimingBreakdown)
+        ("PerformanceDiagnostics/panelHideMetric_containsTimingBreakdown", panelHideMetricContainsTimingBreakdown),
+        ("PerformanceDiagnostics/stringFields_areLengthBounded", stringFieldsAreLengthBounded),
+        ("PerformanceDiagnostics/fieldCountAndKeys_areLengthBounded", fieldCountAndKeysAreLengthBounded),
+        ("PerformanceDiagnostics/logRotation_isSizeBounded", logRotationIsSizeBounded)
     ]
 
     private static func decode(
@@ -109,5 +112,39 @@ enum PerformanceDiagnosticsTests {
         try expectEqual(object["order_out_ms"] as? Double, 3.0)
         try expectEqual(object["transaction_ms"] as? Double, 1.5)
         try expectEqual(object["was_visible"] as? Bool, true)
+    }
+
+    static func stringFieldsAreLengthBounded() throws {
+        let line = try PerformanceDiagnostics.metricLine(
+            event: String(repeating: "e", count: 200),
+            fields: ["context": .string(String(repeating: "x", count: 1_000))],
+            timestamp: "t"
+        )
+        let object = try decode(line)
+        try expectEqual((object["event"] as? String)?.count, 80)
+        try expectEqual((object["context"] as? String)?.count, 256)
+    }
+
+    static func fieldCountAndKeysAreLengthBounded() throws {
+        var fields: [String: PerformanceMetricValue] = [:]
+        for index in 0 ..< 100 {
+            fields[String(repeating: "k", count: 100) + String(format: "%03d", index)] = .int(index)
+        }
+        let object = try decode(PerformanceDiagnostics.metricLine(
+            event: "bounded",
+            fields: fields,
+            timestamp: "t"
+        ))
+        try expectLessThanOrEqual(object.count, PerformanceDiagnostics.maximumFieldCount + 2)
+        for key in object.keys where key != "event" && key != "timestamp" {
+            try expectLessThanOrEqual(key.count, PerformanceDiagnostics.maximumFieldKeyLength)
+        }
+    }
+
+    static func logRotationIsSizeBounded() throws {
+        let max = PerformanceDiagnostics.maximumCurrentLogBytes
+        try expect(!PerformanceDiagnostics.shouldRotateLog(existingBytes: 0, incomingBytes: max + 1))
+        try expect(!PerformanceDiagnostics.shouldRotateLog(existingBytes: max - 10, incomingBytes: 10))
+        try expect(PerformanceDiagnostics.shouldRotateLog(existingBytes: max - 10, incomingBytes: 11))
     }
 }

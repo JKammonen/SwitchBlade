@@ -1,7 +1,25 @@
 import Carbon.HIToolbox
+import Combine
 import Foundation
 import os.log
 import SwiftUI
+
+actor WindowActionCoordinator {
+    private var isRunning = false
+
+    /// nil means another window operation still owns the single action lane.
+    /// The lane stays occupied until detached AX/AppKit work actually returns,
+    /// even when the caller task is cancelled meanwhile.
+    func run(
+        priority: TaskPriority = .userInitiated,
+        operation: @escaping @Sendable () -> Bool
+    ) async -> Bool? {
+        guard !isRunning else { return nil }
+        isRunning = true
+        defer { isRunning = false }
+        return await Task.detached(priority: priority, operation: operation).value
+    }
+}
 
 /// Observable store backing the SwitcherView. Holds the visible items + the
 /// current selection and coordinates between the catalog (window listing),
@@ -14,12 +32,26 @@ final class SwitcherStore: ObservableObject {
     @Published private(set) var items: [WindowItem] = []
     @Published private(set) var isVisible = false
     @Published private(set) var permissionState: PermissionState
+    @Published private(set) var panelColumnCount = 1
     @Published var selectedID: WindowItem.ID?
 
     var onShow: (() -> Void)?
     var onHide: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onOpenPermissionSettings: ((PermissionKind) -> Void)?
     var onPreparePanel: ((Int) -> Void)?
+
+    var relevantMissingPermissions: [PermissionKind] {
+        permissionState.missingPermissions(for: SwitchBladeSettings.shared.previewMode)
+    }
+
+    var primaryMissingPermission: PermissionKind? {
+        relevantMissingPermissions.first
+    }
+
+    var permissionMessage: String? {
+        permissionState.message(for: SwitchBladeSettings.shared.previewMode)
+    }
 
     /// True from the moment the first Cmd+Tab fires until the panel is hidden.
     /// Used so Command-release is detected even when the async show is still in flight.
@@ -55,6 +87,7 @@ final class SwitcherStore: ObservableObject {
     private let switchBladePID: pid_t
 
     private var previewLoadTask: Task<Void, Never>?
+    private var minimizedMergeTask: Task<Void, Never>?
     private var openRefreshTask: Task<Void, Never>?
     private var staleCacheHealTask: Task<Void, Never>?
     private var contentCacheWarmupTask: Task<Void, Never>?
@@ -63,9 +96,16 @@ final class SwitcherStore: ObservableObject {
     private var panelShowScheduleID = 0
     private var previewWarmupTask: Task<Void, Never>?
     private var focusedRankUpgradeTask: Task<Void, Never>?
+    private var windowActionTask: Task<Void, Never>?
+    private var windowActionID: UUID?
+    private var windowActionGeneration = 0
+    private let windowActionCoordinator = WindowActionCoordinator()
+    private var settingsCancellables: Set<AnyCancellable> = []
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
+    private var settingsGeneration = 0
     private var pendingOpenRequestedAt: Date?
+    private var pendingOpenCycleDelta: Int?
     private var activeOpenRequestedAt: Date?
     private var currentOpenSource: String?
     private var cachedOpenItems: [WindowItem] = []
@@ -175,6 +215,20 @@ final class SwitcherStore: ObservableObject {
                 self.handleAppActivation(pid: pid)
             }
         }
+
+        Publishers.CombineLatest4(
+            SwitchBladeSettings.shared.$previewMode,
+            SwitchBladeSettings.shared.$windowScope,
+            SwitchBladeSettings.shared.$hiddenAppsText,
+            SwitchBladeSettings.shared.$sortOrder
+        )
+        .dropFirst()
+        .sink { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.invalidateDisplayCachesForSettingsChange()
+            }
+        }
+        .store(in: &settingsCancellables)
     }
 
     /// Internal entry point for the NSWorkspace activation observer, also
@@ -221,13 +275,19 @@ final class SwitcherStore: ObservableObject {
         staleCacheHealTask?.cancel()
         previewWarmupTask?.cancel()
         focusedRankUpgradeTask?.cancel()
+        windowActionTask?.cancel()
+        minimizedMergeTask?.cancel()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
         }
     }
 
-    func refreshPermissionState() {
-        permissionState = permissionService.currentState()
+    @discardableResult
+    func refreshPermissionState(_ state: PermissionState? = nil) -> Bool {
+        let current = state ?? permissionService.currentState()
+        guard current != permissionState else { return false }
+        permissionState = current
+        return true
     }
 
     func invalidateCaptureCache(reason: String) async {
@@ -237,9 +297,13 @@ final class SwitcherStore: ObservableObject {
     func warmPreviewCache(context: String) async {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else { return }
         guard !isVisible, !isSwitching else { return }
+        let generation = settingsGeneration
 
         let visibleSnapshot = await snapshotVisibleOnlyOffMain()
-        guard !Task.isCancelled, !isVisible, !isSwitching else { return }
+        guard !Task.isCancelled,
+              settingsGeneration == generation,
+              !isVisible,
+              !isSwitching else { return }
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview"))
         let stabilizedItems = stabilizeBackgroundWarmupOrder(
             orderedItems,
@@ -260,9 +324,15 @@ final class SwitcherStore: ObservableObject {
             maxCount: nil,
             maxConcurrentCaptures: min(4, initialWindowIDs.count)
         )
-        guard !Task.isCancelled, !isVisible, !isSwitching else { return }
+        guard !Task.isCancelled,
+              settingsGeneration == generation,
+              !isVisible,
+              !isSwitching else { return }
         let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
-        guard !Task.isCancelled, !isVisible, !isSwitching else { return }
+        guard !Task.isCancelled,
+              settingsGeneration == generation,
+              !isVisible,
+              !isSwitching else { return }
         let acceptedPreviews = previewCache.record(previews, liveItems: cacheItems, mostlyWhiteIDs: whiteIDs)
         primeHiddenDisplayItems(cacheItems)
         let ms = Date().timeIntervalSince(start) * 1000
@@ -301,12 +371,13 @@ final class SwitcherStore: ObservableObject {
             moveSelection(forward ? 1 : -1)
             return
         }
-        // Two rapid Cmd+Tab events arrive before the async open completes: we are
-        // already switching but not yet visible or in the previewHidden phase. The
-        // second call would start a second open and double-fire the preview load.
-        // Drop it — the in-flight open (openFromFreshSnapshotOffMain, or the cached
-        // openFromOrderedItems path) already covers this key-down.
-        guard !isSwitching else { return }
+        // Preserve navigation input while the first off-main snapshot is still
+        // resolving. Starting another open would duplicate the work, but dropping
+        // the key-down makes rapid Cmd+Tab stop one window early.
+        if isSwitching {
+            pendingOpenCycleDelta = (pendingOpenCycleDelta ?? 0) + (forward ? 1 : -1)
+            return
+        }
 
         lastSwitcherUse = Date()
         contentCacheWarmupTask?.cancel()
@@ -315,6 +386,7 @@ final class SwitcherStore: ObservableObject {
         cancelPanelShow()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
+        pendingOpenCycleDelta = forward ? 1 : -1
         activeOpenRequestedAt = pendingOpenRequestedAt
         enterResolving(commitWhenReady: false)
 
@@ -393,52 +465,210 @@ final class SwitcherStore: ObservableObject {
             return false
         }
 
+        let switcherModifier = SwitchBladeSettings.shared.modifier.nsFlag
+        let snapModifier = Self.snapShortcutModifier(for: switcherModifier)
+        guard !Self.isVoiceOverChord(event.modifierFlags) else {
+            return false
+        }
         switch Int(event.keyCode) {
-        case Int(kVK_RightArrow) where event.modifierFlags.contains(.option):
+        case Int(kVK_RightArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: snapModifier,
+            switcherModifier: switcherModifier
+        ):
             snapSelected(to: .right)
             return true
-        case Int(kVK_LeftArrow) where event.modifierFlags.contains(.option):
+        case Int(kVK_LeftArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: snapModifier,
+            switcherModifier: switcherModifier
+        ):
             snapSelected(to: .left)
             return true
-        case Int(kVK_UpArrow) where event.modifierFlags.contains(.option):
+        case Int(kVK_UpArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: snapModifier,
+            switcherModifier: switcherModifier
+        ):
             snapSelected(to: .top)
             return true
-        case Int(kVK_DownArrow) where event.modifierFlags.contains(.option):
+        case Int(kVK_DownArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: snapModifier,
+            switcherModifier: switcherModifier
+        ):
             snapSelected(to: .bottom)
             return true
-        case Int(kVK_Tab):
-            moveSelection(event.modifierFlags.contains(.shift) ? -1 : 1)
-            return true
-        case Int(kVK_RightArrow), Int(kVK_DownArrow):
-            moveSelection(1)
-            return true
-        case Int(kVK_LeftArrow), Int(kVK_UpArrow):
+        case Int(kVK_Tab) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: .shift,
+            switcherModifier: switcherModifier
+        ):
             moveSelection(-1)
             return true
-        case Int(kVK_Home):
+        case Int(kVK_Tab) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
+            moveSelection(1)
+            return true
+        case Int(kVK_RightArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
+            moveGridSelection(.right)
+            return true
+        case Int(kVK_LeftArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
+            moveGridSelection(.left)
+            return true
+        case Int(kVK_DownArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
+            moveGridSelection(.down)
+            return true
+        case Int(kVK_UpArrow) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
+            moveGridSelection(.up)
+            return true
+        case Int(kVK_Home) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
             selectFirst()
             return true
-        case Int(kVK_End):
+        case Int(kVK_End) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
             selectLast()
             return true
-        case Int(kVK_ANSI_Q) where event.modifierFlags.contains(.command):
+        case Int(kVK_ANSI_Q) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: .command,
+            switcherModifier: switcherModifier
+        ):
             quitSelectedApp()
             return true
-        case Int(kVK_ANSI_H) where event.modifierFlags.contains(.command):
+        case Int(kVK_ANSI_H) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: .command,
+            switcherModifier: switcherModifier
+        ):
             hideSelectedApp()
             return true
-        case Int(kVK_ANSI_Comma) where event.modifierFlags.contains(.command):
+        case Int(kVK_ANSI_Comma) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: .command,
+            switcherModifier: switcherModifier
+        ):
             openSettings()
             return true
-        case Int(kVK_Return), Int(kVK_Space):
+        case Int(kVK_Return) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
             commitSelection()
             return true
-        case Int(kVK_Escape):
+        case Int(kVK_Space) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
+            commitSelection()
+            return true
+        case Int(kVK_Escape) where Self.panelShortcutMatches(
+            flags: event.modifierFlags,
+            required: [],
+            switcherModifier: switcherModifier
+        ):
             cancel()
             return true
         default:
             return false
         }
+    }
+
+    static func panelShortcutMatches(
+        flags: NSEvent.ModifierFlags,
+        required: NSEvent.ModifierFlags,
+        switcherModifier: NSEvent.ModifierFlags
+    ) -> Bool {
+        let relevant: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        let actual = flags.intersection(relevant)
+        return actual == required || actual == required.union(switcherModifier)
+    }
+
+    static func isVoiceOverChord(_ flags: NSEvent.ModifierFlags) -> Bool {
+        let actual = flags.intersection([.command, .option, .control, .shift])
+        return actual.contains(.control) && actual.contains(.option)
+    }
+
+    /// Control+Option is reserved for VoiceOver. When Control is the configured
+    /// switcher modifier, use Shift+Arrow for keyboard snapping so both features
+    /// remain reachable without stealing VoiceOver input.
+    static func snapShortcutModifier(
+        for switcherModifier: NSEvent.ModifierFlags
+    ) -> NSEvent.ModifierFlags {
+        switcherModifier == .control ? .shift : .option
+    }
+
+    enum GridNavigationDirection {
+        case left
+        case right
+        case up
+        case down
+    }
+
+    func updatePanelColumnCount(_ columns: Int) {
+        panelColumnCount = max(1, columns)
+    }
+
+    static func gridNavigationIndex(
+        from currentIndex: Int,
+        itemCount: Int,
+        columns: Int,
+        direction: GridNavigationDirection
+    ) -> Int {
+        guard itemCount > 0 else { return 0 }
+        let index = min(max(0, currentIndex), itemCount - 1)
+        let columnCount = max(1, columns)
+        switch direction {
+        case .left:
+            return max((index / columnCount) * columnCount, index - 1)
+        case .right:
+            let rowEnd = min(itemCount - 1, ((index / columnCount) + 1) * columnCount - 1)
+            return min(rowEnd, index + 1)
+        case .up:
+            return max(0, index - columnCount)
+        case .down:
+            return min(itemCount - 1, index + columnCount)
+        }
+    }
+
+    private func moveGridSelection(_ direction: GridNavigationDirection) {
+        guard !items.isEmpty else { return }
+        let currentIndex = selectedID.flatMap { id in items.firstIndex { $0.id == id } } ?? 0
+        let targetIndex = Self.gridNavigationIndex(
+            from: currentIndex,
+            itemCount: items.count,
+            columns: panelColumnCount,
+            direction: direction
+        )
+        selectedID = items[targetIndex].id
     }
 
     private func selectFirst() {
@@ -467,48 +697,73 @@ final class SwitcherStore: ObservableObject {
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) {
         selectedID = item.id
         performSelectionAction(for: item, actionName: "snap-\(edge.rawValue)") { activator, selectedItem in
-            let snapped = activator.snap(selectedItem, to: edge)
-            if !snapped {
-                Logger.switcher.notice(
-                    "Snap action failed id=\(selectedItem.id, privacy: .public) pid=\(selectedItem.pid, privacy: .public) edge=\(edge.rawValue, privacy: .public)"
-                )
-            }
+            activator.snap(selectedItem, to: edge)
         }
     }
 
     func close(_ item: WindowItem) {
-        guard activator.close(item) else {
-            Logger.switcher.notice(
-                "Close action failed id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); keeping item visible"
-            )
-            return
-        }
-        removeItem(withID: item.id)
+        let activator = self.activator
+        let target = item.actionTarget
+        _ = startWindowAction(
+            operation: { activator.close(target) },
+            completion: { [weak self] succeeded in
+                guard let self else { return }
+                guard succeeded else {
+                    Logger.switcher.notice(
+                        "Close action failed id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); keeping item visible"
+                    )
+                    return
+                }
+                self.removeItem(withID: item.id)
+            }
+        )
     }
 
     /// Quits the entire app of the selected window. The switcher hides; if
     /// other windows of the same pid are also listed, they're removed too.
     private func quitSelectedApp() {
         guard let selected = selectedItem else { return }
-        activator.quit(selected)
-        items.removeAll { $0.pid == selected.pid }
-        mruTracker.dropAllRanks(
-            forAppIdentity: selected.bundleIdentifier ?? selected.appName,
-            bundleIdentifier: selected.bundleIdentifier
+        let activator = self.activator
+        let target = selected.actionTarget
+        _ = startWindowAction(
+            operation: { activator.quit(target) },
+            completion: { [weak self] succeeded in
+                guard let self else { return }
+                guard succeeded else {
+                    Logger.switcher.notice(
+                        "Quit action failed id=\(selected.id, privacy: .public) pid=\(selected.pid, privacy: .public); keeping panel state"
+                    )
+                    return
+                }
+                self.items.removeAll { $0.pid == selected.pid }
+                self.mruTracker.dropAllRanks(
+                    forAppIdentity: selected.bundleIdentifier ?? selected.appName,
+                    bundleIdentifier: selected.bundleIdentifier
+                )
+                self.items.isEmpty ? self.cancel() : self.hide()
+            }
         )
-        if items.isEmpty {
-            cancel()
-        } else {
-            hide()
-        }
     }
 
     /// Hides all windows of the selected app, keeping the app running. The
     /// switcher closes; the items list is intact for the next cold open.
     private func hideSelectedApp() {
         guard let selected = selectedItem else { return }
-        activator.hide(selected)
-        hide()
+        let activator = self.activator
+        let target = selected.actionTarget
+        _ = startWindowAction(
+            operation: { activator.hide(target) },
+            completion: { [weak self] succeeded in
+                guard let self else { return }
+                guard succeeded else {
+                    Logger.switcher.notice(
+                        "Hide action failed id=\(selected.id, privacy: .public) pid=\(selected.pid, privacy: .public); keeping panel visible"
+                    )
+                    return
+                }
+                self.hide()
+            }
+        )
     }
 
     func commitSelection() {
@@ -554,6 +809,13 @@ final class SwitcherStore: ObservableObject {
         onOpenSettings?()
     }
 
+    func openPrimaryPermissionSettings() {
+        refreshPermissionState()
+        guard let permission = primaryMissingPermission else { return }
+        hide()
+        onOpenPermissionSettings?(permission)
+    }
+
     func handleModifierMouseSwitch() {
         guard SwitchBladeSettings.shared.doubleModifierSwitchEnabled else {
             Logger.switcher.info("Modifier mouse switch ignored: setting disabled")
@@ -590,7 +852,15 @@ final class SwitcherStore: ObservableObject {
         }
 
         if let targetPID = fastPreviousApplicationPIDFromCache() {
-            performFastPreviousApplicationSwitch(targetPID: targetPID, switchStart: switchStart)
+            isResolvingPreviousSwitch = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.isResolvingPreviousSwitch = false }
+                await self.performFastPreviousApplicationSwitch(
+                    targetPID: targetPID,
+                    switchStart: switchStart
+                )
+            }
             return
         }
 
@@ -608,22 +878,30 @@ final class SwitcherStore: ObservableObject {
                 Logger.switcher.info("Double modifier switch aborted: switcher opened during snapshot")
                 return
             }
-            self.performPreviousApplicationSwitch(orderedItems: orderedItems, switchStart: switchStart)
+            await self.performPreviousApplicationSwitch(orderedItems: orderedItems, switchStart: switchStart)
         }
     }
 
-    private func performPreviousApplicationSwitch(orderedItems: [WindowItem], switchStart: Date) {
+    private func performPreviousApplicationSwitch(orderedItems: [WindowItem], switchStart: Date) async {
         let effectiveCurrentPID = orderedItems.first?.pid ?? currentAppPID
         if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
+            Logger.switcher.info(
+                "Double modifier switching window current=\(effectiveCurrentPID ?? -1, privacy: .public) targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public)"
+            )
+            let activator = self.activator
+            let target = targetItem.actionTarget
+            guard await runActivatorOperation({ activator.activate(target) }) else {
+                Logger.switcher.notice(
+                    "Double modifier window activation failed targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public); preserving app history"
+                )
+                return
+            }
             lastSwitcherUse = Date()
             mruTracker.rememberSelection(targetItem.id, in: orderedItems, context: "double-modifier-window")
             if let effectiveCurrentPID, effectiveCurrentPID != switchBladePID, effectiveCurrentPID != targetItem.pid {
                 previousAppPID = effectiveCurrentPID
             }
             currentAppPID = targetItem.pid
-            Logger.switcher.info(
-                "Double modifier switching window current=\(effectiveCurrentPID ?? -1, privacy: .public) targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public)"
-            )
             recordPreviousSwitchDispatch(
                 context: "modifier-window",
                 switchStart: switchStart,
@@ -636,7 +914,6 @@ final class SwitcherStore: ObservableObject {
                 source: "previous-switch",
                 windowID: targetItem.id
             )
-            activator.activate(targetItem)
             return
         }
 
@@ -647,14 +924,21 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
+        Logger.switcher.info(
+            "Double modifier switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
+        )
+        let activator = self.activator
+        guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }) else {
+            Logger.switcher.notice(
+                "Double modifier app activation failed target=\(targetPID, privacy: .public); preserving app history"
+            )
+            return
+        }
         lastSwitcherUse = Date()
         if let effectiveCurrentPID, effectiveCurrentPID != switchBladePID {
             previousAppPID = effectiveCurrentPID
         }
         currentAppPID = targetPID
-        Logger.switcher.info(
-            "Double modifier switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
-        )
         recordPreviousSwitchDispatch(
             context: "modifier-app",
             switchStart: switchStart,
@@ -667,17 +951,23 @@ final class SwitcherStore: ObservableObject {
             source: "previous-switch",
             windowID: nil
         )
-        activator.activateApplication(pid: targetPID)
     }
 
-    private func performFastPreviousApplicationSwitch(targetPID: pid_t, switchStart: Date) {
+    private func performFastPreviousApplicationSwitch(targetPID: pid_t, switchStart: Date) async {
         guard let effectiveCurrentPID = currentAppPID else { return }
-        lastSwitcherUse = Date()
-        previousAppPID = effectiveCurrentPID
-        currentAppPID = targetPID
         Logger.switcher.info(
             "Fast previous-app switch current=\(effectiveCurrentPID, privacy: .public) target=\(targetPID, privacy: .public)"
         )
+        let activator = self.activator
+        guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }) else {
+            Logger.switcher.notice(
+                "Fast previous-app activation failed target=\(targetPID, privacy: .public); preserving app history"
+            )
+            return
+        }
+        lastSwitcherUse = Date()
+        previousAppPID = effectiveCurrentPID
+        currentAppPID = targetPID
         recordPreviousSwitchDispatch(
             context: "modifier-fast-app",
             switchStart: switchStart,
@@ -690,7 +980,16 @@ final class SwitcherStore: ObservableObject {
             source: "previous-switch",
             windowID: nil
         )
-        activator.activateApplication(pid: targetPID)
+    }
+
+    private func runActivatorOperation(
+        _ operation: @escaping @Sendable () -> Bool
+    ) async -> Bool {
+        guard let result = await windowActionCoordinator.run(operation: operation) else {
+            Logger.switcher.notice("Window action ignored while another detached action is still running")
+            return false
+        }
+        return result
     }
 
     private func previousSwitchTarget(from orderedItems: [WindowItem], currentPID: pid_t?) -> WindowItem? {
@@ -749,20 +1048,100 @@ final class SwitcherStore: ObservableObject {
         items.first(where: { $0.id == selectedID })
     }
 
+    @discardableResult
     private func performSelectionAction(
         for item: WindowItem,
         liveItems: [WindowItem]? = nil,
         actionName: String,
         source: String? = nil,
         updateCachedSelectionState: Bool = false,
-        action: @escaping (WindowActivating, WindowItem) -> Void
-    ) {
+        action: @escaping @Sendable (WindowActivating, WindowActionTarget) -> Bool
+    ) -> Bool {
         let actionStart = Date()
         let liveItems = liveItems ?? items
         let actionSource = source ?? currentOpenSource ?? "unknown"
+        let activator = self.activator
+        let target = item.actionTarget
         Logger.switcher.info(
-            "Schedule selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+            "Begin selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
+        return startWindowAction(
+            operation: { action(activator, target) },
+            completion: { [weak self] didPerformAction in
+                self?.completeSelectionAction(
+                    didPerformAction: didPerformAction,
+                    item: item,
+                    liveItems: liveItems,
+                    actionName: actionName,
+                    actionSource: actionSource,
+                    updateCachedSelectionState: updateCachedSelectionState,
+                    actionStart: actionStart
+                )
+            }
+        )
+    }
+
+    @discardableResult
+    private func startWindowAction(
+        operation: @escaping @Sendable () -> Bool,
+        completion: @escaping @MainActor (Bool) -> Void
+    ) -> Bool {
+        guard windowActionTask == nil else {
+            Logger.switcher.notice("Window action ignored while another action is in flight")
+            return false
+        }
+        let generation = windowActionGeneration
+        let actionID = UUID()
+        windowActionID = actionID
+        windowActionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await self.windowActionCoordinator.run(operation: operation)
+            if self.windowActionID == actionID {
+                self.windowActionTask = nil
+                self.windowActionID = nil
+            }
+            guard let result,
+                  !Task.isCancelled,
+                  self.windowActionGeneration == generation else { return }
+            completion(result)
+        }
+        return true
+    }
+
+    private func completeSelectionAction(
+        didPerformAction: Bool,
+        item: WindowItem,
+        liveItems: [WindowItem],
+        actionName: String,
+        actionSource: String,
+        updateCachedSelectionState: Bool,
+        actionStart: Date
+    ) {
+        let actionMs = Date().timeIntervalSince(actionStart) * 1000
+        guard didPerformAction else {
+            Logger.switcher.notice(
+                "Selection action failed action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); preserving state"
+            )
+            PerformanceDiagnostics.record(
+                "selection_action_failed",
+                fields: [
+                    "action": .string(actionName),
+                    "action_ms": .double(actionMs),
+                    "pid": .int(Int(item.pid)),
+                    "source": .string(actionSource),
+                    "window_id": .int(Int(item.id))
+                ]
+            )
+            if !isVisible {
+                if case .resolving = phase {
+                    applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
+                    enterPreviewHidden(stale: false)
+                }
+                showPreparedPanelIfNeeded()
+            }
+            return
+        }
+
         let rememberStart = Date()
         mruTracker.rememberSelection(
             item.id,
@@ -784,6 +1163,7 @@ final class SwitcherStore: ObservableObject {
             "selection_action_dispatch",
             fields: [
                 "action": .string(actionName),
+                "action_ms": .double(actionMs),
                 "cache_sync_ms": .double(cacheSyncMs),
                 "dispatch_delay_ms": .double(dispatchDelayMs),
                 "hide_ms": .double(dispatchDelayMs),
@@ -804,7 +1184,6 @@ final class SwitcherStore: ObservableObject {
             source: actionSource,
             windowID: item.id
         )
-        action(activator, item)
     }
 
     private func syncCachedOpenStateAfterSelection(_ item: WindowItem, liveItems: [WindowItem]) {
@@ -819,13 +1198,60 @@ final class SwitcherStore: ObservableObject {
 
     private func hydratedForDisplay(_ sourceItems: [WindowItem]) -> [WindowItem] {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else {
-            return sourceItems
+            return sourceItems.map { $0.withPreview(nil) }
         }
         return sourceItems.map { previewCache.hydrated($0, liveItems: sourceItems) }
     }
 
+    private func invalidateDisplayCachesForSettingsChange() {
+        settingsGeneration &+= 1
+        previewGeneration += 1
+        previewLoadTask?.cancel()
+        previewLoadTask = nil
+        minimizedMergeTask?.cancel()
+        minimizedMergeTask = nil
+        staleCacheHealTask?.cancel()
+        staleCacheHealTask = nil
+        openRefreshTask?.cancel()
+        openRefreshTask = nil
+        openItemsWarmupTask?.cancel()
+        openItemsWarmupTask = nil
+        previewWarmupTask?.cancel()
+        previewWarmupTask = nil
+        // A detached snapshot already executing cannot be interrupted, but its
+        // old filter/scope result must never be reused after this invalidation.
+        inFlightVisibleSnapshot = nil
+        cachedOpenItems = []
+        cachedOpenItemsUpdatedAt = nil
+        cachedMinimizedItems = []
+        cachedMinimizedItemsUpdatedAt = nil
+        cachedOpenItemsNeedResnapshot = false
+        previewCache.removeAll()
+
+        if SwitchBladeSettings.shared.previewMode == .iconsOnly {
+            items = items.map { $0.withPreview(nil) }
+        } else if !isVisible, !isSwitching {
+            items = []
+            selectedID = nil
+        }
+    }
+
     private func defaultSelectedID(in orderedItems: [WindowItem]) -> WindowItem.ID? {
         orderedItems.indices.contains(1) ? orderedItems[1].id : orderedItems.first?.id
+    }
+
+    private func pendingOpenSelectedID(in orderedItems: [WindowItem]) -> WindowItem.ID? {
+        guard !orderedItems.isEmpty else { return nil }
+        guard let pendingOpenCycleDelta else {
+            if let selectedID, orderedItems.contains(where: { $0.id == selectedID }) {
+                return selectedID
+            }
+            return defaultSelectedID(in: orderedItems)
+        }
+
+        let count = orderedItems.count
+        let index = ((pendingOpenCycleDelta % count) + count) % count
+        return orderedItems[index].id
     }
 
     private func orderItems(_ sourceItems: [WindowItem]) -> [WindowItem] {
@@ -899,9 +1325,15 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func hide() {
+        windowActionGeneration &+= 1
+        windowActionTask?.cancel()
+        windowActionTask = nil
+        windowActionID = nil
         previewGeneration += 1
         previewLoadTask?.cancel()
         previewLoadTask = nil
+        minimizedMergeTask?.cancel()
+        minimizedMergeTask = nil
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
         cancelPanelShow()
@@ -909,6 +1341,7 @@ final class SwitcherStore: ObservableObject {
         enterIdle()
         hoverEnabled = false
         pendingOpenRequestedAt = nil
+        pendingOpenCycleDelta = nil
         activeOpenRequestedAt = nil
         currentOpenSource = nil
         onHide?()
@@ -928,6 +1361,7 @@ final class SwitcherStore: ObservableObject {
         showingStaleCachedItems: Bool = false
     ) {
         guard !orderedItems.isEmpty else {
+            pendingOpenCycleDelta = nil
             enterIdle()
             Logger.switcher.notice("Cycle aborted: snapshot is empty")
             return
@@ -942,7 +1376,8 @@ final class SwitcherStore: ObservableObject {
             )
         // Display staleness is carried into the visible/previewHidden phase by the
         // mutators at the end of this method (enterPreviewHidden / enterVisible).
-        let preselectedID = defaultSelectedID(in: displayOrderedItems)
+        let preselectedID = pendingOpenSelectedID(in: displayOrderedItems)
+        pendingOpenCycleDelta = nil
 
         // Quick Cmd+Tab release should not pay the panel show or preview path
         // once the target window has already been resolved off-main.
@@ -961,8 +1396,8 @@ final class SwitcherStore: ObservableObject {
                 }
             }
 
-            // commitWhenReady is cleared by the hide() → enterIdle() that follows
-            // this activation (or the guard-fail hide() below).
+            // Success clears commitWhenReady through hide() → enterIdle(). A
+            // failed activation is converted into a visible prepared panel.
             guard let preselectedID,
                   let item = displayOrderedItems.first(where: { $0.id == preselectedID }) else {
                 Logger.switcher.notice("Quick release aborted: no selected item after snapshot")
@@ -1247,15 +1682,23 @@ final class SwitcherStore: ObservableObject {
 
     private func scheduleOpenItemsCacheWarmup(context: String, delayNanoseconds: UInt64) {
         openItemsWarmupTask?.cancel()
+        let generation = settingsGeneration
         openItemsWarmupTask = Task { @MainActor [weak self] in
             if delayNanoseconds > 0 {
                 try? await Task.sleep(nanoseconds: delayNanoseconds)
             }
-            guard let self, !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
+            guard let self,
+                  !Task.isCancelled,
+                  self.settingsGeneration == generation,
+                  !self.isVisible,
+                  !self.isSwitching else { return }
 
             let start = Date()
             let visibleSnapshot = await self.snapshotVisibleOnlyOffMain()
-            guard !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
+            guard !Task.isCancelled,
+                  self.settingsGeneration == generation,
+                  !self.isVisible,
+                  !self.isSwitching else { return }
             let orderedItems = self.orderItems(
                 self.mruTracker.orderedForDisplay(
                     from: visibleSnapshot,
@@ -1365,7 +1808,7 @@ final class SwitcherStore: ObservableObject {
             .filter { !existingIDs.contains($0.id) }
             .map { item in
                 SwitchBladeSettings.shared.previewMode == .iconsOnly
-                    ? item
+                    ? item.withPreview(nil)
                     : previewCache.hydrated(item, liveItems: orderedItems + rememberedMinimizedItems)
             }
         guard !additions.isEmpty else { return orderedItems }
@@ -1423,8 +1866,7 @@ final class SwitcherStore: ObservableObject {
             .map { index, item in
                 let selected = item.id == selectedID ? "S" : "-"
                 let frontmost = item.isFrontmostApp ? "F" : "-"
-                let appIdentity = item.bundleIdentifier ?? item.appName
-                return "\(index):id=\(item.id),pid=\(item.pid),app=\(appIdentity),front=\(frontmost),selected=\(selected)"
+                return "\(index):id=\(item.id),pid=\(item.pid),front=\(frontmost),selected=\(selected)"
             }
             .joined(separator: ";")
         Logger.switcher.debug(
@@ -1767,9 +2209,16 @@ final class SwitcherStore: ObservableObject {
     private func scheduleMinimizedMerge() {
         let mergeGeneration = previewGeneration
         let catalog = self.catalog
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let minimized = await catalog.snapshotMinimized()
-            await self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+        let cancellation = CooperativeCancellationToken()
+        minimizedMergeTask?.cancel()
+        minimizedMergeTask = Task(priority: .userInitiated) { [weak self] in
+            await withTaskCancellationHandler {
+                let minimized = await catalog.snapshotMinimized(cancellation: cancellation)
+                guard !Task.isCancelled, !cancellation.isCancelled else { return }
+                self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+            } onCancel: {
+                cancellation.cancel()
+            }
         }
     }
 

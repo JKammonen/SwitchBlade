@@ -21,6 +21,9 @@ final class HotkeyMonitor {
     var onModifierMouseSwitch: (() -> Void)?
     var shouldTrackModifierRelease: (() -> Bool)?
     var onLocalKeyDown: ((NSEvent) -> Bool)?
+    /// The event-tap watchdog is also the reliable signal for a live
+    /// Accessibility revocation while this accessory app remains inactive.
+    var onPermissionStateMayHaveChanged: (() -> Void)?
 
     private var eventTap: CFMachPort?
     private var eventTapSource: CFRunLoopSource?
@@ -119,6 +122,7 @@ final class HotkeyMonitor {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled, let self else { return }
                 self.ensureEventTapReady(reason: "watchdog")
+                self.onPermissionStateMayHaveChanged?()
             }
         }
     }

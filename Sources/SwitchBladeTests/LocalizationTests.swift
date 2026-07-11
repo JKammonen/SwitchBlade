@@ -8,7 +8,9 @@ enum LocalizationTests {
         ("Localization/setLanguage_switchesTr", setLanguageSwitches),
         ("Localization/systemFallsBackToEnglish_orMatchesLocale", systemFallback),
         ("Localization/appLanguage_displayName_isStable", displayNameStable),
-        ("Localization/tr_withArg_substitutes", trWithArg)
+        ("Localization/tr_withArg_substitutes", trWithArg),
+        ("Localization/finnishPermissionNames_areNative", finnishPermissionNamesAreNative),
+        ("Localization/hiddenAppSummary_supportsTwoCounts", hiddenAppSummarySupportsTwoCounts)
     ]
 
     @MainActor static func everyKeyHasEnglish() throws {
@@ -57,5 +59,21 @@ enum LocalizationTests {
         LocalizationState.selection = .english
         let result = L10n.tr(.alertPermissionTitle, "Accessibility")
         try expectEqual(result, "SwitchBlade needs permission: Accessibility")
+    }
+
+    @MainActor static func finnishPermissionNamesAreNative() throws {
+        try expectEqual(L10n.tr(.permissionNameAccessibility, language: .finnish), "Käyttöapu")
+        try expectEqual(L10n.tr(.permissionNameScreenRecording, language: .finnish), "Näytön tallennus")
+        try expectEqual(L10n.tr(.permissionActionOpenSettings, language: .finnish), "Avaa Järjestelmäasetukset")
+        try expectEqual(L10n.tr(.permissionActionOpenSettingsShort, language: .finnish), "Avaa asetukset")
+        try expectEqual(L10n.tr(.fieldColorStrength, language: .finnish), "Värin voimakkuus")
+        try expectEqual(L10n.tr(.fieldOpacity, language: .finnish), "Peittävyys")
+        try expect(!L10n.tr(.permissionMessageBoth, language: .finnish).contains("Accessibility"))
+        try expect(!L10n.tr(.permissionMessageBoth, language: .finnish).contains("Screen Recording"))
+    }
+
+    @MainActor static func hiddenAppSummarySupportsTwoCounts() throws {
+        let format = L10n.tr(.hiddenAppsParsedSummary, language: .english)
+        try expectEqual(String(format: format, 2, 3), "Parsed rules: 2 substring, 3 exact")
     }
 }

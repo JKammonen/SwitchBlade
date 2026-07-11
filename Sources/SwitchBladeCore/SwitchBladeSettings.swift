@@ -98,6 +98,37 @@ enum SBTriggerKey: String, CaseIterable, Identifiable {
     }
 }
 
+enum ReservedShortcutConflict: Equatable, Sendable {
+    case spotlight
+    case inputSource
+
+    var message: String {
+        switch self {
+        case .spotlight:
+            return L10n.tr(.shortcutConflictSpotlight)
+        case .inputSource:
+            return L10n.tr(.shortcutConflictInputSource)
+        }
+    }
+}
+
+enum ShortcutConflictPolicy {
+    /// SwitchBlade must not silently steal system-wide shortcuts that macOS
+    /// reserves by default. Command-Tab is intentionally supported because
+    /// replacing that switcher is the app's purpose; Space combinations are not.
+    static func conflict(modifier: SBModifier, triggerKey: SBTriggerKey) -> ReservedShortcutConflict? {
+        guard triggerKey == .space else { return nil }
+        switch modifier {
+        case .command:
+            return .spotlight
+        case .control:
+            return .inputSource
+        case .option:
+            return nil
+        }
+    }
+}
+
 // MARK: - Settings model
 
 @MainActor
@@ -109,58 +140,131 @@ final class SwitchBladeSettings: ObservableObject {
     private var isSyncingLaunchAtLogin = false
 
     // Switcher panel background color RGB
-    @Published var bgRed: Double   { didSet { ud.set(bgRed,   forKey: "sb_bgR") } }
-    @Published var bgGreen: Double { didSet { ud.set(bgGreen, forKey: "sb_bgG") } }
-    @Published var bgBlue: Double  { didSet { ud.set(bgBlue,  forKey: "sb_bgB") } }
+    private var bgRedValue: Double
+    private var bgGreenValue: Double
+    private var bgBlueValue: Double
+    var bgRed: Double {
+        get { bgRedValue }
+        set { bgRedValue = updateNumeric(newValue, current: bgRedValue, in: 0...1, fallback: 0, key: "sb_bgR") }
+    }
+    var bgGreen: Double {
+        get { bgGreenValue }
+        set { bgGreenValue = updateNumeric(newValue, current: bgGreenValue, in: 0...1, fallback: 0, key: "sb_bgG") }
+    }
+    var bgBlue: Double {
+        get { bgBlueValue }
+        set { bgBlueValue = updateNumeric(newValue, current: bgBlueValue, in: 0...1, fallback: 0, key: "sb_bgB") }
+    }
 
     // Switcher panel background opacity (0 – 1.0)
-    @Published var backgroundOpacity: Double {
-        didSet { ud.set(backgroundOpacity, forKey: "sb_bgOpacity") }
+    private var backgroundOpacityValue: Double
+    var backgroundOpacity: Double {
+        get { backgroundOpacityValue }
+        set { backgroundOpacityValue = updateNumeric(newValue, current: backgroundOpacityValue, in: 0...1, fallback: 0.65, key: "sb_bgOpacity") }
     }
 
     // Badge bar color RGB components (sRGB 0–1, pure black by default)
-    @Published var badgeRed: Double   { didSet { ud.set(badgeRed,   forKey: "sb_badgeR") } }
-    @Published var badgeGreen: Double { didSet { ud.set(badgeGreen, forKey: "sb_badgeG") } }
-    @Published var badgeBlue: Double  { didSet { ud.set(badgeBlue,  forKey: "sb_badgeB") } }
+    private var badgeRedValue: Double
+    private var badgeGreenValue: Double
+    private var badgeBlueValue: Double
+    var badgeRed: Double {
+        get { badgeRedValue }
+        set { badgeRedValue = updateNumeric(newValue, current: badgeRedValue, in: 0...1, fallback: 0, key: "sb_badgeR") }
+    }
+    var badgeGreen: Double {
+        get { badgeGreenValue }
+        set { badgeGreenValue = updateNumeric(newValue, current: badgeGreenValue, in: 0...1, fallback: 0, key: "sb_badgeG") }
+    }
+    var badgeBlue: Double {
+        get { badgeBlueValue }
+        set { badgeBlueValue = updateNumeric(newValue, current: badgeBlueValue, in: 0...1, fallback: 0, key: "sb_badgeB") }
+    }
 
     // Badge bar opacity (0 – 1)
-    @Published var badgeOpacity: Double {
-        didSet { ud.set(badgeOpacity, forKey: "sb_badgeOpacity") }
+    private var badgeOpacityValue: Double
+    var badgeOpacity: Double {
+        get { badgeOpacityValue }
+        set { badgeOpacityValue = updateNumeric(newValue, current: badgeOpacityValue, in: 0...1, fallback: 0.72, key: "sb_badgeOpacity") }
     }
 
     // Selection highlight color RGB components
-    @Published var highlightRed: Double   { didSet { ud.set(highlightRed,   forKey: "sb_highlightR") } }
-    @Published var highlightGreen: Double { didSet { ud.set(highlightGreen, forKey: "sb_highlightG") } }
-    @Published var highlightBlue: Double  { didSet { ud.set(highlightBlue,  forKey: "sb_highlightB") } }
-    @Published var highlightStrength: Double { didSet { ud.set(highlightStrength, forKey: "sb_highlightStrength") } }
-    @Published var highlightOpacity: Double { didSet { ud.set(highlightOpacity, forKey: "sb_highlightOpacity") } }
+    private var highlightRedValue: Double
+    private var highlightGreenValue: Double
+    private var highlightBlueValue: Double
+    private var highlightStrengthValue: Double
+    private var highlightOpacityValue: Double
+    var highlightRed: Double {
+        get { highlightRedValue }
+        set { highlightRedValue = updateNumeric(newValue, current: highlightRedValue, in: 0...1, fallback: 0.30, key: "sb_highlightR") }
+    }
+    var highlightGreen: Double {
+        get { highlightGreenValue }
+        set { highlightGreenValue = updateNumeric(newValue, current: highlightGreenValue, in: 0...1, fallback: 0.70, key: "sb_highlightG") }
+    }
+    var highlightBlue: Double {
+        get { highlightBlueValue }
+        set { highlightBlueValue = updateNumeric(newValue, current: highlightBlueValue, in: 0...1, fallback: 1, key: "sb_highlightB") }
+    }
+    var highlightStrength: Double {
+        get { highlightStrengthValue }
+        set { highlightStrengthValue = updateNumeric(newValue, current: highlightStrengthValue, in: 0.2...1, fallback: 0.70, key: "sb_highlightStrength") }
+    }
+    var highlightOpacity: Double {
+        get { highlightOpacityValue }
+        set { highlightOpacityValue = updateNumeric(newValue, current: highlightOpacityValue, in: 0.15...1, fallback: 0.85, key: "sb_highlightOpacity") }
+    }
     @Published var selectionEffect: SBSelectionEffect {
         didSet { ud.set(selectionEffect.rawValue, forKey: "sb_selectionEffect") }
     }
 
     // Preview tile minimum width in pts
-    @Published var tileMinWidth: Double {
-        didSet { ud.set(tileMinWidth, forKey: "sb_tileMinWidth") }
+    private var tileMinWidthValue: Double
+    var tileMinWidth: Double {
+        get { tileMinWidthValue }
+        set { tileMinWidthValue = updateNumeric(newValue, current: tileMinWidthValue, in: 140...380, fallback: 220, key: "sb_tileMinWidth") }
     }
 
     // Badge bar appearance
-    @Published var badgeIconSize: Double {
-        didSet { ud.set(badgeIconSize, forKey: "sb_badgeIconSize") }
+    private var badgeIconSizeValue: Double
+    private var badgeFontSizeValue: Double
+    private var badgeVerticalPaddingValue: Double
+    var badgeIconSize: Double {
+        get { badgeIconSizeValue }
+        set { badgeIconSizeValue = updateNumeric(newValue, current: badgeIconSizeValue, in: 12...32, fallback: 22, key: "sb_badgeIconSize") }
     }
-    @Published var badgeFontSize: Double {
-        didSet { ud.set(badgeFontSize, forKey: "sb_badgeFontSize") }
+    var badgeFontSize: Double {
+        get { badgeFontSizeValue }
+        set { badgeFontSizeValue = updateNumeric(newValue, current: badgeFontSizeValue, in: 9...16, fallback: 11, key: "sb_badgeFontSize") }
     }
-    @Published var badgeVerticalPadding: Double {
-        didSet { ud.set(badgeVerticalPadding, forKey: "sb_badgeVPad") }
+    var badgeVerticalPadding: Double {
+        get { badgeVerticalPaddingValue }
+        set { badgeVerticalPaddingValue = updateNumeric(newValue, current: badgeVerticalPaddingValue, in: 2...14, fallback: 6, key: "sb_badgeVPad") }
     }
 
     // Hotkey configuration
     @Published var modifier: SBModifier {
-        didSet { ud.set(modifier.rawValue, forKey: "sb_modifier") }
+        didSet {
+            if let conflict = ShortcutConflictPolicy.conflict(modifier: modifier, triggerKey: triggerKey) {
+                modifier = oldValue
+                shortcutConflict = conflict
+            } else {
+                shortcutConflict = nil
+                ud.set(modifier.rawValue, forKey: "sb_modifier")
+            }
+        }
     }
     @Published var triggerKey: SBTriggerKey {
-        didSet { ud.set(triggerKey.rawValue, forKey: "sb_triggerKey") }
+        didSet {
+            if let conflict = ShortcutConflictPolicy.conflict(modifier: modifier, triggerKey: triggerKey) {
+                triggerKey = oldValue
+                shortcutConflict = conflict
+            } else {
+                shortcutConflict = nil
+                ud.set(triggerKey.rawValue, forKey: "sb_triggerKey")
+            }
+        }
     }
+    @Published private(set) var shortcutConflict: ReservedShortcutConflict? = nil
     @Published var doubleModifierSwitchEnabled: Bool {
         // Keep the legacy key name so existing user preferences survive the rename
         // from "double Option" to "double configured modifier".
@@ -256,22 +360,29 @@ final class SwitchBladeSettings: ObservableObject {
         self.ud = userDefaults
         self.launchAtLoginController = launchAtLoginController
 
-        bgRed   = ud.object(forKey: "sb_bgR") as? Double ?? 0.0
-        bgGreen = ud.object(forKey: "sb_bgG") as? Double ?? 0.0
-        bgBlue  = ud.object(forKey: "sb_bgB") as? Double ?? 0.0
-        backgroundOpacity = ud.object(forKey: "sb_bgOpacity") as? Double ?? 0.65
-        badgeRed          = ud.object(forKey: "sb_badgeR")         as? Double ?? 0.0
-        badgeGreen        = ud.object(forKey: "sb_badgeG")         as? Double ?? 0.0
-        badgeBlue         = ud.object(forKey: "sb_badgeB")         as? Double ?? 0.0
-        badgeOpacity      = ud.object(forKey: "sb_badgeOpacity")   as? Double ?? 0.72
-        highlightRed      = ud.object(forKey: "sb_highlightR")     as? Double ?? 0.30
-        highlightGreen    = ud.object(forKey: "sb_highlightG")     as? Double ?? 0.70
-        highlightBlue     = ud.object(forKey: "sb_highlightB")     as? Double ?? 1.0
-        highlightStrength = ud.object(forKey: "sb_highlightStrength") as? Double ?? 0.70
-        highlightOpacity  = ud.object(forKey: "sb_highlightOpacity")  as? Double ?? 0.85
-        tileMinWidth      = ud.object(forKey: "sb_tileMinWidth")   as? Double ?? 220.0
-        modifier   = SBModifier(rawValue:   ud.string(forKey: "sb_modifier")   ?? "") ?? .command
-        triggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
+        bgRedValue = Self.sanitizedNumeric(ud.object(forKey: "sb_bgR") as? Double, in: 0...1, fallback: 0)
+        bgGreenValue = Self.sanitizedNumeric(ud.object(forKey: "sb_bgG") as? Double, in: 0...1, fallback: 0)
+        bgBlueValue = Self.sanitizedNumeric(ud.object(forKey: "sb_bgB") as? Double, in: 0...1, fallback: 0)
+        backgroundOpacityValue = Self.sanitizedNumeric(ud.object(forKey: "sb_bgOpacity") as? Double, in: 0...1, fallback: 0.65)
+        badgeRedValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeR") as? Double, in: 0...1, fallback: 0)
+        badgeGreenValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeG") as? Double, in: 0...1, fallback: 0)
+        badgeBlueValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeB") as? Double, in: 0...1, fallback: 0)
+        badgeOpacityValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeOpacity") as? Double, in: 0...1, fallback: 0.72)
+        highlightRedValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightR") as? Double, in: 0...1, fallback: 0.30)
+        highlightGreenValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightG") as? Double, in: 0...1, fallback: 0.70)
+        highlightBlueValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightB") as? Double, in: 0...1, fallback: 1)
+        highlightStrengthValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightStrength") as? Double, in: 0.2...1, fallback: 0.70)
+        highlightOpacityValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightOpacity") as? Double, in: 0.15...1, fallback: 0.85)
+        tileMinWidthValue = Self.sanitizedNumeric(ud.object(forKey: "sb_tileMinWidth") as? Double, in: 140...380, fallback: 220)
+        let storedModifier = SBModifier(rawValue: ud.string(forKey: "sb_modifier") ?? "") ?? .command
+        let storedTriggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
+        if ShortcutConflictPolicy.conflict(modifier: storedModifier, triggerKey: storedTriggerKey) == nil {
+            modifier = storedModifier
+            triggerKey = storedTriggerKey
+        } else {
+            modifier = .command
+            triggerKey = .tab
+        }
         doubleModifierSwitchEnabled = ud.object(forKey: "sb_doubleOptionSwitchEnabled") as? Bool ?? false
         doubleModifier = SBModifier(rawValue: ud.string(forKey: "sb_doubleModifier") ?? "") ?? .command
         let currentLaunchStatus = launchAtLoginController.currentStatus()
@@ -293,9 +404,9 @@ final class SwitchBladeSettings: ObservableObject {
         performanceLogging = SBPerformanceLogging(rawValue: ud.string(forKey: "sb_performanceLogging") ?? "") ?? .basic
         badgePosition = SBBadgePosition(rawValue: ud.string(forKey: "sb_badgePosition") ?? "") ?? .bottom
         selectionEffect = SBSelectionEffect(rawValue: ud.string(forKey: "sb_selectionEffect") ?? "") ?? .pump
-        badgeIconSize       = ud.object(forKey: "sb_badgeIconSize") as? Double ?? 22.0
-        badgeFontSize       = ud.object(forKey: "sb_badgeFontSize") as? Double ?? 11.0
-        badgeVerticalPadding = ud.object(forKey: "sb_badgeVPad")   as? Double ?? 6.0
+        badgeIconSizeValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeIconSize") as? Double, in: 12...32, fallback: 22)
+        badgeFontSizeValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeFontSize") as? Double, in: 9...16, fallback: 11)
+        badgeVerticalPaddingValue = Self.sanitizedNumeric(ud.object(forKey: "sb_badgeVPad") as? Double, in: 2...14, fallback: 6)
         badgeUseAppColor    = ud.object(forKey: "sb_badgeUseAppColor") as? Bool ?? false
         language = AppLanguage(rawValue: ud.string(forKey: "sb_language") ?? "") ?? .system
         // Mirror to the global LocalizationState immediately so first read on
@@ -304,6 +415,9 @@ final class SwitchBladeSettings: ObservableObject {
         WindowFilterState.scope = windowScope
         HiddenAppFilterState.normalizedTokens = Self.normalizedHiddenAppTokens(from: hiddenAppsText)
         PerformanceLoggingState.mode = performanceLogging
+        persistCurrentNumericValues()
+        ud.set(modifier.rawValue, forKey: "sb_modifier")
+        ud.set(triggerKey.rawValue, forKey: "sb_triggerKey")
     }
 
     /// Convenience SwiftUI Color for the badge bar background.
@@ -346,6 +460,23 @@ final class SwitchBladeSettings: ObservableObject {
         reducedMotion = false
     }
 
+    func refreshLaunchAtLoginStatus() {
+        let current = launchAtLoginController.currentStatus()
+        launchAtLoginStatus = current
+        syncLaunchAtLoginValue(current.isEnabled)
+    }
+
+    var hiddenAppRuleCounts: (substring: Int, exact: Int) {
+        Self.normalizedHiddenAppTokens(from: hiddenAppsText).reduce(into: (substring: 0, exact: 0)) { counts, token in
+            switch token {
+            case .contains:
+                counts.substring += 1
+            case .exact:
+                counts.exact += 1
+            }
+        }
+    }
+
     private func applyLaunchAtLoginChange(requestedEnabled: Bool) {
         switch launchAtLoginController.setEnabled(requestedEnabled) {
         case .success(let status):
@@ -367,6 +498,50 @@ final class SwitchBladeSettings: ObservableObject {
         isSyncingLaunchAtLogin = true
         launchAtLogin = enabled
         isSyncingLaunchAtLogin = false
+    }
+
+    private static func sanitizedNumeric(
+        _ value: Double?,
+        in range: ClosedRange<Double>,
+        fallback: Double
+    ) -> Double {
+        guard let value, value.isFinite else { return fallback }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    private func updateNumeric(
+        _ proposedValue: Double,
+        current currentValue: Double,
+        in range: ClosedRange<Double>,
+        fallback: Double,
+        key: String
+    ) -> Double {
+        let sanitized = Self.sanitizedNumeric(proposedValue, in: range, fallback: fallback)
+        if sanitized != currentValue {
+            objectWillChange.send()
+        }
+        ud.set(sanitized, forKey: key)
+        return sanitized
+    }
+
+    private func persistCurrentNumericValues() {
+        ud.set(bgRed, forKey: "sb_bgR")
+        ud.set(bgGreen, forKey: "sb_bgG")
+        ud.set(bgBlue, forKey: "sb_bgB")
+        ud.set(backgroundOpacity, forKey: "sb_bgOpacity")
+        ud.set(badgeRed, forKey: "sb_badgeR")
+        ud.set(badgeGreen, forKey: "sb_badgeG")
+        ud.set(badgeBlue, forKey: "sb_badgeB")
+        ud.set(badgeOpacity, forKey: "sb_badgeOpacity")
+        ud.set(highlightRed, forKey: "sb_highlightR")
+        ud.set(highlightGreen, forKey: "sb_highlightG")
+        ud.set(highlightBlue, forKey: "sb_highlightB")
+        ud.set(highlightStrength, forKey: "sb_highlightStrength")
+        ud.set(highlightOpacity, forKey: "sb_highlightOpacity")
+        ud.set(tileMinWidth, forKey: "sb_tileMinWidth")
+        ud.set(badgeIconSize, forKey: "sb_badgeIconSize")
+        ud.set(badgeFontSize, forKey: "sb_badgeFontSize")
+        ud.set(badgeVerticalPadding, forKey: "sb_badgeVPad")
     }
 
     /// Parses the comma/semicolon/newline-separated hidden-apps field.
@@ -438,6 +613,10 @@ struct LaunchAtLoginUpdateFailure: Error, Equatable {
 struct LaunchAtLoginController: @unchecked Sendable {
     let currentStatus: () -> LaunchAtLoginStatus
     let setEnabled: (Bool) -> Result<LaunchAtLoginStatus, LaunchAtLoginUpdateFailure>
+
+    static func openSystemSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
 
     static let system = LaunchAtLoginController(
         currentStatus: {

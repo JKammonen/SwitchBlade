@@ -14,6 +14,7 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/minimizedDuplicateExactSignatureDoesNotGuess", minimizedDuplicateExactSignatureDoesNotGuess),
         ("PreviewCache/minimizedRetainedPreviewExpires", minimizedRetainedPreviewExpires),
         ("PreviewCache/hydrated_singleWindowTitleChange_fallsBackToAppIdentity", singleWindowAppIdentityFallback),
+        ("PreviewCache/hydrated_relaunchedProcess_doesNotReuseAppPreview", relaunchedProcessDoesNotReuseAppPreview),
         ("PreviewCache/hydrated_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowNoAppIdentityGuess),
         ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
         ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate),
@@ -23,6 +24,7 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/blankStorm_rejectsMostlyWhiteBatch", blankStormRejectsMostlyWhiteBatch),
         ("PreviewCache/singleWhiteNonSafariCapture_isRejected", singleWhiteNonSafariCaptureIsRejected),
         ("PreviewCache/whiteCapture_acceptedOnSecondConsecutiveSighting", whiteCaptureAcceptedOnSecondSighting),
+        ("PreviewCache/whiteCapture_replacesOldPreviewOnSecondSighting", whiteCaptureReplacesOldPreviewOnSecondSighting),
         ("PreviewCache/whiteCapture_deferralResetsAfterGoodCapture", whiteDeferralResetsAfterGoodCapture),
         ("PreviewCache/invalidate_dropsCachedPreviewAcrossAllKeys", invalidateDropsCachedPreviewAcrossAllKeys)
     ]
@@ -275,6 +277,29 @@ enum PreviewCacheStoreTests {
         try expectNil(store.hydrated(b, liveItems: liveItems).preview)
     }
 
+    @MainActor static func relaunchedProcessDoesNotReuseAppPreview() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 200,
+            appName: "Ghostty",
+            title: "secret shell",
+            bundleIdentifier: "com.mitchellh.ghostty"
+        )
+        let img = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: img], liveItems: [original])
+
+        let relaunched = makeItem(
+            id: 20,
+            pid: 201,
+            appName: "Ghostty",
+            title: "new shell",
+            bundleIdentifier: "com.mitchellh.ghostty"
+        )
+
+        try expectNil(store.hydrated(relaunched, liveItems: [relaunched]).preview)
+    }
+
     /// User resizes a window: same windowID, different bounds. The cache still
     /// hands back the previously-captured image so the tile has *something* to
     /// show while a fresh capture is in flight (replaces it on landing).
@@ -382,6 +407,22 @@ enum PreviewCacheStoreTests {
 
         let second = store.record([1: white], liveItems: [item])
         try expect(second[1] === white)
+        try expect(store.hydrated(item, liveItems: [item]).preview === white)
+    }
+
+    @MainActor static func whiteCaptureReplacesOldPreviewOnSecondSighting() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
+        let oldPreview = solidImage(color: .systemBlue)
+        let white = solidImage(color: .white)
+
+        _ = store.record([1: oldPreview], liveItems: [item])
+        let firstWhite = store.record([1: white], liveItems: [item])
+        try expectNil(firstWhite[1])
+        try expect(store.hydrated(item, liveItems: [item]).preview === oldPreview)
+
+        let secondWhite = store.record([1: white], liveItems: [item])
+        try expect(secondWhite[1] === white)
         try expect(store.hydrated(item, liveItems: [item]).preview === white)
     }
 

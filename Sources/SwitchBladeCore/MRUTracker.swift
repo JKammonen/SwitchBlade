@@ -455,13 +455,13 @@ final class MRUTracker {
 
     private func diagnosticEntry(for item: WindowItem, rank: Int, reason: String) -> String {
         let frontmost = item.isFrontmostApp ? "F" : "-"
-        return "\(rank):id=\(item.id),pid=\(item.pid),app=\(appIdentity(for: item)),front=\(frontmost),reason=\(reason)"
+        return "\(rank):id=\(item.id),pid=\(item.pid),front=\(frontmost),reason=\(reason)"
     }
 
     private func diagnosticSkippedRank(_ rank: RankEntry, rankIndex: Int, remainingCount: Int) -> String {
         let hasID = rank.windowID == nil ? "nil" : "set"
         let hasSignature = rank.signature == nil ? "nil" : "set"
-        return "\(rankIndex):app=\(rank.appIdentity),id=\(hasID),sig=\(hasSignature),remainingCount=\(remainingCount)"
+        return "\(rankIndex):id=\(hasID),sig=\(hasSignature),remainingCount=\(remainingCount)"
     }
 
     private func logOrderingDiagnostics(
@@ -472,7 +472,7 @@ final class MRUTracker {
     ) {
         guard PerformanceLoggingState.mode == .debug else { return }
         let snapshotSummary = snapshot.prefix(16)
-            .map { "id=\($0.id),pid=\($0.pid),app=\(appIdentity(for: $0)),front=\($0.isFrontmostApp ? "F" : "-")" }
+            .map { "id=\($0.id),pid=\($0.pid),front=\($0.isFrontmostApp ? "F" : "-")" }
             .joined(separator: ";")
         let orderSummary = diagnostics.prefix(16).joined(separator: ";")
         let skippedSummary = skippedRanks.prefix(16).joined(separator: ";")

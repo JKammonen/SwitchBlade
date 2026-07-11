@@ -11,7 +11,10 @@ enum SwitcherLayoutCalculatorTests {
         ("Layout/threeItemPanel_narrowerThanMaxPanel", threeNarrower),
         ("Layout/heightCapsAt80PercentOfScreen", heightCap),
         ("Layout/zeroItems_doesNotCrash", zeroItems),
-        ("Layout/tinyScreen_producesUsablePanel", tinyScreen)
+        ("Layout/tinyScreen_staysInsideVisibleFrame", tinyScreen),
+        ("Layout/extremeTileWidths_stayInsideVisibleFrame", extremeTileWidths),
+        ("Layout/malformedNumericInputs_stayFiniteAndContained", malformedNumericInputs),
+        ("Layout/permissionFooter_reservesExactHeightAndStaysContained", permissionFooterReservesHeight)
     ]
 
     private static let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
@@ -82,5 +85,76 @@ enum SwitcherLayoutCalculatorTests {
         try expectGreaterThan(r.panelFrame.width, 0)
         try expectGreaterThan(r.panelFrame.height, 0)
         try expectGreaterThanOrEqual(r.columns, 1)
+        try expectContains(rect: tiny, contains: r.panelFrame)
+    }
+
+    static func extremeTileWidths() throws {
+        let visible = CGRect(x: 320, y: 180, width: 640, height: 480)
+        for tileWidth in [1.0, 140.0, 380.0, 50_000.0] {
+            let result = SwitcherLayoutCalculator.calculate(.init(
+                visibleFrame: visible,
+                tileMinWidth: tileWidth,
+                itemCount: 30,
+                tileAspectRatio: aspect
+            ))
+            try expectContains(rect: visible, contains: result.panelFrame)
+        }
+    }
+
+    static func malformedNumericInputs() throws {
+        for (tileWidth, aspectRatio) in [
+            (Double.nan, Double.nan),
+            (Double.infinity, Double.infinity),
+            (-Double.infinity, -1)
+        ] {
+            let result = SwitcherLayoutCalculator.calculate(.init(
+                visibleFrame: screen,
+                tileMinWidth: tileWidth,
+                itemCount: 5,
+                tileAspectRatio: aspectRatio
+            ))
+            try expect(result.panelFrame.width.isFinite)
+            try expect(result.panelFrame.height.isFinite)
+            try expectContains(rect: screen, contains: result.panelFrame)
+        }
+    }
+
+    static func permissionFooterReservesHeight() throws {
+        let withoutFooter = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen,
+            tileMinWidth: tileW,
+            itemCount: 4,
+            tileAspectRatio: aspect
+        ))
+        let withFooter = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen,
+            tileMinWidth: tileW,
+            itemCount: 4,
+            tileAspectRatio: aspect,
+            showsPermissionFooter: true
+        ))
+        try expect(
+            abs(withFooter.panelFrame.height - withoutFooter.panelFrame.height
+                - SwitcherLayoutCalculator.permissionFooterHeight) < 0.5
+        )
+        try expectContains(rect: screen, contains: withFooter.panelFrame)
+    }
+
+    private static func expectContains(
+        rect outer: CGRect,
+        contains inner: CGRect,
+        file: String = #file,
+        line: Int = #line
+    ) throws {
+        let epsilon: CGFloat = 0.5
+        try expect(
+            inner.minX >= outer.minX - epsilon
+                && inner.maxX <= outer.maxX + epsilon
+                && inner.minY >= outer.minY - epsilon
+                && inner.maxY <= outer.maxY + epsilon,
+            "panel \(inner) is outside visible frame \(outer)",
+            file: file,
+            line: line
+        )
     }
 }

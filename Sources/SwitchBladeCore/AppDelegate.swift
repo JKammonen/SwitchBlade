@@ -20,8 +20,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appTerminationRefreshTask: Task<Void, Never>?
     private var captureLifecycleTask: Task<Void, Never>?
     private var responsivenessActivity: NSObjectProtocol?
-    private var lastPresentedMissingPermissions: [PermissionKind] = []
-    private var isPresentingPermissionAlert = false
     /// Last observed Screen Recording grant. Used to detect the
     /// not-granted → granted transition mid-session so we can warm the SCKit
     /// cache on the same activation instead of waiting for the next Cmd+Tab
@@ -35,7 +33,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // windows are excluded from the switcher (activationPolicy != .regular).
         NSApp.setActivationPolicy(.accessory)
 
-        permissionService.requestIfNeeded()
         let state = permissionService.currentState()
         Logger.permissions.info(
             "Permissions on launch: ax=\(state.hasAccessibility, privacy: .public), sr=\(state.hasScreenRecording, privacy: .public)"
@@ -45,7 +42,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             reason: "Keep SwitchBlade global hotkey responsive while the system is awake"
         )
 
-        if state.hasScreenRecording {
+        if state.hasScreenRecording, SwitchBladeSettings.shared.previewMode != .iconsOnly {
             Logger.capture.info("Starting SCKit cache warmup")
             Task { @MainActor [weak self] in
                 await self?.warmCaptureCaches(context: "launch")
@@ -57,7 +54,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 guard let self else { return }
-                guard self.permissionService.currentState().hasScreenRecording else {
+                guard self.permissionService.currentState().hasScreenRecording,
+                      SwitchBladeSettings.shared.previewMode != .iconsOnly else {
                     Logger.capture.notice("Skipping SCKit warmup — Screen Recording not granted")
                     return
                 }
@@ -73,7 +71,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             store?.cancel()
         }
         store.refreshPermissionState()
-        presentPermissionGuidanceIfNeeded()
         store.onShow = { [weak panelController, weak store] in
             panelController?.show(itemCount: store?.items.count ?? 0)
         }
@@ -82,6 +79,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         store.onPreparePanel = { [weak panelController] itemCount in
             panelController?.prepare(itemCount: itemCount)
+        }
+        store.onOpenPermissionSettings = { [weak self] permission in
+            self?.handlePermissionRecovery(permission)
         }
         self.panelController = panelController
 
@@ -118,11 +118,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.store.handleKeyDown(event) ?? false
             }
         }
+        hotkeyMonitor.onPermissionStateMayHaveChanged = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.refreshPermissionSurfaces()
+            }
+        }
         hotkeyMonitor.start()
         self.hotkeyMonitor = hotkeyMonitor
 
         let menuBar = MenuBarController()
+        menuBar.onOpenPermissionSettings = { [weak self] permission in
+            self?.handlePermissionRecovery(permission)
+        }
         menuBar.setup()
+        menuBar.updatePermissionState(state, previewMode: SwitchBladeSettings.shared.previewMode)
         store.onOpenSettings = { [weak menuBar] in
             menuBar?.openSettings()
         }
@@ -149,7 +158,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // Only refresh state display — do NOT re-request permissions here,
         // that causes repeated OS prompts whenever the app comes to front.
         let state = permissionService.currentState()
-        if state.hasScreenRecording && !lastKnownHadScreenRecording {
+        if state.hasScreenRecording,
+           !lastKnownHadScreenRecording,
+           SwitchBladeSettings.shared.previewMode != .iconsOnly {
             // Screen Recording was just granted mid-session. Warm SCKit now so
             // the next Cmd+Tab is hot. The explicit refresh bypasses the 60 s
             // failure cooldown, so any earlier-failed refresh (e.g. denied at
@@ -160,49 +171,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         lastKnownHadScreenRecording = state.hasScreenRecording
-        store.refreshPermissionState()
+        refreshPermissionSurfaces(using: state)
         hotkeyMonitor?.start()
     }
 
-    private func presentPermissionGuidanceIfNeeded() {
-        let state = permissionService.currentState()
-        let missingPermissions = state.missingPermissions
-
-        guard !missingPermissions.isEmpty else {
-            lastPresentedMissingPermissions = []
-            return
-        }
-
-        guard !isPresentingPermissionAlert,
-              missingPermissions != lastPresentedMissingPermissions,
-              let permission = state.primaryMissingPermission else {
-            return
-        }
-
-        lastPresentedMissingPermissions = missingPermissions
-        isPresentingPermissionAlert = true
-
-        defer {
-            isPresentingPermissionAlert = false
-        }
-
-        NSApp.activate(ignoringOtherApps: true)
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = L10n.tr(.alertPermissionTitle, permission.title)
-        alert.informativeText = guidanceText(for: state, primaryPermission: permission)
-        alert.addButton(withTitle: L10n.tr(.alertOpenSettings))
-        alert.addButton(withTitle: L10n.tr(.alertLater))
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            NSWorkspace.shared.open(permission.settingsURL)
-        }
+    public func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        menuBarController?.openSettings()
+        return true
     }
 
-    private func guidanceText(for state: PermissionState, primaryPermission: PermissionKind) -> String {
-        let missingTitles = state.missingPermissions.map(\.title).joined(separator: ", ")
-        return L10n.tr(.alertPermissionBody, missingTitles)
+    private func handlePermissionRecovery(_ permission: PermissionKind) {
+        permissionService.request(permission)
+        // The OS prompt may be suppressed after an earlier denial. This action
+        // is explicitly labelled as opening System Settings, so always do so for
+        // both permissions instead of relying on a prompt that may not appear.
+        NSWorkspace.shared.open(permission.settingsURL)
+    }
+
+    private func refreshPermissionSurfaces(using state: PermissionState? = nil) {
+        let current = state ?? permissionService.currentState()
+        let storeStateChanged = store.refreshPermissionState(current)
+        menuBarController?.updatePermissionState(
+            current,
+            previewMode: SwitchBladeSettings.shared.previewMode
+        )
+        if storeStateChanged {
+            panelController?.permissionStateDidChange()
+        }
     }
 
     private func installLifecycleObservers() {

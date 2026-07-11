@@ -4,15 +4,25 @@ import SwiftUI
 /// Per-app-identity cache for dominant icon colors. One app may produce many
 /// tiles (e.g. ten Safari windows), and the sampling work is identical for each
 /// window of the same app — compute once, share across tiles and invocations.
+struct BadgeColorComponents: Equatable, Sendable {
+    let red: Double
+    let green: Double
+    let blue: Double
+
+    var color: Color {
+        Color(red: red, green: green, blue: blue)
+    }
+}
+
 actor DominantColorCache {
     static let shared = DominantColorCache()
     // Keyed by app identity (bundle id, else app name) rather than pid: the OS
     // recycles pids, so a pid key could hand a freshly-launched app the dead
     // app's tint. Bounded so a long session can't grow the cache without limit.
-    private var cache = LRUDictionary<String, Color>(capacity: 64)
+    private var cache = LRUDictionary<String, BadgeColorComponents>(capacity: 64)
 
-    func color(for identity: String) -> Color? { cache[identity] }
-    func set(_ color: Color, for identity: String) { cache[identity] = color }
+    func color(for identity: String) -> BadgeColorComponents? { cache[identity] }
+    func set(_ color: BadgeColorComponents, for identity: String) { cache[identity] = color }
 }
 
 enum PreviewScalingPolicy {
@@ -44,14 +54,68 @@ enum PreviewScalingPolicy {
     }
 }
 
+enum BadgeContrastPolicy {
+    static let minimumTextContrastRatio = 4.5
+
+    private static func unit(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    private static func linearizedSRGB(_ value: Double) -> Double {
+        let component = unit(value)
+        return component <= 0.04045
+            ? component / 12.92
+            : pow((component + 0.055) / 1.055, 2.4)
+    }
+
+    static func relativeLuminance(red: Double, green: Double, blue: Double) -> Double {
+        0.2126 * linearizedSRGB(red)
+            + 0.7152 * linearizedSRGB(green)
+            + 0.0722 * linearizedSRGB(blue)
+    }
+
+    static func contrastRatio(_ first: Double, _ second: Double) -> Double {
+        (max(first, second) + 0.05) / (min(first, second) + 0.05)
+    }
+
+    static func usesDarkForeground(red: Double, green: Double, blue: Double) -> Bool {
+        let background = relativeLuminance(red: red, green: green, blue: blue)
+        let blackContrast = contrastRatio(background, 0)
+        let whiteContrast = contrastRatio(background, 1)
+        return blackContrast >= whiteContrast
+    }
+
+    /// Render the configured alpha over an opaque black badge backing. The
+    /// preview below the badge is therefore no longer an unknown contrast input,
+    /// while the full 0...100% control range still changes the color contribution.
+    static func compositedOverBlack(
+        red: Double,
+        green: Double,
+        blue: Double,
+        opacity: Double
+    ) -> BadgeColorComponents {
+        let alpha = unit(opacity)
+        return BadgeColorComponents(
+            red: unit(red) * alpha,
+            green: unit(green) * alpha,
+            blue: unit(blue) * alpha
+        )
+    }
+}
+
 struct SwitcherView: View {
     @ObservedObject var store: SwitcherStore
     @ObservedObject private var settings = SwitchBladeSettings.shared
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @AccessibilityFocusState private var accessibilityFocusedWindowID: WindowItem.ID?
 
     private var columns: [GridItem] {
-        let w = settings.tileMinWidth
-        return [GridItem(.adaptive(minimum: w, maximum: w * 1.35), spacing: 10)]
+        Array(
+            repeating: GridItem(.flexible(minimum: 1), spacing: SwitcherLayoutCalculator.gap),
+            count: max(1, store.panelColumnCount)
+        )
     }
 
     private var effectiveReduceMotion: Bool {
@@ -59,56 +123,80 @@ struct SwitcherView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            VStack(spacing: 0) {
-                ScrollViewReader { scrollProxy in
-                    ScrollView(showsIndicators: true) {
-                        LazyVGrid(columns: columns, spacing: 10) {
-                            ForEach(store.items) { item in
-                                WindowTile(
-                                    item: item,
-                                    isSelected: store.selectedID == item.id,
-                                    settings: settings,
-                                    reduceMotion: effectiveReduceMotion,
-                                    onSelect: { store.choose(item) },
-                                    onHover: { store.hover(item) },
-                                    onSnap: { edge in store.snap(item, to: edge) },
-                                    onClose: { store.close(item) }
-                                )
-                                .id(item.id)
-                            }
-                        }
-                        .padding(14)
-                        .padding(.vertical, 6)
-                    }
-                    .onChange(of: store.selectedID) { _, selectedID in
-                        guard let selectedID else { return }
-                        withAnimation(effectiveReduceMotion ? nil : .easeInOut(duration: 0.12)) {
-                            scrollProxy.scrollTo(selectedID, anchor: .center)
-                        }
-                    }
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button(action: store.openSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 24, height: 24)
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.white.opacity(0.95))
+                .background(Circle().fill(Color.black.opacity(0.72)))
+                .help(L10n.tr(.tooltipSettings))
+                .accessibilityLabel(L10n.tr(.tooltipSettings))
+            }
+            .frame(height: SwitcherLayoutCalculator.headerHeight)
+            .padding(.horizontal, SwitcherLayoutCalculator.gridPadX)
 
-                if let message = store.permissionState.message {
-                    Text(message)
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(0.6))
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 10)
+            ScrollViewReader { scrollProxy in
+                ScrollView(showsIndicators: true) {
+                    LazyVGrid(columns: columns, spacing: SwitcherLayoutCalculator.gap) {
+                        ForEach(store.items) { item in
+                            WindowTile(
+                                item: item,
+                                isSelected: store.selectedID == item.id,
+                                settings: settings,
+                                reduceMotion: effectiveReduceMotion,
+                                differentiateWithoutColor: differentiateWithoutColor,
+                                onSelect: { store.choose(item) },
+                                onHover: { store.hover(item) },
+                                onSnap: { edge in store.snap(item, to: edge) },
+                                onClose: { store.close(item) }
+                            )
+                            .id(item.id)
+                            .accessibilityFocused($accessibilityFocusedWindowID, equals: item.id)
+                        }
+                    }
+                    .padding(SwitcherLayoutCalculator.gridPadX)
+                    .padding(.vertical, 6)
+                }
+                .onChange(of: store.selectedID) { _, selectedID in
+                    guard let selectedID else { return }
+                    accessibilityFocusedWindowID = selectedID
+                    withAnimation(effectiveReduceMotion ? nil : .easeInOut(duration: 0.12)) {
+                        scrollProxy.scrollTo(selectedID, anchor: .center)
+                    }
                 }
             }
 
-            Button(action: store.openSettings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 24, height: 24)
+            if let permission = store.primaryMissingPermission {
+                HStack(spacing: 8) {
+                    Text(permission.title)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Spacer(minLength: 4)
+                    Button(L10n.tr(.permissionActionOpenSettingsShort)) {
+                        store.openPrimaryPermissionSettings()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.bold))
+                    .fixedSize()
+                    .accessibilityHint(store.permissionMessage ?? permission.title)
+                }
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+                .frame(height: SwitcherLayoutCalculator.permissionFooterHeight - 10)
+                .background(
+                    Color.black.opacity(0.76),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Color.white.opacity(0.72))
-            .background(Circle().fill(Color.black.opacity(0.28)))
-            .help(L10n.tr(.tooltipSettings))
-            .padding(.top, 16)
-            .padding(.trailing, 24)
         }
         // Panel is sized to exactly fit the content + cardMargin padding outside.
         // No fixedSize or maxHeight tricks needed — NSPanel height is authoritative.
@@ -131,13 +219,14 @@ private struct WindowTile: View {
     let isSelected: Bool
     let settings: SwitchBladeSettings
     let reduceMotion: Bool
+    let differentiateWithoutColor: Bool
     let onSelect: () -> Void
     let onHover: () -> Void
     let onSnap: (WindowSnapEdge) -> Void
     let onClose: () -> Void
 
     @State private var isHovered = false
-    @State private var appDominantColor: Color? = nil
+    @State private var appDominantColor: BadgeColorComponents? = nil
     @State private var selectionPulse = false
 
     private struct SelectionVisualState {
@@ -255,10 +344,33 @@ private struct WindowTile: View {
         }
     }
 
-    // Effective badge background: app icon dominant color (if enabled) or fixed setting.
-    private var effectiveBadgeBackground: some ShapeStyle {
-        let base: Color = settings.badgeUseAppColor ? (appDominantColor ?? settings.badgeColor) : settings.badgeColor
-        return base.opacity(settings.badgeOpacity)
+    private var effectiveBadgeComponents: BadgeColorComponents {
+        let fixed = BadgeColorComponents(
+            red: settings.badgeRed,
+            green: settings.badgeGreen,
+            blue: settings.badgeBlue
+        )
+        let base = settings.badgeUseAppColor ? (appDominantColor ?? fixed) : fixed
+        return BadgeContrastPolicy.compositedOverBlack(
+            red: base.red,
+            green: base.green,
+            blue: base.blue,
+            opacity: settings.badgeOpacity
+        )
+    }
+
+    // Opaque final color: preview pixels cannot weaken the measured contrast.
+    private var effectiveBadgeBackground: Color {
+        effectiveBadgeComponents.color
+    }
+
+    private var badgeForeground: Color {
+        let background = effectiveBadgeComponents
+        return BadgeContrastPolicy.usesDarkForeground(
+            red: background.red,
+            green: background.green,
+            blue: background.blue
+        ) ? .black : .white
     }
 
     private var tileAccessibilityLabel: String {
@@ -270,6 +382,15 @@ private struct WindowTile: View {
             parts.append(L10n.tr(.windowStateMinimized))
         }
         return parts.joined(separator: ", ")
+    }
+
+    private var selectionBorder: some View {
+        let color = isSelected
+            ? selectionAccent.opacity(selectionVisualState.borderOpacity)
+            : Color.white.opacity(0.08)
+        let width = isSelected ? selectionVisualState.borderWidth : 1
+        return RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(color, lineWidth: width)
     }
 
     var body: some View {
@@ -319,7 +440,7 @@ private struct WindowTile: View {
                     }
                     Text(item.displayTitle)
                         .font(.system(size: settings.badgeFontSize, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(badgeForeground)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -347,47 +468,11 @@ private struct WindowTile: View {
                     .allowsHitTesting(false)
                 }
 
-                // Close button
-                if isHovered || isSelected {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            Menu {
-                                snapMenuItems
-                            } label: {
-                                Image(systemName: "rectangle.split.2x1")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(.white.opacity(0.9))
-                                    .frame(width: 20, height: 20)
-                                    .background(Color.black.opacity(0.5), in: Circle())
-                            }
-                            .menuStyle(.borderlessButton)
-                            .help(L10n.tr(.actionSnapWindow))
-                            .accessibilityLabel(L10n.tr(.actionSnapWindow))
-                            Button(action: onClose) {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(.white.opacity(0.9))
-                                    .frame(width: 20, height: 20)
-                                    .background(Color.black.opacity(0.5), in: Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .help(L10n.tr(.actionCloseWindow))
-                            .accessibilityLabel(L10n.tr(.actionCloseWindow))
-                        }
-                        Spacer()
-                    }
-                    .padding(6)
-                }
+                selectionMarker
+                tileActionControls
             }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        isSelected ? selectionAccent.opacity(selectionVisualState.borderOpacity) : Color.white.opacity(0.08),
-                        lineWidth: isSelected ? selectionVisualState.borderWidth : 1
-                    )
-            }
+            .overlay(selectionBorder)
             .scaleEffect(isSelected ? selectionVisualState.scale : 1.0)
             .offset(y: isSelected ? selectionVisualState.yOffset : 0)
             .rotationEffect(isSelected ? selectionVisualState.rotation : .degrees(0))
@@ -401,10 +486,13 @@ private struct WindowTile: View {
         .contextMenu {
             snapMenuItems
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(tileAccessibilityLabel)
-        .accessibilityHint(L10n.tr(.accessibilityWindowTileHint))
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .modifier(WindowTileAccessibilityModifier(
+            label: tileAccessibilityLabel,
+            isSelected: isSelected,
+            onSelect: onSelect,
+            onClose: onClose,
+            onSnap: onSnap
+        ))
         .animation(reduceMotion ? nil : .spring(response: 0.20, dampingFraction: 0.82), value: isSelected)
         .task(id: "\(item.id)-\(isSelected)-\(settings.selectionEffect.rawValue)") {
             selectionPulse = false
@@ -446,9 +534,62 @@ private struct WindowTile: View {
         }
     }
 
+    @ViewBuilder
+    private var selectionMarker: some View {
+        if isSelected && differentiateWithoutColor {
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.75))
+                }
+            }
+            .padding(7)
+            .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var tileActionControls: some View {
+        if isHovered || isSelected {
+            VStack {
+                HStack {
+                    Spacer()
+                    Menu {
+                        snapMenuItems
+                    } label: {
+                        Image(systemName: "rectangle.split.2x1")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .frame(width: 20, height: 20)
+                            .background(Color.black.opacity(0.5), in: Circle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help(L10n.tr(.actionSnapWindow))
+                    .accessibilityLabel(L10n.tr(.actionSnapWindow))
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .frame(width: 20, height: 20)
+                            .background(Color.black.opacity(0.5), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(L10n.tr(.actionCloseWindow))
+                    .accessibilityLabel(L10n.tr(.actionCloseWindow))
+                }
+                Spacer()
+            }
+            .padding(6)
+        }
+    }
+
     /// Samples the average color of non-transparent pixels in a scaled-down version of the icon.
     /// Marked nonisolated so it can run on a background thread via Task.detached.
-    nonisolated static func dominantColor(from image: NSImage) -> Color? {
+    nonisolated static func dominantColor(from image: NSImage) -> BadgeColorComponents? {
         let side = 12
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -472,7 +613,11 @@ private struct WindowTile: View {
         guard count > 0 else { return nil }
         // Darken slightly so white text stays readable.
         let factor = 0.55
-        return Color(red: r / count * factor, green: g / count * factor, blue: b / count * factor)
+        return BadgeColorComponents(
+            red: r / count * factor,
+            green: g / count * factor,
+            blue: b / count * factor
+        )
     }
 
     /// Placeholder shown when no preview image is available. The app icon is
@@ -572,5 +717,32 @@ private struct WindowTile: View {
                 Label(edge.title, systemImage: edge.symbolName)
             }
         }
+    }
+}
+
+private struct WindowTileAccessibilityModifier: ViewModifier {
+    let label: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    let onSnap: (WindowSnapEdge) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+            .accessibilityHint(L10n.tr(.accessibilityWindowTileHint))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            .accessibilityAction { onSelect() }
+            .accessibilityAction(named: Text(L10n.tr(.actionCloseWindow)), onClose)
+            .accessibilityAction(named: snapTitle(.left)) { onSnap(.left) }
+            .accessibilityAction(named: snapTitle(.right)) { onSnap(.right) }
+            .accessibilityAction(named: snapTitle(.top)) { onSnap(.top) }
+            .accessibilityAction(named: snapTitle(.bottom)) { onSnap(.bottom) }
+    }
+
+    private func snapTitle(_ edge: WindowSnapEdge) -> Text {
+        Text("\(L10n.tr(.actionSnapWindow)): \(edge.title)")
     }
 }

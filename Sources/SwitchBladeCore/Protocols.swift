@@ -1,12 +1,29 @@
 import AppKit
 import CoreGraphics
 
+final class CooperativeCancellationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+}
+
 /// Window-listing dependency for SwitcherStore. Concrete WindowCatalog conforms;
 /// tests inject a mock to drive snapshot contents without touching real CGWindow
 /// or ScreenCaptureKit APIs.
 protocol WindowSnapshotProviding: Sendable {
     func snapshotVisibleOnly() -> [WindowItem]
-    func snapshotMinimized() async -> [WindowItem]
+    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> [WindowItem]
     /// Resolves the AX-focused window of `pid` against a fresh visible
     /// snapshot. nil when AX fails or the match is ambiguous.
     func focusedWindowItem(pid: pid_t) -> WindowItem?
@@ -28,16 +45,16 @@ protocol WindowSnapshotProviding: Sendable {
 /// Window activation / closing dependency. Concrete WindowActivator conforms;
 /// tests verify that selection and close paths call the right method.
 protocol WindowActivating: Sendable {
-    func activate(_ item: WindowItem)
-    func activateApplication(pid: pid_t)
-    func snap(_ item: WindowItem, to edge: WindowSnapEdge) -> Bool
-    func close(_ item: WindowItem) -> Bool
+    func activate(_ item: WindowActionTarget) -> Bool
+    func activateApplication(pid: pid_t) -> Bool
+    func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool
+    func close(_ item: WindowActionTarget) -> Bool
     /// Sends NSRunningApplication.terminate(). The whole app quits, not just
     /// the selected window.
-    func quit(_ item: WindowItem)
+    func quit(_ item: WindowActionTarget) -> Bool
     /// Sends NSRunningApplication.hide(). All of the app's windows go away
     /// without quitting; the app stays running and can be reactivated later.
-    func hide(_ item: WindowItem)
+    func hide(_ item: WindowActionTarget) -> Bool
 }
 
 /// Permission-state dependency. Concrete PermissionService conforms; tests
