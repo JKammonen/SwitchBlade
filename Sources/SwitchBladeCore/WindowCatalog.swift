@@ -412,6 +412,70 @@ enum WindowEligibilityPolicy {
     }
 }
 
+struct AXTopLevelWindowCandidate: Equatable, Sendable {
+    let title: String?
+    let frame: CGRect
+    let isSwitcherWindow: Bool
+
+    init(title: String?, frame: CGRect, isSwitcherWindow: Bool = true) {
+        self.title = title
+        self.frame = frame
+        self.isSwitcherWindow = isSwitcherWindow
+    }
+}
+
+enum AXWindowEligibilityPolicy {
+    /// Single-surface apps stay on the fast CGWindowList path. Apps exposing
+    /// several WindowServer surfaces get a semantic top-level-window check so
+    /// named and unnamed Chromium-style child surfaces are treated alike.
+    static func requiresValidation(_ items: [WindowItem]) -> Bool {
+        items.count > 1
+    }
+
+    /// Keep only CGWindow rows that map one-to-one to the app's AXWindows list.
+    /// Any unavailable or ambiguous AX evidence fails open so SwitchBlade does
+    /// not hide legitimate windows from apps with incomplete Accessibility data.
+    static func filteredItems(
+        _ items: [WindowItem],
+        candidates: [AXTopLevelWindowCandidate]?
+    ) -> [WindowItem] {
+        guard requiresValidation(items), let candidates else {
+            return items
+        }
+        let switcherCandidates = candidates.filter(\.isSwitcherWindow)
+        guard !switcherCandidates.isEmpty else { return items }
+
+        let matches = items.map { matchIndex(for: $0, candidates: switcherCandidates) }
+        let matchedIndices = matches.compactMap { $0 }
+        guard !matchedIndices.isEmpty,
+              Set(matchedIndices).count == matchedIndices.count else {
+            return items
+        }
+
+        return zip(items, matches).compactMap { item, matchIndex in
+            matchIndex == nil ? nil : item
+        }
+    }
+
+    private static func matchIndex(
+        for item: WindowItem,
+        candidates: [AXTopLevelWindowCandidate]
+    ) -> Int? {
+        let frameMatches = candidates.indices.filter {
+            WindowActivator.framesAreClose(candidates[$0].frame, item.bounds)
+        }
+        guard !frameMatches.isEmpty else { return nil }
+        guard frameMatches.count > 1 else { return frameMatches[0] }
+
+        let trimmedTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return nil }
+        let titleAndFrameMatches = frameMatches.filter {
+            candidates[$0].title == item.title
+        }
+        return titleAndFrameMatches.count == 1 ? titleAndFrameMatches[0] : nil
+    }
+}
+
 private struct WindowSharingStateIndex {
     private struct Key: Hashable {
         let pid: pid_t
@@ -492,6 +556,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     ]
 
     private static let processCapturePermitPool = CapturePermitPool(limit: 6)
+    private static let auxiliaryWindowAXTimeoutSeconds: Float = 0.05
+    private static let maximumAuxiliaryValidationApplications = 8
+    private static let maximumAuxiliaryValidationWindows = 64
+    private static let maximumAuxiliaryWindowsPerApplication = 32
+    private static let maximumAuxiliaryValidationSeconds: TimeInterval = 0.15
 
     private let contentCache = SCContentCache()
     private let capturePermitPool: CapturePermitPool
@@ -664,6 +733,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             )
         }
 
+        let filteredVisibleItems = filterAuxiliaryWindowSurfaces(visibleItems)
         let minimized = includeMinimized
             ? minimizedItems(
                 excluding: visibleWindowIDs,
@@ -675,8 +745,132 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             )
             : []
         return SnapshotResult(
-            visible: normalizeFrontmostWindowOrder(visibleItems, frontmostPID: frontmostPID),
+            visible: normalizeFrontmostWindowOrder(filteredVisibleItems, frontmostPID: frontmostPID),
             minimized: minimized
+        )
+    }
+
+    private func filterAuxiliaryWindowSurfaces(_ items: [WindowItem]) -> [WindowItem] {
+        guard AXIsProcessTrusted(), items.count > 1 else { return items }
+
+        let itemsByPID = Dictionary(grouping: items, by: \.pid)
+        var orderedPIDs: [pid_t] = []
+        var seenPIDs = Set<pid_t>()
+        for item in items where seenPIDs.insert(item.pid).inserted {
+            guard let siblings = itemsByPID[item.pid],
+                  AXWindowEligibilityPolicy.requiresValidation(siblings) else {
+                continue
+            }
+            orderedPIDs.append(item.pid)
+        }
+        guard !orderedPIDs.isEmpty else { return items }
+
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var budget = AXScanBudget(
+            maximumApplications: Self.maximumAuxiliaryValidationApplications,
+            maximumWindows: Self.maximumAuxiliaryValidationWindows,
+            maximumElapsedSeconds: Self.maximumAuxiliaryValidationSeconds,
+            startedAt: startedAt
+        )
+        var allowedWindowIDsByPID: [pid_t: Set<CGWindowID>] = [:]
+        var validatedApplications = 0
+        var fallbackApplications = 0
+
+        for pid in orderedPIDs {
+            guard budget.beginApplication(now: ProcessInfo.processInfo.systemUptime) else { break }
+            guard let siblings = itemsByPID[pid],
+                  let candidates = topLevelAXWindowCandidates(pid: pid, budget: &budget) else {
+                fallbackApplications += 1
+                continue
+            }
+            let filtered = AXWindowEligibilityPolicy.filteredItems(
+                siblings,
+                candidates: candidates
+            )
+            allowedWindowIDsByPID[pid] = Set(filtered.map(\.id))
+            validatedApplications += 1
+        }
+
+        let filteredItems = items.filter { item in
+            allowedWindowIDsByPID[item.pid]?.contains(item.id) ?? true
+        }
+        PerformanceDiagnostics.record(
+            "window_ax_eligibility",
+            fields: [
+                "budget_exhausted": .bool(budget.isExhausted),
+                "candidate_apps": .int(orderedPIDs.count),
+                "fallback_apps": .int(fallbackApplications),
+                "filtered_windows": .int(items.count - filteredItems.count),
+                "milliseconds": .double(
+                    (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+                ),
+                "validated_apps": .int(validatedApplications)
+            ]
+        )
+        return filteredItems
+    }
+
+    private func topLevelAXWindowCandidates(
+        pid: pid_t,
+        budget: inout AXScanBudget
+    ) -> [AXTopLevelWindowCandidate]? {
+        let appElement = AXUIElementCreateApplication(pid)
+        _ = AXUIElementSetMessagingTimeout(appElement, Self.auxiliaryWindowAXTimeoutSeconds)
+        guard let windows = axWindows(for: appElement),
+              windows.count <= Self.maximumAuxiliaryWindowsPerApplication else {
+            return nil
+        }
+
+        var candidates: [AXTopLevelWindowCandidate] = []
+        candidates.reserveCapacity(windows.count)
+        for window in windows {
+            guard budget.beginWindow(now: ProcessInfo.processInfo.systemUptime) else { return nil }
+            _ = AXUIElementSetMessagingTimeout(window, Self.auxiliaryWindowAXTimeoutSeconds)
+            guard let candidate = topLevelAXWindowCandidate(window) else { return nil }
+            candidates.append(candidate)
+        }
+        return candidates
+    }
+
+    private func topLevelAXWindowCandidate(_ window: AXUIElement) -> AXTopLevelWindowCandidate? {
+        let attributes = [
+            kAXTitleAttribute,
+            kAXPositionAttribute,
+            kAXSizeAttribute,
+            kAXSubroleAttribute
+        ] as CFArray
+        var rawValues: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(
+            window,
+            attributes,
+            [],
+            &rawValues
+        ) == .success,
+              let rawValues,
+              CFArrayGetCount(rawValues) == 4 else {
+            return nil
+        }
+
+        let values = rawValues as NSArray
+        let title = values[0] as? String
+        let positionValue = values[1] as CFTypeRef
+        let sizeValue = values[2] as CFTypeRef
+        let subrole = values[3] as? String
+        guard CFGetTypeID(positionValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &point),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else {
+            return nil
+        }
+        return AXTopLevelWindowCandidate(
+            title: title,
+            frame: CGRect(origin: point, size: size),
+            isSwitcherWindow: subrole != (kAXSystemDialogSubrole as String)
         )
     }
 
