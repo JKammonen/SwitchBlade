@@ -139,7 +139,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if state.needsVisibleRecovery(for: SwitchBladeSettings.shared.previewMode) {
             Logger.permissions.notice("Opening permission recovery on launch")
-            menuBar.openSettings()
+            // Accessory apps are not yet ready to activate a key window while
+            // applicationDidFinishLaunching is still on the stack. Defer until
+            // the next main-loop turn so the recovery window is actually shown.
+            DispatchQueue.main.async { [weak menuBar] in
+                menuBar?.openSettings()
+            }
         }
 
         installLifecycleObservers()

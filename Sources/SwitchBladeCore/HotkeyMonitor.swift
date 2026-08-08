@@ -153,6 +153,7 @@ final class HotkeyMonitor {
             userInfo: unmanagedSelf
         ) else {
             Logger.hotkey.error("CGEvent.tapCreate failed — Accessibility permission likely missing")
+            recordEventTapInstall(success: false)
             return
         }
 
@@ -163,6 +164,17 @@ final class HotkeyMonitor {
         self.eventTap = eventTap
         self.eventTapSource = eventTapSource
         Logger.hotkey.info("Event tap installed")
+        recordEventTapInstall(success: true)
+    }
+
+    private func recordEventTapInstall(success: Bool) {
+        PerformanceDiagnostics.record(
+            "event_tap_install",
+            fields: [
+                "accessibility": .bool(AXIsProcessTrusted()),
+                "success": .bool(success)
+            ]
+        )
     }
 
     private func ensureEventTapReady(reason: String) {
