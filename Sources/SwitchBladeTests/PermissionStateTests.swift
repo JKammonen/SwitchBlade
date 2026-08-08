@@ -8,6 +8,7 @@ enum PermissionStateTests {
         ("PermissionState/missingScreenRecording_isListed", missingScreenRecording),
         ("PermissionState/iconsOnly_doesNotRequireScreenRecording", iconsOnlyDoesNotRequireScreenRecording),
         ("PermissionState/bothMissing_listsBoth", bothMissing),
+        ("PermissionState/recoverySurface_tracksRelevantMissingPermissions", recoverySurfaceTracksRelevantMissingPermissions),
         ("PermissionState/permissionKind_hasURL_andTitle_forEveryCase", everyKindHasURL)
     ]
 
@@ -55,6 +56,18 @@ enum PermissionStateTests {
         // Order matters: accessibility comes first
         try expectEqual(state.missingPermissions.first, .accessibility)
         try expectEqual(state.missingPermissions(for: .iconsOnly), [.accessibility])
+    }
+
+    static func recoverySurfaceTracksRelevantMissingPermissions() throws {
+        let allGranted = PermissionState(hasAccessibility: true, hasScreenRecording: true)
+        try expect(!allGranted.needsVisibleRecovery(for: .livePreviews))
+
+        let missingAccessibility = PermissionState(hasAccessibility: false, hasScreenRecording: true)
+        try expect(missingAccessibility.needsVisibleRecovery(for: .iconsOnly))
+
+        let missingScreenRecording = PermissionState(hasAccessibility: true, hasScreenRecording: false)
+        try expect(missingScreenRecording.needsVisibleRecovery(for: .livePreviews))
+        try expect(!missingScreenRecording.needsVisibleRecovery(for: .iconsOnly))
     }
 
     static func everyKindHasURL() throws {

@@ -57,6 +57,10 @@ struct PermissionState: Equatable {
         missingPermissions(for: previewMode).first
     }
 
+    func needsVisibleRecovery(for previewMode: SBPreviewMode) -> Bool {
+        !missingPermissions(for: previewMode).isEmpty
+    }
+
     var message: String? {
         switch (needsAccessibility, needsScreenRecording) {
         case (false, false): return nil

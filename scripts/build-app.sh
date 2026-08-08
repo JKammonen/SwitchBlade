@@ -103,7 +103,10 @@ sign_with_explicit_identity() {
             sign_status=$?
         fi
         if (( sign_status == 0 )); then
-            openssl pkcs12 -export \
+            # security import rejects PKCS#12 archives produced by some newer
+            # Homebrew OpenSSL versions. Use macOS's matching system exporter
+            # for the short-lived archive that is handed back to Security.framework.
+            /usr/bin/openssl pkcs12 -export \
                 -inkey "$SWITCHBLADE_CODESIGN_PRIVATE_KEY" \
                 -in "$SWITCHBLADE_CODESIGN_CERTIFICATE" \
                 -out "$temp_archive" \

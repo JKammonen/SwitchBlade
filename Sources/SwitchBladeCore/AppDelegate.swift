@@ -137,6 +137,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.menuBarController = menuBar
 
+        if state.needsVisibleRecovery(for: SwitchBladeSettings.shared.previewMode) {
+            Logger.permissions.notice("Opening permission recovery on launch")
+            menuBar.openSettings()
+        }
+
         installLifecycleObservers()
     }
 

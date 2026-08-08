@@ -464,7 +464,9 @@ print -r -- first > "$atomic_test_dir/staged/version"
 private_key_test_keychain="$tmp_dir/private-key-removal.keychain"
 empty_archive="$archive_test_dir/a-empty.p12"
 transient_test_password="switchblade-transient-test"
-openssl pkcs12 -export \
+# Match build-app.sh: this archive is consumed by macOS security import, so it
+# must be emitted by the system OpenSSL rather than a PATH-selected Homebrew one.
+/usr/bin/openssl pkcs12 -export \
     -inkey "$archive_test_dir/a.key" \
     -in "$archive_test_dir/a.pem" \
     -out "$empty_archive" \
