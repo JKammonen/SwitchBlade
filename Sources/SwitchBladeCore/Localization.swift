@@ -207,6 +207,7 @@ public enum L10n {
         case settingsBadgeBar
         case settingsSelection
         case settingsPreviewSize
+        case settingsObjectSelector
 
         // Behavior
         case fieldLaunchAtLogin
@@ -247,7 +248,8 @@ public enum L10n {
         case fieldAnimation
         case fieldHighlightColor
         case fieldStrength
-        case fieldMinWidth
+        case fieldWidth
+        case fieldMaxWidth
         case actionSnapWindow
         case actionSnapLeft
         case actionSnapRight

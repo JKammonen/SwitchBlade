@@ -248,6 +248,7 @@ enum SwitchBladeSettingsTests {
         defaults.set(-5.0, forKey: "sb_highlightStrength")
         defaults.set(Double.infinity, forKey: "sb_highlightOpacity")
         defaults.set(999.0, forKey: "sb_tileMinWidth")
+        defaults.set(50.0, forKey: "sb_selectorWidthFraction")
         defaults.set(1.0, forKey: "sb_badgeIconSize")
         defaults.set(99.0, forKey: "sb_badgeFontSize")
         defaults.set(-1.0, forKey: "sb_badgeVPad")
@@ -271,10 +272,12 @@ enum SwitchBladeSettingsTests {
         try expectEqual(settings.highlightStrength, 0.2)
         try expectEqual(settings.highlightOpacity, 0.85)
         try expectEqual(settings.tileMinWidth, 380)
+        try expectEqual(settings.selectorWidthFraction, 0.95)
         try expectEqual(settings.badgeIconSize, 12)
         try expectEqual(settings.badgeFontSize, 16)
         try expectEqual(settings.badgeVerticalPadding, 2)
         try expectEqual(defaults.double(forKey: "sb_tileMinWidth"), 380)
+        try expectEqual(defaults.double(forKey: "sb_selectorWidthFraction"), 0.95)
     }
 
     @MainActor static func runtimeAppearanceValuesAreSanitized() async throws {
@@ -288,11 +291,13 @@ enum SwitchBladeSettingsTests {
         settings.badgeOpacity = 10
         settings.badgeBlue = .nan
         settings.tileMinWidth = .infinity
+        settings.selectorWidthFraction = .infinity
 
         try expectEqual(settings.highlightStrength, 0.2)
         try expectEqual(settings.badgeOpacity, 1)
         try expectEqual(settings.badgeBlue, 0)
         try expectEqual(settings.tileMinWidth, 220)
+        try expectEqual(settings.selectorWidthFraction, 0.8)
         try expectEqual(defaults.double(forKey: "sb_highlightStrength"), 0.2)
     }
 

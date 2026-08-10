@@ -280,7 +280,17 @@ struct SettingsView: View {
                 }
 
                 group(title: L10n.tr(.settingsPreviewSize)) {
-                    sliderRow(L10n.tr(.fieldMinWidth), value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
+                    sliderRow(L10n.tr(.fieldWidth), value: $settings.tileMinWidth, in: 140...380, unit: "pt", scale: 1)
+                }
+
+                group(title: L10n.tr(.settingsObjectSelector)) {
+                    sliderRow(
+                        L10n.tr(.fieldMaxWidth),
+                        value: $settings.selectorWidthFraction,
+                        in: 0.5...0.95,
+                        unit: "%",
+                        scale: 100
+                    )
                 }
 
                 group(title: L10n.tr(.settingsAdvanced)) {

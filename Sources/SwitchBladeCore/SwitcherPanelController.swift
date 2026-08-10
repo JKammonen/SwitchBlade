@@ -23,21 +23,25 @@ final class SwitcherPanelController {
         let screenFrame: CGRect
         let visibleFrame: CGRect
         let tileMinWidth: CGFloat
+        let selectorWidthFraction: CGFloat
         let tileAspectRatio: CGFloat
         let showsPermissionFooter: Bool
         let panelFrame: CGRect
         let columns: Int
+        let tileWidth: CGFloat
 
         func matches(
             itemCount: Int,
             mouseLocation: CGPoint,
             tileMinWidth: CGFloat,
+            selectorWidthFraction: CGFloat,
             tileAspectRatio: CGFloat,
             showsPermissionFooter: Bool
         ) -> Bool {
             self.itemCount == itemCount
                 && screenFrame.contains(mouseLocation)
                 && abs(self.tileMinWidth - tileMinWidth) < 0.5
+                && abs(self.selectorWidthFraction - selectorWidthFraction) < 0.001
                 && abs(self.tileAspectRatio - tileAspectRatio) < 0.001
                 && self.showsPermissionFooter == showsPermissionFooter
         }
@@ -287,6 +291,7 @@ final class SwitcherPanelController {
     private func sizeAndCenter(itemCount: Int) -> PanelSizingMetrics {
         let start = Date()
         let tileMinWidth = SwitchBladeSettings.shared.tileMinWidth
+        let selectorWidthFraction = SwitchBladeSettings.shared.selectorWidthFraction
         let tileAspectRatio = SwitcherLayout.tileAspectRatio
         let showsPermissionFooter = store?.primaryMissingPermission != nil
         let mouseLocation = NSEvent.mouseLocation
@@ -296,11 +301,12 @@ final class SwitcherPanelController {
                itemCount: itemCount,
                mouseLocation: mouseLocation,
                tileMinWidth: tileMinWidth,
+               selectorWidthFraction: selectorWidthFraction,
                tileAspectRatio: tileAspectRatio,
                showsPermissionFooter: showsPermissionFooter
            ),
            framesApproximatelyEqual(panel.frame, cachedLayout.panelFrame) {
-            store?.updatePanelColumnCount(cachedLayout.columns)
+            store?.updatePanelLayout(columns: cachedLayout.columns, tileWidth: cachedLayout.tileWidth)
             return PanelSizingMetrics(
                 totalMs: Date().timeIntervalSince(start) * 1000,
                 screenMs: 0,
@@ -334,10 +340,11 @@ final class SwitcherPanelController {
             tileMinWidth: tileMinWidth,
             itemCount: itemCount,
             tileAspectRatio: tileAspectRatio,
+            selectorWidthFraction: selectorWidthFraction,
             showsPermissionFooter: showsPermissionFooter
         ))
         let calcMs = Date().timeIntervalSince(calcStart) * 1000
-        store?.updatePanelColumnCount(result.columns)
+        store?.updatePanelLayout(columns: result.columns, tileWidth: result.tileWidth)
 
         let setFrameStart = Date()
         if !framesApproximatelyEqual(panel.frame, result.panelFrame) {
@@ -355,10 +362,12 @@ final class SwitcherPanelController {
             screenFrame: geometry.screenFrame,
             visibleFrame: geometry.visibleFrame,
             tileMinWidth: tileMinWidth,
+            selectorWidthFraction: selectorWidthFraction,
             tileAspectRatio: tileAspectRatio,
             showsPermissionFooter: showsPermissionFooter,
             panelFrame: result.panelFrame,
-            columns: result.columns
+            columns: result.columns,
+            tileWidth: result.tileWidth
         )
 
         return PanelSizingMetrics(

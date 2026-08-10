@@ -217,11 +217,16 @@ final class SwitchBladeSettings: ObservableObject {
         didSet { ud.set(selectionEffect.rawValue, forKey: "sb_selectionEffect") }
     }
 
-    // Preview tile minimum width in pts
+    // Preview tile width in pts and switcher maximum width as a screen fraction
     private var tileMinWidthValue: Double
+    private var selectorWidthFractionValue: Double
     var tileMinWidth: Double {
         get { tileMinWidthValue }
         set { tileMinWidthValue = updateNumeric(newValue, current: tileMinWidthValue, in: 140...380, fallback: 220, key: "sb_tileMinWidth") }
+    }
+    var selectorWidthFraction: Double {
+        get { selectorWidthFractionValue }
+        set { selectorWidthFractionValue = updateNumeric(newValue, current: selectorWidthFractionValue, in: 0.5...0.95, fallback: 0.8, key: "sb_selectorWidthFraction") }
     }
 
     // Badge bar appearance
@@ -374,6 +379,7 @@ final class SwitchBladeSettings: ObservableObject {
         highlightStrengthValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightStrength") as? Double, in: 0.2...1, fallback: 0.70)
         highlightOpacityValue = Self.sanitizedNumeric(ud.object(forKey: "sb_highlightOpacity") as? Double, in: 0.15...1, fallback: 0.85)
         tileMinWidthValue = Self.sanitizedNumeric(ud.object(forKey: "sb_tileMinWidth") as? Double, in: 140...380, fallback: 220)
+        selectorWidthFractionValue = Self.sanitizedNumeric(ud.object(forKey: "sb_selectorWidthFraction") as? Double, in: 0.5...0.95, fallback: 0.8)
         let storedModifier = SBModifier(rawValue: ud.string(forKey: "sb_modifier") ?? "") ?? .command
         let storedTriggerKey = SBTriggerKey(rawValue: ud.string(forKey: "sb_triggerKey") ?? "") ?? .tab
         if ShortcutConflictPolicy.conflict(modifier: storedModifier, triggerKey: storedTriggerKey) == nil {
@@ -456,6 +462,7 @@ final class SwitchBladeSettings: ObservableObject {
         highlightOpacity = 0.85
         selectionEffect = .pump
         tileMinWidth = 220.0
+        selectorWidthFraction = 0.8
         previewMode = .livePreviews
         reducedMotion = false
     }
@@ -539,6 +546,7 @@ final class SwitchBladeSettings: ObservableObject {
         ud.set(highlightStrength, forKey: "sb_highlightStrength")
         ud.set(highlightOpacity, forKey: "sb_highlightOpacity")
         ud.set(tileMinWidth, forKey: "sb_tileMinWidth")
+        ud.set(selectorWidthFraction, forKey: "sb_selectorWidthFraction")
         ud.set(badgeIconSize, forKey: "sb_badgeIconSize")
         ud.set(badgeFontSize, forKey: "sb_badgeFontSize")
         ud.set(badgeVerticalPadding, forKey: "sb_badgeVPad")

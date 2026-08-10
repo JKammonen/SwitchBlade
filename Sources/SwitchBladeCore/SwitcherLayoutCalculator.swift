@@ -8,6 +8,7 @@ enum SwitcherLayoutCalculator {
         let tileMinWidth: CGFloat       // SwitchBladeSettings.tileMinWidth
         let itemCount: Int
         let tileAspectRatio: CGFloat    // SwitcherLayout.tileAspectRatio
+        var selectorWidthFraction: CGFloat = 0.8
         var showsPermissionFooter = false
     }
 
@@ -15,6 +16,7 @@ enum SwitcherLayoutCalculator {
         let panelFrame: CGRect          // origin + size centred on screen
         let columns: Int                // actual columns rendered
         let rows: Int                   // actual rows rendered
+        let tileWidth: CGFloat          // actual width rendered for each preview tile
     }
 
     // Layout constants — kept in sync with SwitcherView padding values.
@@ -37,9 +39,13 @@ enum SwitcherLayoutCalculator {
         let tileAspectRatio = input.tileAspectRatio.isFinite && input.tileAspectRatio > 0
             ? input.tileAspectRatio
             : 1.65
+        let selectorWidthFraction = input.selectorWidthFraction.isFinite
+            ? min(max(input.selectorWidthFraction, 0.5), 0.95)
+            : 0.8
         let itemCount = max(0, input.itemCount)
 
-        let maxPanelWidth = max(1, min(frame.width - screenMargin * 2, 1400))
+        let requestedSelectorWidth = frame.width * selectorWidthFraction
+        let maxPanelWidth = max(1, min(frame.width - screenMargin * 2, requestedSelectorWidth))
         let horizontalChrome = cardMarginX * 2 + gridPadX * 2
         let maxGridWidth = max(1, maxPanelWidth - horizontalChrome)
         let tileW = min(requestedTileWidth, maxGridWidth)
@@ -53,12 +59,15 @@ enum SwitcherLayoutCalculator {
         let columns = balancedColumnCount(itemCount: itemCount, maxColumns: maxColumns)
         let rows = max(1, Int(ceil(Double(max(1, itemCount)) / Double(columns))))
 
-        // Per-tile width computed against the wide grid, but applied to the actual
-        // column count so visual tile size stays consistent regardless of item count.
-        let columnW = (maxGridWidth - CGFloat(maxColumns - 1) * gap) / CGFloat(maxColumns)
-        let tileH = columnW / tileAspectRatio
+        // Keep the rendered tile width tied to the setting. Previously the grid
+        // redistributed all available width after a column-count threshold, so
+        // 250 -> 260 pt could render as 250 -> 316 pt.
+        let tileH = tileW / tileAspectRatio
 
-        let gridWidth = CGFloat(columns) * columnW + CGFloat(columns - 1) * gap
+        let contentGridWidth = CGFloat(columns) * tileW + CGFloat(columns - 1) * gap
+        // Small result sets keep their compact panel. Dense result sets use the
+        // selected selector width and center fixed-width tiles inside it.
+        let gridWidth = itemCount > maxColumns * 2 ? maxGridWidth : contentGridWidth
         let gridH = CGFloat(rows) * tileH + CGFloat(rows - 1) * gap + gridPadY * 2
         let verticalChrome = cardMarginY * 2 + verticalSafety
         let maxCardHeight = max(1, min(frame.height * 0.80, frame.height - verticalChrome))
@@ -72,7 +81,7 @@ enum SwitcherLayoutCalculator {
         let panelFrame = CGRect(origin: origin,
                                 size: CGSize(width: width, height: height))
 
-        return Output(panelFrame: panelFrame, columns: columns, rows: rows)
+        return Output(panelFrame: panelFrame, columns: columns, rows: rows, tileWidth: tileW)
     }
 
     static func balancedColumnCount(itemCount: Int, maxColumns: Int) -> Int {

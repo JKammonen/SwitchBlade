@@ -95,7 +95,9 @@ enum UIRenderSmokeTests {
         settings.language = .finnish
         settings.doubleModifierSwitchEnabled = false
         let finnishHost = NSHostingView(rootView: SettingsView(settings: settings))
-        finnishHost.frame = host.frame
+        // Keep the Finnish artifact tall enough to include the lower appearance
+        // controls, where layout regressions in slider labels and values occur.
+        finnishHost.frame = CGRect(x: 0, y: 0, width: 600, height: 1_700)
         finnishHost.layoutSubtreeIfNeeded()
         try expectGreaterThan(finnishHost.fittingSize.width, CGFloat(0))
         try writeRenderArtifactIfRequested(

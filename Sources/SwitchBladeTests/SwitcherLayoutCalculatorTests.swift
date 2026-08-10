@@ -14,6 +14,8 @@ enum SwitcherLayoutCalculatorTests {
         ("Layout/tinyScreen_staysInsideVisibleFrame", tinyScreen),
         ("Layout/extremeTileWidths_stayInsideVisibleFrame", extremeTileWidths),
         ("Layout/malformedNumericInputs_stayFiniteAndContained", malformedNumericInputs),
+        ("Layout/previewWidth_doesNotJumpAtColumnThreshold", previewWidthDoesNotJumpAtColumnThreshold),
+        ("Layout/selectorWidth_controlsDensePanelWidth", selectorWidthControlsDensePanelWidth),
         ("Layout/permissionFooter_reservesExactHeightAndStaysContained", permissionFooterReservesHeight)
     ]
 
@@ -117,6 +119,51 @@ enum SwitcherLayoutCalculatorTests {
             try expect(result.panelFrame.height.isFinite)
             try expectContains(rect: screen, contains: result.panelFrame)
         }
+    }
+
+    static func previewWidthDoesNotJumpAtColumnThreshold() throws {
+        let at250 = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen,
+            tileMinWidth: 250,
+            itemCount: 13,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 1_400 / screen.width
+        ))
+        let at260 = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen,
+            tileMinWidth: 260,
+            itemCount: 13,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 1_400 / screen.width
+        ))
+
+        try expectEqual(at250.columns, 5)
+        try expectEqual(at260.columns, 4)
+        try expect(abs(at250.tileWidth - 250) < 0.5)
+        try expect(abs(at260.tileWidth - 260) < 0.5)
+        try expect(abs(at260.tileWidth - at250.tileWidth - 10) < 0.5)
+        try expect(abs(at260.panelFrame.width - at250.panelFrame.width) < 0.5)
+    }
+
+    static func selectorWidthControlsDensePanelWidth() throws {
+        let narrow = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen,
+            tileMinWidth: tileW,
+            itemCount: 13,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 0.6
+        ))
+        let wide = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: screen,
+            tileMinWidth: tileW,
+            itemCount: 13,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 0.8
+        ))
+
+        try expect(abs(narrow.panelFrame.width - screen.width * 0.6) < 0.5)
+        try expect(abs(wide.panelFrame.width - screen.width * 0.8) < 0.5)
+        try expect(abs(narrow.tileWidth - wide.tileWidth) < 0.5)
     }
 
     static func permissionFooterReservesHeight() throws {

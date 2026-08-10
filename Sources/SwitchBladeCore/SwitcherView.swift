@@ -113,7 +113,7 @@ struct SwitcherView: View {
 
     private var columns: [GridItem] {
         Array(
-            repeating: GridItem(.flexible(minimum: 1), spacing: SwitcherLayoutCalculator.gap),
+            repeating: GridItem(.fixed(store.panelTileWidth), spacing: SwitcherLayoutCalculator.gap),
             count: max(1, store.panelColumnCount)
         )
     }
@@ -142,7 +142,11 @@ struct SwitcherView: View {
 
             ScrollViewReader { scrollProxy in
                 ScrollView(showsIndicators: true) {
-                    LazyVGrid(columns: columns, spacing: SwitcherLayoutCalculator.gap) {
+                    LazyVGrid(
+                        columns: columns,
+                        alignment: .center,
+                        spacing: SwitcherLayoutCalculator.gap
+                    ) {
                         ForEach(store.items) { item in
                             WindowTile(
                                 item: item,

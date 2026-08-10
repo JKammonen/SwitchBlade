@@ -33,6 +33,7 @@ final class SwitcherStore: ObservableObject {
     @Published private(set) var isVisible = false
     @Published private(set) var permissionState: PermissionState
     @Published private(set) var panelColumnCount = 1
+    @Published private(set) var panelTileWidth: CGFloat = 220
     @Published var selectedID: WindowItem.ID?
 
     var onShow: (() -> Void)?
@@ -635,6 +636,11 @@ final class SwitcherStore: ObservableObject {
 
     func updatePanelColumnCount(_ columns: Int) {
         panelColumnCount = max(1, columns)
+    }
+
+    func updatePanelLayout(columns: Int, tileWidth: CGFloat) {
+        panelColumnCount = max(1, columns)
+        panelTileWidth = tileWidth.isFinite && tileWidth > 0 ? tileWidth : 220
     }
 
     static func gridNavigationIndex(
