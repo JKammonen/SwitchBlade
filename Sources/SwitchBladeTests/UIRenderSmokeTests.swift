@@ -16,7 +16,8 @@ enum UIRenderSmokeTests {
         ("UIRender/switcherView_compactPermissionFooterRendersNarrow", compactPermissionFooterRendersNarrow),
         ("UIRender/settingsView_rendersWithPositiveFittingSize", settingsViewRenders),
         ("UIRender/panelController_constructsMaskedHostingPanel", panelControllerConstructs),
-        ("UIRender/panelController_permissionChangeReflowsFooter", panelControllerPermissionChangeReflowsFooter)
+        ("UIRender/panelController_permissionChangeReflowsFooter", panelControllerPermissionChangeReflowsFooter),
+        ("UIRender/panelController_selectorWidthChangeInvalidatesCachedLayout", panelControllerSelectorWidthChangeInvalidatesCachedLayout)
     ]
 
     @MainActor
@@ -157,6 +158,38 @@ enum UIRenderSmokeTests {
         try expect(
             abs(withFooter - withoutFooter - SwitcherLayoutCalculator.permissionFooterHeight) < 0.5
         )
+    }
+
+    @MainActor
+    static func panelControllerSelectorWidthChangeInvalidatesCachedLayout() throws {
+        let settings = SwitchBladeSettings.shared
+        let previousTileWidth = settings.tileMinWidth
+        let previousSelectorWidth = settings.selectorWidthFraction
+        defer {
+            settings.tileMinWidth = previousTileWidth
+            settings.selectorWidthFraction = previousSelectorWidth
+        }
+
+        settings.tileMinWidth = 140
+        settings.selectorWidthFraction = 0.5
+        let (store, _, _, _) = makeStore()
+        let controller = SwitcherPanelController(store: store)
+        controller.prepare(itemCount: 100)
+        let narrowFrame = controller.constructionProbe.panelFrame
+
+        try expectEqual(store.panelTileWidth, 140)
+        try expectGreaterThan(store.panelColumnCount, 1)
+
+        settings.selectorWidthFraction = 0.9
+        controller.prepare(itemCount: 100)
+        let wideFrame = controller.constructionProbe.panelFrame
+
+        try expectGreaterThan(
+            wideFrame.width,
+            narrowFrame.width,
+            "selector width change should invalidate the cached panel layout"
+        )
+        try expectEqual(store.panelTileWidth, 140)
     }
 
     @MainActor

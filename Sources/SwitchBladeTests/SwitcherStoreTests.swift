@@ -74,6 +74,7 @@ enum SwitcherStoreTests {
         ("Store/handleKeyDown_voiceOverChordsPassThroughForEveryModifier", handleKeyDownVoiceOverChordsPassThroughForEveryModifier),
         ("Store/handleKeyDown_controlModifierUsesShiftSnapWithoutStealingVoiceOver", controlModifierUsesShiftForSnapWithoutStealingVoiceOver),
         ("Store/gridNavigation_matchesRenderedColumns", gridNavigationMatchesRenderedColumns),
+        ("Store/updatePanelLayout_tracksRenderedColumnsAndTileWidth", updatePanelLayoutTracksRenderedColumnsAndTileWidth),
         ("Store/quit_removesAllWindowsOfThatPid", quit_removesAllPidWindows),
         ("Store/quit_failure_keepsPanelState", quit_failureKeepsPanelState),
         ("Store/hide_failure_keepsPanelVisible", hide_failureKeepsPanelVisible),
@@ -1642,6 +1643,18 @@ enum SwitcherStoreTests {
             SwitcherStore.gridNavigationIndex(from: 6, itemCount: 7, columns: 4, direction: .down),
             6
         )
+    }
+
+    @MainActor static func updatePanelLayoutTracksRenderedColumnsAndTileWidth() throws {
+        let (store, _, _, _) = makeStore()
+
+        store.updatePanelLayout(columns: 0, tileWidth: 312)
+        try expectEqual(store.panelColumnCount, 1)
+        try expectEqual(store.panelTileWidth, 312)
+
+        store.updatePanelLayout(columns: 4, tileWidth: .infinity)
+        try expectEqual(store.panelColumnCount, 4)
+        try expectEqual(store.panelTileWidth, 220)
     }
 
     @MainActor static func quit_removesAllPidWindows() async throws {

@@ -19,6 +19,7 @@ enum SwitchBladeSettingsTests {
         ("Settings/hotkey_persistedReservedComboFallsBackSafely", persistedReservedComboFallsBackSafely),
         ("Settings/appearance_persistedValuesAreSanitized", persistedAppearanceValuesAreSanitized),
         ("Settings/appearance_runtimeValuesAreSanitized", runtimeAppearanceValuesAreSanitized),
+        ("Settings/appearance_resetRestoresAndPersistsSelectorSizing", appearanceResetRestoresAndPersistsSelectorSizing),
         ("Settings/hiddenApps_reportsParsedRuleCounts", hiddenAppsReportsParsedRuleCounts),
         ("Settings/windowScope_mirrorsThreadSafeFilterState", windowScope_mirrorsFilterState),
         ("Settings/performanceLogging_mirrorsThreadSafeState", performanceLogging_mirrorsState)
@@ -299,6 +300,23 @@ enum SwitchBladeSettingsTests {
         try expectEqual(settings.tileMinWidth, 220)
         try expectEqual(settings.selectorWidthFraction, 0.8)
         try expectEqual(defaults.double(forKey: "sb_highlightStrength"), 0.2)
+    }
+
+    @MainActor static func appearanceResetRestoresAndPersistsSelectorSizing() async throws {
+        let defaults = makeIsolatedUserDefaults()
+        let settings = SwitchBladeSettings(
+            userDefaults: defaults,
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+        settings.tileMinWidth = 340
+        settings.selectorWidthFraction = 0.55
+
+        settings.resetAppearanceDefaults()
+
+        try expectEqual(settings.tileMinWidth, 220)
+        try expectEqual(settings.selectorWidthFraction, 0.8)
+        try expectEqual(defaults.double(forKey: "sb_tileMinWidth"), 220)
+        try expectEqual(defaults.double(forKey: "sb_selectorWidthFraction"), 0.8)
     }
 
     @MainActor static func hiddenAppsReportsParsedRuleCounts() async throws {
