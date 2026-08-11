@@ -13,8 +13,12 @@ enum UIRenderSmokeTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("UIRender/switcherView_rendersWithPositiveFittingSize", switcherViewRenders),
+        ("UIRender/switcherColumns_remainFixedAtPanelTileWidth", switcherColumnsRemainFixedAtPanelTileWidth),
+        ("UIRender/switcherView_wiresFixedColumnContract", switcherViewWiresFixedColumnContract),
         ("UIRender/switcherView_compactPermissionFooterRendersNarrow", compactPermissionFooterRendersNarrow),
         ("UIRender/settingsView_rendersWithPositiveFittingSize", settingsViewRenders),
+        ("UIRender/objectSelectorWidthBinding_updatesOnlySelectorWidth", objectSelectorWidthBindingUpdatesOnlySelectorWidth),
+        ("UIRender/settingsView_wiresObjectSelectorBinding", settingsViewWiresObjectSelectorBinding),
         ("UIRender/panelController_constructsMaskedHostingPanel", panelControllerConstructs),
         ("UIRender/panelController_permissionChangeReflowsFooter", panelControllerPermissionChangeReflowsFooter),
         ("UIRender/panelController_selectorWidthChangeInvalidatesCachedLayout", panelControllerSelectorWidthChangeInvalidatesCachedLayout)
@@ -51,6 +55,30 @@ enum UIRenderSmokeTests {
         try expectGreaterThan(host.fittingSize.width, CGFloat(0))
         try expectGreaterThan(host.fittingSize.height, CGFloat(0))
         try writeRenderArtifactIfRequested(host, name: "switcher-default")
+    }
+
+    @MainActor
+    static func switcherColumnsRemainFixedAtPanelTileWidth() throws {
+        let columns = SwitcherView.gridColumns(tileWidth: 173, count: 3)
+        try expectEqual(columns.count, 3)
+        for column in columns {
+            switch column.size {
+            case .fixed(let width):
+                try expectEqual(width, 173)
+            default:
+                try expect(false, "switcher grid columns must remain fixed-width")
+            }
+            try expectEqual(column.spacing, SwitcherLayoutCalculator.gap)
+        }
+    }
+
+    @MainActor
+    static func switcherViewWiresFixedColumnContract() throws {
+        let source = try productionSource("SwitcherView.swift")
+        try expect(
+            source.contains("Self.gridColumns(tileWidth: store.panelTileWidth, count: store.panelColumnCount)"),
+            "SwitcherView must wire the rendered grid through the tested fixed-column contract"
+        )
     }
 
     @MainActor
@@ -122,6 +150,31 @@ enum UIRenderSmokeTests {
         approvalHost.frame = CGRect(x: 0, y: 0, width: 600, height: 800)
         approvalHost.layoutSubtreeIfNeeded()
         try expectGreaterThan(approvalHost.fittingSize.height, CGFloat(0))
+    }
+
+    @MainActor
+    static func objectSelectorWidthBindingUpdatesOnlySelectorWidth() throws {
+        let settings = SwitchBladeSettings(
+            userDefaults: makeIsolatedUserDefaults(),
+            launchAtLoginController: LaunchAtLoginController.fake(currentStatus: .disabled)
+        )
+        settings.selectorWidthFraction = 0.8
+        settings.highlightOpacity = 0.67
+
+        let binding = SettingsView.objectSelectorWidthBinding(settings: settings)
+        binding.wrappedValue = 0.55
+
+        try expectEqual(settings.selectorWidthFraction, 0.55)
+        try expectEqual(settings.highlightOpacity, 0.67)
+    }
+
+    @MainActor
+    static func settingsViewWiresObjectSelectorBinding() throws {
+        let source = try productionSource("SettingsView.swift")
+        try expect(
+            source.contains("value: Self.objectSelectorWidthBinding(settings: settings)"),
+            "the object-selector slider must wire through its tested selector-width binding"
+        )
     }
 
     @MainActor
@@ -236,6 +289,15 @@ enum UIRenderSmokeTests {
         let directoryURL = URL(fileURLWithPath: outputDirectory, isDirectory: true)
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         try png.write(to: directoryURL.appendingPathComponent("\(name).png"), options: .atomic)
+    }
+
+    private static func productionSource(_ filename: String) throws -> String {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let sourceURL = testsDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("SwitchBladeCore")
+            .appendingPathComponent(filename)
+        return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 
     @MainActor

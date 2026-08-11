@@ -7,6 +7,17 @@ cd "${ROOT}"
 
 git diff --check
 
+if ! git diff --quiet -- Sources/SwitchBladeCore Sources/SwitchBlade Sources/SwitchBladeTests .quality/test-obligations.json; then
+    echo "ERROR: check-repo requires relevant tracked changes to be staged so every gate verifies one tree." >&2
+    exit 1
+fi
+untracked_relevant="$(git ls-files --others --exclude-standard -- Sources/SwitchBladeCore Sources/SwitchBlade Sources/SwitchBladeTests .quality/test-obligations.json)"
+if [[ -n "${untracked_relevant}" ]]; then
+    echo "ERROR: check-repo found untracked behavior/test/policy files:" >&2
+    echo "${untracked_relevant}" >&2
+    exit 1
+fi
+
 for script in scripts/*.sh; do
     if head -n 1 "$script" | grep -Fq zsh; then
         zsh -n "$script"
@@ -22,6 +33,13 @@ for test_file in Sources/SwitchBladeTests/*Tests.swift; do
         exit 1
     fi
 done
+
+test_obligation_engine="${TEST_OBLIGATION_ENGINE:-${ROOT}/../codex-workflow-hooks/hooks/test_obligation_gate.py}"
+if [[ ! -x "${test_obligation_engine}" ]]; then
+    echo "ERROR: test-obligation engine missing or not executable: ${test_obligation_engine}" >&2
+    exit 1
+fi
+/usr/bin/python3 "${test_obligation_engine}" --repo "${ROOT}" --all-canaries
 
 if rg -n 'title=.*privacy: \.public|item\.title.*privacy: \.public|displayName.*privacy: \.public|appName.*privacy: \.public|bundleIdentifier.*privacy: \.public|appIdentity.*privacy: \.public' Sources/SwitchBladeCore; then
     echo "ERROR: sensitive window/process display text is logged as public." >&2

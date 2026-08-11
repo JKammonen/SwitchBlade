@@ -10,6 +10,13 @@ struct SettingsView: View {
         permissionState?.missingPermissions(for: settings.previewMode) ?? []
     }
 
+    static func objectSelectorWidthBinding(settings: SwitchBladeSettings) -> Binding<Double> {
+        Binding(
+            get: { settings.selectorWidthFraction },
+            set: { newValue in settings.selectorWidthFraction = newValue }
+        )
+    }
+
     private var hiddenAppRuleSummary: String {
         let counts = settings.hiddenAppRuleCounts
         return String(
@@ -286,7 +293,7 @@ struct SettingsView: View {
                 group(title: L10n.tr(.settingsObjectSelector)) {
                     sliderRow(
                         L10n.tr(.fieldMaxWidth),
-                        value: $settings.selectorWidthFraction,
+                        value: Self.objectSelectorWidthBinding(settings: settings),
                         in: 0.5...0.95,
                         unit: "%",
                         scale: 100

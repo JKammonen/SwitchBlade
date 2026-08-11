@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "behavior_paths": [
+    "Sources/SwitchBladeCore/*.swift",
+    "Sources/SwitchBlade/*.swift"
+  ],
+  "test_paths": [
+    "Sources/SwitchBladeTests/*.swift"
+  ],
+  "verification": [
+    {
+      "name": "SwitchBlade full test suite",
+      "command": [
+        "swift",
+        "run",
+        "--disable-sandbox",
+        "SwitchBladeTests"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "red_verification": {
+    "name": "SwitchBlade tests against HEAD behavior",
+    "command": [
+      "swift",
+      "run",
+      "--disable-sandbox",
+      "SwitchBladeTests"
+    ],
+    "timeout_seconds": 600
+  },
+  "identity_commands": [
+    [
+      "swift",
+      "--version"
+    ],
+    [
+      "xcode-select",
+      "-p"
+    ]
+  ],
+  "canaries": [
+    {
+      "name": "switcher columns must stay fixed-width",
+      "trigger_paths": [
+        "Sources/SwitchBladeCore/SwitcherView.swift"
+      ],
+      "file": "Sources/SwitchBladeCore/SwitcherView.swift",
+      "find": "Self.gridColumns(tileWidth: store.panelTileWidth, count: store.panelColumnCount)",
+      "replace": "Array(repeating: GridItem(.flexible(minimum: store.panelTileWidth), spacing: SwitcherLayoutCalculator.gap), count: max(1, store.panelColumnCount))",
+      "command": [
+        "swift",
+        "run",
+        "--disable-sandbox",
+        "SwitchBladeTests"
+      ],
+      "timeout_seconds": 600,
+      "failure_output_contains": [
+        "✗ UIRender/switcherView_wiresFixedColumnContract"
+      ]
+    },
+    {
+      "name": "object selector slider must update selector width only",
+      "trigger_paths": [
+        "Sources/SwitchBladeCore/SettingsView.swift"
+      ],
+      "file": "Sources/SwitchBladeCore/SettingsView.swift",
+      "find": "Self.objectSelectorWidthBinding(settings: settings)",
+      "replace": "$settings.highlightOpacity",
+      "command": [
+        "swift",
+        "run",
+        "--disable-sandbox",
+        "SwitchBladeTests"
+      ],
+      "timeout_seconds": 600,
+      "failure_output_contains": [
+        "✗ UIRender/settingsView_wiresObjectSelectorBinding"
+      ]
+    }
+  ]
+}

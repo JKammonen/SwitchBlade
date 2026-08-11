@@ -111,11 +111,15 @@ struct SwitcherView: View {
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     @AccessibilityFocusState private var accessibilityFocusedWindowID: WindowItem.ID?
 
-    private var columns: [GridItem] {
+    static func gridColumns(tileWidth: CGFloat, count: Int) -> [GridItem] {
         Array(
-            repeating: GridItem(.fixed(store.panelTileWidth), spacing: SwitcherLayoutCalculator.gap),
-            count: max(1, store.panelColumnCount)
+            repeating: GridItem(.fixed(tileWidth), spacing: SwitcherLayoutCalculator.gap),
+            count: max(1, count)
         )
+    }
+
+    private var columns: [GridItem] {
+        Self.gridColumns(tileWidth: store.panelTileWidth, count: store.panelColumnCount)
     }
 
     private var effectiveReduceMotion: Bool {
