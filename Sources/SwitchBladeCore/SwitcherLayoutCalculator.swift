@@ -88,9 +88,12 @@ enum SwitcherLayoutCalculator {
         let count = max(1, itemCount)
         let upperBound = max(1, min(maxColumns, count))
 
-        // For large sets, keep the panel dense and wide; users are scanning.
+        // For dense sets, keep the minimum row count but reduce the columns to
+        // the smallest count that still fits those rows. This avoids orphaned
+        // final rows such as 7 + 7 + 1 without shrinking the configured tiles.
         guard count <= maxColumns * 2 else {
-            return upperBound
+            let rows = Int(ceil(Double(count) / Double(upperBound)))
+            return Int(ceil(Double(count) / Double(rows)))
         }
 
         return (1...upperBound).min { lhs, rhs in

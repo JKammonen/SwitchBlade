@@ -29,7 +29,14 @@ actor WindowActionCoordinator {
 /// (`PreviewCacheStore`, `MRUTracker`) — this class only orchestrates them.
 @MainActor
 final class SwitcherStore: ObservableObject {
-    @Published private(set) var items: [WindowItem] = []
+    @Published private(set) var items: [WindowItem] = [] {
+        didSet {
+            // Minimized-window and stale-cache refreshes may change the row count
+            // after the panel is already on screen. Keep its frame in sync.
+            guard oldValue.count != items.count, !items.isEmpty, isVisible else { return }
+            onVisibleItemCountChanged?(items.count)
+        }
+    }
     @Published private(set) var isVisible = false
     @Published private(set) var permissionState: PermissionState
     @Published private(set) var panelColumnCount = 1
@@ -41,6 +48,7 @@ final class SwitcherStore: ObservableObject {
     var onOpenSettings: (() -> Void)?
     var onOpenPermissionSettings: ((PermissionKind) -> Void)?
     var onPreparePanel: ((Int) -> Void)?
+    var onVisibleItemCountChanged: ((Int) -> Void)?
 
     var relevantMissingPermissions: [PermissionKind] {
         permissionState.missingPermissions(for: SwitchBladeSettings.shared.previewMode)
@@ -329,12 +337,17 @@ final class SwitcherStore: ObservableObject {
               settingsGeneration == generation,
               !isVisible,
               !isSwitching else { return }
-        let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
+        let classifications = await PreviewCacheStore.classifyCapturedFrames(previews)
         guard !Task.isCancelled,
               settingsGeneration == generation,
               !isVisible,
               !isSwitching else { return }
-        let acceptedPreviews = previewCache.record(previews, liveItems: cacheItems, mostlyWhiteIDs: whiteIDs)
+        recordRejectedBlackFrames(classifications)
+        let acceptedPreviews = previewCache.record(
+            previews,
+            liveItems: cacheItems,
+            classifications: classifications
+        )
         primeHiddenDisplayItems(cacheItems)
         let ms = Date().timeIntervalSince(start) * 1000
         Logger.switcher.info(
@@ -2197,14 +2210,31 @@ final class SwitcherStore: ObservableObject {
 
     private func applyPreviews(_ previews: [CGWindowID: NSImage], generation: Int) async {
         guard isVisible, previewGeneration == generation else { return }
-        // Classify blank/white frames off the main thread, then re-check the
+        // Classify blank frames off the main thread, then re-check the
         // generation: the panel may have hidden or reopened during the decode.
-        let whiteIDs = await PreviewCacheStore.mostlyWhiteWindowIDs(in: previews)
+        let classifications = await PreviewCacheStore.classifyCapturedFrames(previews)
         guard isVisible, previewGeneration == generation else { return }
-        let acceptedPreviews = previewCache.record(previews, liveItems: items, mostlyWhiteIDs: whiteIDs)
+        recordRejectedBlackFrames(classifications)
+        let acceptedPreviews = previewCache.record(
+            previews,
+            liveItems: items,
+            classifications: classifications
+        )
         items = items.map { item in
             acceptedPreviews[item.windowID].map { item.withPreview($0) } ?? item
         }
+    }
+
+    private func recordRejectedBlackFrames(_ classifications: PreviewFrameClassifications) {
+        let rejectedCount = classifications.uniformlyBlackIDs.count
+        guard rejectedCount > 0 else { return }
+        Logger.capture.notice(
+            "Rejected \(rejectedCount, privacy: .public) uniformly black preview frame(s)"
+        )
+        PerformanceDiagnostics.record(
+            "preview_frame_validation",
+            fields: ["uniformly_black_rejected": .int(rejectedCount)]
+        )
     }
 
     /// Lazily fetch minimized windows off the main thread and merge them in.

@@ -37,6 +37,7 @@ enum SwitcherStoreTests {
         ("Store/minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty", minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty),
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
+        ("Store/minimizedMerge_reflowsPanelForVisibleItemCount", minimizedMergeReflowsPanelForVisibleItemCount),
         ("Store/minimizedMerge_cancellationStopsUnderlyingAXWork", minimizedMergeCancellationStopsUnderlyingWork),
         // ordering
         ("Store/ordering_putsFrontmostAppFirst", ordering_frontmost),
@@ -49,6 +50,7 @@ enum SwitcherStoreTests {
         ("Store/filterSettingChange_invalidatesCachedWindowList", filterSettingChangeInvalidatesCachedWindowList),
         ("Store/filterSettingChange_rejectsInFlightWarmupSnapshot", filterSettingChangeRejectsInFlightWarmupSnapshot),
         ("Store/previewCapture_skipsUncapturableItems", previewCapture_skipsUncapturableItems),
+        ("Store/previewCapture_rejectsUniformBlackFrame", previewCaptureRejectsUniformBlackFrame),
         ("Store/previewCapture_limitsDeferredBatch", previewCapture_limitsDeferredBatch),
         ("Store/previewCapture_skipsCachedDeferredItems", previewCapture_skipsCachedDeferredItems),
         ("Store/warmPreviewCache_populatesFirstOpen", warmPreviewCache_populatesFirstOpen),
@@ -685,6 +687,49 @@ enum SwitcherStoreTests {
         try expectNil(merged.preview)
     }
 
+    @MainActor static func minimizedMergeReflowsPanelForVisibleItemCount() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...12).map { index in
+            makeItem(
+                id: CGWindowID(index),
+                pid: pid_t(100 + index),
+                appName: "App \(index)",
+                title: "Window \(index)",
+                isFrontmostApp: index == 1
+            )
+        }
+        let minimizedID = SyntheticWindowID.make(pid: 500, index: 0, title: "Minimized")
+        catalog.minimizedItems = [makeItem(
+            id: minimizedID,
+            pid: 500,
+            appName: "Minimized App",
+            title: "Minimized",
+            isMinimized: true,
+            canCapturePreview: false
+        )]
+        catalog.minimizedSnapshotDelayNanoseconds = 120_000_000
+
+        var visibleCountChanges: [Int] = []
+        store.onVisibleItemCountChanged = { visibleCountChanges.append($0) }
+
+        await openSwitcher(store)
+        try expect(store.isVisible)
+        try expectEqual(store.items.count, 12)
+        try expectEqual(visibleCountChanges, [])
+
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == minimizedID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try expectEqual(store.items.count, 13)
+        try expectEqual(
+            visibleCountChanges,
+            [13],
+            "a minimized row merged after show must trigger panel reflow for the new count"
+        )
+    }
+
     @MainActor static func minimizedMergeCancellationStopsUnderlyingWork() async throws {
         let (store, catalog, _, _) = makeStore()
         catalog.visibleItems = [makeItem(id: 1, isFrontmostApp: true)]
@@ -1106,6 +1151,29 @@ enum SwitcherStoreTests {
         let capturedIDs = catalog.captureWindowIDCalls.flatMap { $0 }
         try expectEqual(Set(capturedIDs), Set<CGWindowID>([1, 3]))
         try expect(!capturedIDs.contains(2), "uncapturable item should not be requested")
+    }
+
+    @MainActor static func previewCaptureRejectsUniformBlackFrame() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let black = NSImage(size: NSSize(width: 16, height: 16))
+        black.lockFocus()
+        NSColor.black.setFill()
+        NSRect(x: 0, y: 0, width: 16, height: 16).fill()
+        black.unlockFocus()
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = [makeItem(id: 1, isFrontmostApp: true)]
+        catalog.previewsToReturn = [1: black]
+
+        await openSwitcher(store)
+        await runPendingMainTasks(20)
+
+        try expectGreaterThan(catalog.captureCallCount, 0)
+        try expectNil(store.items.first?.preview)
     }
 
     @MainActor static func previewModeIconsOnlyDropsCachedPreviews() async throws {

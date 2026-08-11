@@ -19,6 +19,9 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
         ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate),
         ("PreviewCache/mostlyWhiteDetection", mostlyWhiteDetection),
+        ("PreviewCache/uniformBlackDetection_keepsDarkDetailUsable", uniformBlackDetectionKeepsDarkDetailUsable),
+        ("PreviewCache/uniformBlackCapture_remainsRejected", uniformBlackCaptureRemainsRejected),
+        ("PreviewCache/uniformBlackCapture_doesNotReplaceExistingPreview", uniformBlackCaptureDoesNotReplaceExistingPreview),
         ("PreviewCache/blankCapture_isRejectedWithoutExistingPreview", blankCaptureIsRejectedWithoutExistingPreview),
         ("PreviewCache/blankCapture_doesNotReplaceExistingPreview", blankCaptureDoesNotReplaceExistingPreview),
         ("PreviewCache/blankStorm_rejectsMostlyWhiteBatch", blankStormRejectsMostlyWhiteBatch),
@@ -336,6 +339,39 @@ enum PreviewCacheStoreTests {
         try expect(!PreviewCacheStore.isMostlyWhite(solidImage(color: .systemBlue)))
     }
 
+    @MainActor static func uniformBlackDetectionKeepsDarkDetailUsable() throws {
+        try expect(PreviewCacheStore.isUniformlyBlack(solidImage(color: .black)))
+        try expect(PreviewCacheStore.isUniformlyBlack(solidImage(color: NSColor(calibratedWhite: 0.01, alpha: 1))))
+        try expect(!PreviewCacheStore.isUniformlyBlack(darkDetailedImage()))
+        try expect(!PreviewCacheStore.isUniformlyBlack(solidImage(color: .white)))
+    }
+
+    @MainActor static func uniformBlackCaptureRemainsRejected() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "Finder", bundleIdentifier: "com.apple.finder")
+        let black = solidImage(color: .black)
+
+        let first = store.record([1: black], liveItems: [item])
+        let second = store.record([1: black], liveItems: [item])
+
+        try expectNil(first[1])
+        try expectNil(second[1])
+        try expectNil(store.hydrated(item, liveItems: [item]).preview)
+    }
+
+    @MainActor static func uniformBlackCaptureDoesNotReplaceExistingPreview() throws {
+        let store = PreviewCacheStore()
+        let item = makeItem(id: 1, appName: "Finder", bundleIdentifier: "com.apple.finder")
+        let good = darkDetailedImage()
+        let black = solidImage(color: .black)
+
+        _ = store.record([1: good], liveItems: [item])
+        let accepted = store.record([1: black], liveItems: [item])
+
+        try expectNil(accepted[1])
+        try expect(store.hydrated(item, liveItems: [item]).preview === good)
+    }
+
     @MainActor static func blankCaptureDoesNotReplaceExistingPreview() throws {
         let store = PreviewCacheStore()
         let item = makeItem(id: 1, appName: "TextEdit", bundleIdentifier: "com.apple.TextEdit")
@@ -475,6 +511,15 @@ enum PreviewCacheStoreTests {
         image.lockFocus()
         color.setFill()
         NSRect(x: 0, y: 0, width: 16, height: 16).fill()
+        image.unlockFocus()
+        return image
+    }
+
+    private static func darkDetailedImage() -> NSImage {
+        let image = solidImage(color: .black)
+        image.lockFocus()
+        NSColor(calibratedWhite: 0.35, alpha: 1).setFill()
+        NSRect(x: 4, y: 4, width: 8, height: 8).fill()
         image.unlockFocus()
         return image
     }

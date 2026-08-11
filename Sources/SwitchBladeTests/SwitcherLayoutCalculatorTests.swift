@@ -7,6 +7,8 @@ enum SwitcherLayoutCalculatorTests {
         ("Layout/threeItems_packIntoThreeColumns", threeItems_threeColumns),
         ("Layout/fiveItems_balancesAsThreeByTwo", fiveItems_balanced),
         ("Layout/eightItems_balancesAsFourByTwo", eightItems_balanced),
+        ("Layout/thirteenItems_preservesThreeRowsWithoutOrphan", thirteenItems_balancedDense),
+        ("Layout/fifteenItems_balancesAsFiveByThree", fifteenItems_balancedDense),
         ("Layout/panelCenteredOnScreen", panelCentered),
         ("Layout/threeItemPanel_narrowerThanMaxPanel", threeNarrower),
         ("Layout/heightCapsAt80PercentOfScreen", heightCap),
@@ -44,6 +46,32 @@ enum SwitcherLayoutCalculatorTests {
         try expectEqual(r.rows, 2)
         // Sanity: rows × columns must hold all items.
         try expectGreaterThanOrEqual(r.columns * r.rows, 8)
+    }
+
+    static func thirteenItems_balancedDense() throws {
+        let r = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: CGRect(x: 0, y: 0, width: 2_560, height: 1_410),
+            tileMinWidth: 300,
+            itemCount: 13,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 0.8
+        ))
+        try expectEqual(r.columns, 5)
+        try expectEqual(r.rows, 3)
+        try expectEqual(r.tileWidth, 300)
+    }
+
+    static func fifteenItems_balancedDense() throws {
+        let r = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: CGRect(x: 0, y: 0, width: 2_560, height: 1_410),
+            tileMinWidth: 300,
+            itemCount: 15,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 0.9
+        ))
+        try expectEqual(r.columns, 5)
+        try expectEqual(r.rows, 3)
+        try expectEqual(r.tileWidth, 300)
     }
 
     static func panelCentered() throws {

@@ -80,6 +80,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         store.onPreparePanel = { [weak panelController] itemCount in
             panelController?.prepare(itemCount: itemCount)
         }
+        store.onVisibleItemCountChanged = { [weak panelController] itemCount in
+            panelController?.prepare(itemCount: itemCount)
+        }
         store.onOpenPermissionSettings = { [weak self] permission in
             self?.handlePermissionRecovery(permission)
         }

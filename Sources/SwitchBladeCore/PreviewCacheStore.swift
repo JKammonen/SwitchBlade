@@ -1,6 +1,23 @@
 import AppKit
 import CoreGraphics
 
+enum PreviewFrameQuality: Sendable, Equatable {
+    case usable
+    case mostlyWhite
+    case uniformlyBlack
+}
+
+struct PreviewFrameClassifications: Sendable {
+    var mostlyWhiteIDs: Set<CGWindowID> = []
+    var uniformlyBlackIDs: Set<CGWindowID> = []
+
+    func quality(for windowID: CGWindowID) -> PreviewFrameQuality {
+        if uniformlyBlackIDs.contains(windowID) { return .uniformlyBlack }
+        if mostlyWhiteIDs.contains(windowID) { return .mostlyWhite }
+        return .usable
+    }
+}
+
 /// Multi-key preview cache:
 /// 1. Primary key — CGWindowID. Hits when the window is still alive and its
 ///    bounds haven't drifted from the cached snapshot.
@@ -92,16 +109,15 @@ final class PreviewCacheStore {
     ///
     /// The prune step is what keeps the cache from growing past `capacity`
     /// even when an app spawns many short-lived windows.
-    /// `mostlyWhiteIDs`, when supplied, is the set of window IDs already
-    /// classified as mostly-white off the main thread (see
-    /// `mostlyWhiteWindowIDs`). Production passes it so the pixel decode doesn't
-    /// run on @MainActor during first paint; callers that omit it (tests) fall
-    /// back to an inline classification.
+    /// `classifications`, when supplied, contains frame-quality results already
+    /// decoded off the main thread. Production passes it so pixel inspection
+    /// doesn't run on @MainActor during first paint; callers that omit it (tests)
+    /// fall back to inline classification.
     @discardableResult
     func record(
         _ previews: [CGWindowID: NSImage],
         liveItems: [WindowItem],
-        mostlyWhiteIDs: Set<CGWindowID>? = nil
+        classifications: PreviewFrameClassifications? = nil
     ) -> [CGWindowID: NSImage] {
         guard !previews.isEmpty else {
             keepOnlyLive(liveItems)
@@ -112,8 +128,15 @@ final class PreviewCacheStore {
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
             guard let item = itemsByID[windowID] else { continue }
-            let imageIsMostlyWhite = mostlyWhiteIDs?.contains(windowID) ?? Self.isMostlyWhite(image)
-            if imageIsMostlyWhite {
+            let quality = classifications?.quality(for: windowID) ?? Self.frameQuality(image)
+            if quality == .uniformlyBlack {
+                // SCKit can occasionally report success with a fully black frame.
+                // Never let that frame replace a known-good stale preview or become
+                // the cached result that keeps the tile black across later opens.
+                whiteDeferredIDs.remove(windowID)
+                continue
+            }
+            if quality == .mostlyWhite {
                 // A mostly-white frame is usually a transient blank: a window
                 // still loading, or a cold SCKit pipeline returning an empty
                 // frame. But it can also be genuinely white content (a blank
@@ -203,23 +226,40 @@ final class PreviewCacheStore {
         now().timeIntervalSince(cached.capturedAt) <= retainedPreviewMaxAge
     }
 
-    /// Classifies which captured frames are mostly white, off the main thread.
+    /// Classifies captured frames off the main thread.
     /// The pixel decode is the part worth moving off @MainActor; `record`'s LRU
     /// bookkeeping stays on the main actor where that state lives.
-    nonisolated static func mostlyWhiteWindowIDs(in previews: [CGWindowID: NSImage]) async -> Set<CGWindowID> {
-        guard !previews.isEmpty else { return [] }
+    nonisolated static func classifyCapturedFrames(
+        _ previews: [CGWindowID: NSImage]
+    ) async -> PreviewFrameClassifications {
+        guard !previews.isEmpty else { return PreviewFrameClassifications() }
         return await Task.detached(priority: .userInitiated) {
-            var whiteIDs: Set<CGWindowID> = []
-            for (windowID, image) in previews where isMostlyWhite(image) {
-                whiteIDs.insert(windowID)
+            var result = PreviewFrameClassifications()
+            for (windowID, image) in previews {
+                switch frameQuality(image) {
+                case .usable:
+                    break
+                case .mostlyWhite:
+                    result.mostlyWhiteIDs.insert(windowID)
+                case .uniformlyBlack:
+                    result.uniformlyBlackIDs.insert(windowID)
+                }
             }
-            return whiteIDs
+            return result
         }.value
     }
 
     nonisolated static func isMostlyWhite(_ image: NSImage) -> Bool {
+        frameQuality(image) == .mostlyWhite
+    }
+
+    nonisolated static func isUniformlyBlack(_ image: NSImage) -> Bool {
+        frameQuality(image) == .uniformlyBlack
+    }
+
+    nonisolated static func frameQuality(_ image: NSImage) -> PreviewFrameQuality {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return false
+            return .usable
         }
 
         let width = 16
@@ -234,7 +274,7 @@ final class PreviewCacheStore {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            return false
+            return .usable
         }
 
         context.interpolationQuality = .low
@@ -242,6 +282,7 @@ final class PreviewCacheStore {
 
         var opaqueSamples = 0
         var whiteSamples = 0
+        var nearBlackSamples = 0
         for index in stride(from: 0, to: pixels.count, by: 4) {
             let alpha = pixels[index + 3]
             guard alpha > 245 else { continue }
@@ -252,10 +293,22 @@ final class PreviewCacheStore {
             if red > 246, green > 246, blue > 246 {
                 whiteSamples += 1
             }
+            if red < 8, green < 8, blue < 8 {
+                nearBlackSamples += 1
+            }
         }
 
-        guard opaqueSamples > 0 else { return false }
-        return Double(whiteSamples) / Double(opaqueSamples) > 0.97
+        guard opaqueSamples > 0 else { return .usable }
+        if Double(whiteSamples) / Double(opaqueSamples) > 0.97 {
+            return .mostlyWhite
+        }
+        // Keep this deliberately strict: a real dark UI with even a small
+        // amount of visible chrome/text remains usable, while an effectively
+        // uniform SCKit failure frame is rejected.
+        if Double(nearBlackSamples) / Double(opaqueSamples) > 0.995 {
+            return .uniformlyBlack
+        }
+        return .usable
     }
 
     private static func singleWindowAppIdentities(

@@ -13,6 +13,8 @@ enum UIRenderSmokeTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("UIRender/switcherView_rendersWithPositiveFittingSize", switcherViewRenders),
+        ("UIRender/minimizedMerge_reflowsAndRendersThirteenthItem", minimizedMergeReflowsAndRendersThirteenthItem),
+        ("UIRender/fifteenItems_renderAsBalancedThreeRows", fifteenItemsRenderAsBalancedThreeRows),
         ("UIRender/switcherColumns_remainFixedAtPanelTileWidth", switcherColumnsRemainFixedAtPanelTileWidth),
         ("UIRender/switcherView_wiresFixedColumnContract", switcherViewWiresFixedColumnContract),
         ("UIRender/switcherView_compactPermissionFooterRendersNarrow", compactPermissionFooterRendersNarrow),
@@ -21,6 +23,7 @@ enum UIRenderSmokeTests {
         ("UIRender/settingsView_wiresObjectSelectorBinding", settingsViewWiresObjectSelectorBinding),
         ("UIRender/panelController_constructsMaskedHostingPanel", panelControllerConstructs),
         ("UIRender/panelController_permissionChangeReflowsFooter", panelControllerPermissionChangeReflowsFooter),
+        ("UIRender/appDelegate_wiresVisibleItemCountReflow", appDelegateWiresVisibleItemCountReflow),
         ("UIRender/panelController_selectorWidthChangeInvalidatesCachedLayout", panelControllerSelectorWidthChangeInvalidatesCachedLayout)
     ]
 
@@ -55,6 +58,133 @@ enum UIRenderSmokeTests {
         try expectGreaterThan(host.fittingSize.width, CGFloat(0))
         try expectGreaterThan(host.fittingSize.height, CGFloat(0))
         try writeRenderArtifactIfRequested(host, name: "switcher-default")
+    }
+
+    @MainActor
+    static func minimizedMergeReflowsAndRendersThirteenthItem() async throws {
+        let previousLanguage = LocalizationState.selection
+        let settings = SwitchBladeSettings.shared
+        let previousTileWidth = settings.tileMinWidth
+        let previousSelectorWidth = settings.selectorWidthFraction
+        LocalizationState.selection = .english
+        settings.tileMinWidth = 300
+        settings.selectorWidthFraction = 0.8
+        defer {
+            LocalizationState.selection = previousLanguage
+            settings.tileMinWidth = previousTileWidth
+            settings.selectorWidthFraction = previousSelectorWidth
+        }
+
+        let colors: [NSColor] = [
+            .systemIndigo, .systemTeal, .systemOrange, .systemPink,
+            .systemBlue, .systemGreen, .systemPurple
+        ]
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...12).map { index in
+            makeItem(
+                id: CGWindowID(index),
+                appName: "App \(index)",
+                title: "Window \(index)"
+            ).withPreview(makeRenderPreview(
+                color: colors[(index - 1) % colors.count],
+                label: "\(index)"
+            ))
+        }
+        let minimizedID = SyntheticWindowID.make(pid: 500, index: 0, title: "Window 13")
+        catalog.minimizedItems = [makeItem(
+            id: minimizedID,
+            pid: 500,
+            appName: "App 13",
+            title: "Window 13",
+            isMinimized: true,
+            canCapturePreview: false
+        )]
+        catalog.minimizedSnapshotDelayNanoseconds = 120_000_000
+
+        let controller = SwitcherPanelController(store: store)
+        store.onShow = { [weak controller, weak store] in
+            controller?.prepare(itemCount: store?.items.count ?? 0)
+        }
+        store.onVisibleItemCountChanged = { [weak controller] itemCount in
+            controller?.prepare(itemCount: itemCount)
+        }
+        await openSwitcher(store)
+        try expectEqual(store.items.count, 12)
+        let initialFrame = controller.constructionProbe.panelFrame
+
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == minimizedID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try expectEqual(store.items.count, 13)
+        let reflowedFrame = controller.constructionProbe.panelFrame
+        try expectGreaterThan(
+            reflowedFrame.height,
+            initialFrame.height,
+            "the panel must grow when the delayed minimized item creates a new row"
+        )
+
+        // Render the reported item count at the actual main-display scale and
+        // confirm the delayed item is visible in a balanced 5 + 5 + 3 grid.
+        let layout = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: CGRect(x: 0, y: 0, width: 2_560, height: 1_410),
+            tileMinWidth: settings.tileMinWidth,
+            itemCount: store.items.count,
+            tileAspectRatio: SwitcherLayout.tileAspectRatio,
+            selectorWidthFraction: settings.selectorWidthFraction
+        ))
+        store.updatePanelLayout(columns: layout.columns, tileWidth: layout.tileWidth)
+
+        try expectEqual(layout.columns, 5)
+        try expectEqual(layout.rows, 3)
+        let host = NSHostingView(rootView: SwitcherView(store: store))
+        host.frame = CGRect(origin: .zero, size: layout.panelFrame.size)
+        host.layoutSubtreeIfNeeded()
+
+        try expectGreaterThan(host.fittingSize.width, CGFloat(0))
+        try expectGreaterThan(host.fittingSize.height, CGFloat(0))
+        try writeRenderArtifactIfRequested(host, name: "switcher-thirteen-after-minimized-merge")
+    }
+
+    @MainActor
+    static func fifteenItemsRenderAsBalancedThreeRows() async throws {
+        let previousLanguage = LocalizationState.selection
+        LocalizationState.selection = .english
+        defer { LocalizationState.selection = previousLanguage }
+
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...15).map { index in
+            makeItem(
+                id: CGWindowID(index),
+                appName: "App \(index)",
+                title: "Window \(index)"
+            ).withPreview(makeRenderPreview(
+                color: index.isMultiple(of: 2) ? .systemIndigo : .systemTeal,
+                label: "\(index)"
+            ))
+        }
+        await openSwitcher(store)
+
+        let layout = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: CGRect(x: 0, y: 0, width: 2_560, height: 1_410),
+            tileMinWidth: 300,
+            itemCount: store.items.count,
+            tileAspectRatio: SwitcherLayout.tileAspectRatio,
+            selectorWidthFraction: 0.9
+        ))
+        try expectEqual(layout.columns, 5)
+        try expectEqual(layout.rows, 3)
+        try expectEqual(layout.tileWidth, 300)
+        store.updatePanelLayout(columns: layout.columns, tileWidth: layout.tileWidth)
+
+        let host = NSHostingView(rootView: SwitcherView(store: store))
+        host.frame = CGRect(origin: .zero, size: layout.panelFrame.size)
+        host.layoutSubtreeIfNeeded()
+
+        try expectGreaterThan(host.fittingSize.width, CGFloat(0))
+        try expectGreaterThan(host.fittingSize.height, CGFloat(0))
+        try writeRenderArtifactIfRequested(host, name: "switcher-fifteen-balanced")
     }
 
     @MainActor
@@ -210,6 +340,20 @@ enum UIRenderSmokeTests {
 
         try expect(
             abs(withFooter - withoutFooter - SwitcherLayoutCalculator.permissionFooterHeight) < 0.5
+        )
+    }
+
+    @MainActor
+    static func appDelegateWiresVisibleItemCountReflow() throws {
+        let source = try productionSource("AppDelegate.swift")
+        guard let callbackStart = source.range(of: "store.onVisibleItemCountChanged") else {
+            try expect(false, "AppDelegate must connect visible item-count changes to panel sizing")
+            return
+        }
+        let callbackBlock = String(source[callbackStart.lowerBound...].prefix(220))
+        try expect(
+            callbackBlock.contains("panelController?.prepare(itemCount: itemCount)"),
+            "visible item-count changes must reflow the real panel controller"
         )
     }
 
