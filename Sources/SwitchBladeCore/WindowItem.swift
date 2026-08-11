@@ -11,8 +11,12 @@ struct WindowActionTarget: Identifiable, Equatable, Sendable {
     let isFrontmostApp: Bool
     let isMinimized: Bool
     let bundleIdentifier: String?
+    /// Process that owns the AX/WindowServer window when it differs from the
+    /// regular application process (for example a nested renderer process).
+    let windowOwnerPID: pid_t?
 
     var id: CGWindowID { windowID }
+    var windowProcessIdentifier: pid_t { windowOwnerPID ?? pid }
 }
 
 struct WindowItem: Identifiable, Equatable {
@@ -31,8 +35,13 @@ struct WindowItem: Identifiable, Equatable {
     /// rebuild the MRU ordering after an app restart (CGWindowIDs aren't
     /// stable across launches but bundle IDs are).
     let bundleIdentifier: String?
+    /// Process that owns the concrete window. `pid` remains the regular host
+    /// application so app-level ordering, activation, hide, and quit keep their
+    /// existing semantics.
+    let windowOwnerPID: pid_t?
 
     var id: CGWindowID { windowID }
+    var windowProcessIdentifier: pid_t { windowOwnerPID ?? pid }
 
     var displayTitle: String {
         isTitleRedacted || title.isEmpty ? appName : title
@@ -51,7 +60,8 @@ struct WindowItem: Identifiable, Equatable {
             bounds: bounds,
             isFrontmostApp: isFrontmostApp,
             isMinimized: isMinimized,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            windowOwnerPID: windowOwnerPID
         )
     }
 
@@ -68,7 +78,8 @@ struct WindowItem: Identifiable, Equatable {
             isTitleRedacted: isTitleRedacted,
             preview: preview,
             icon: icon,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            windowOwnerPID: windowOwnerPID
         )
     }
 
@@ -85,7 +96,8 @@ struct WindowItem: Identifiable, Equatable {
             isTitleRedacted: isTitleRedacted,
             preview: preview,
             icon: icon,
-            bundleIdentifier: bundleIdentifier
+            bundleIdentifier: bundleIdentifier,
+            windowOwnerPID: windowOwnerPID
         )
     }
 }

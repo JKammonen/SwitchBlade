@@ -6,6 +6,11 @@ enum WindowEligibilityPolicyTests {
         ("WindowEligibilityPolicy/rejectsOwnProcessUnconditionally", rejectsOwnProcess),
         ("WindowEligibilityPolicy/rejectsAccessoryAndUnfinishedApps", rejectsAccessoryAndUnfinishedApps),
         ("WindowEligibilityPolicy/allowsFinishedRegularExternalApp", allowsFinishedRegularExternalApp),
+        ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
+        ("HostedWindowApplication/rejectsUnrelatedAccessory", rejectsUnrelatedAccessory),
+        ("HostedWindowApplication/prefersDeepestNestedRegularHost", prefersDeepestNestedRegularHost),
+        ("HostedWindowSurface/filtersMirroredHelperSurface", filtersMirroredHelperSurface),
+        ("HostedWindowSurface/keepsUniqueHelperSurface", keepsUniqueHelperSurface),
         ("AXWindowEligibility/filtersUnmatchedAuxiliarySurface", filtersUnmatchedAuxiliarySurface),
         ("AXWindowEligibility/filtersDuplicateSystemDialogSurfaces", filtersDuplicateSystemDialogSurfaces),
         ("AXWindowEligibility/keepsMatchedUntitledWindow", keepsMatchedUntitledWindow),
@@ -47,6 +52,124 @@ enum WindowEligibilityPolicyTests {
             activationPolicy: .regular,
             isFinishedLaunching: true
         ))
+    }
+
+    @MainActor static func resolvesNestedAccessoryToRegularHost() throws {
+        let host = applicationDescriptor(
+            pid: 100,
+            policy: .regular,
+            bundleIdentifier: "com.example.editor",
+            path: "/Applications/Editor.app"
+        )
+        let helper = applicationDescriptor(
+            pid: 101,
+            policy: .accessory,
+            bundleIdentifier: "org.renderer.process",
+            path: "/Applications/Editor.app/Contents/Frameworks/Renderer.app"
+        )
+
+        try expectEqual(
+            HostedWindowApplicationPolicy.hostProcessIdentifier(
+                for: helper,
+                among: [host, helper],
+                currentProcessIdentifier: 999
+            ),
+            100
+        )
+    }
+
+    @MainActor static func rejectsUnrelatedAccessory() throws {
+        let host = applicationDescriptor(
+            pid: 100,
+            policy: .regular,
+            bundleIdentifier: "com.example.editor",
+            path: "/Applications/Editor.app"
+        )
+        let helper = applicationDescriptor(
+            pid: 101,
+            policy: .accessory,
+            bundleIdentifier: "org.renderer.process",
+            path: "/Applications/Unrelated Renderer.app"
+        )
+
+        try expectNil(
+            HostedWindowApplicationPolicy.hostProcessIdentifier(
+                for: helper,
+                among: [host, helper],
+                currentProcessIdentifier: 999
+            )
+        )
+    }
+
+    @MainActor static func prefersDeepestNestedRegularHost() throws {
+        let suite = applicationDescriptor(
+            pid: 100,
+            policy: .regular,
+            bundleIdentifier: "com.example.suite",
+            path: "/Applications/Suite.app"
+        )
+        let editor = applicationDescriptor(
+            pid: 101,
+            policy: .regular,
+            bundleIdentifier: "com.example.suite.editor",
+            path: "/Applications/Suite.app/Contents/Applications/Editor.app"
+        )
+        let helper = applicationDescriptor(
+            pid: 102,
+            policy: .accessory,
+            bundleIdentifier: "org.renderer.process",
+            path: "/Applications/Suite.app/Contents/Applications/Editor.app/Contents/Frameworks/Renderer.app"
+        )
+
+        try expectEqual(
+            HostedWindowApplicationPolicy.hostProcessIdentifier(
+                for: helper,
+                among: [suite, editor, helper],
+                currentProcessIdentifier: 999
+            ),
+            101
+        )
+    }
+
+    @MainActor static func filtersMirroredHelperSurface() throws {
+        let sharedBounds = CGRect(x: 100, y: 80, width: 1200, height: 800)
+        let direct = makeItem(id: 1, pid: 100, bounds: sharedBounds)
+        let mirroredHelper = makeItem(
+            id: 2,
+            pid: 100,
+            bounds: sharedBounds,
+            windowOwnerPID: 101
+        )
+
+        try expectEqual(
+            HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces([
+                direct,
+                mirroredHelper
+            ]).map(\.id),
+            [1]
+        )
+    }
+
+    @MainActor static func keepsUniqueHelperSurface() throws {
+        let direct = makeItem(
+            id: 1,
+            pid: 100,
+            bounds: CGRect(x: 100, y: 80, width: 1200, height: 800)
+        )
+        let uniqueHelper = makeItem(
+            id: 2,
+            pid: 100,
+            bounds: CGRect(x: 140, y: 120, width: 900, height: 650),
+            windowOwnerPID: 101
+        )
+
+        try expectEqual(
+            HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces([
+                direct,
+                uniqueHelper
+            ]).map(\.id),
+            [1, 2]
+        )
     }
 
     @MainActor static func filtersUnmatchedAuxiliarySurface() throws {
@@ -199,5 +322,21 @@ enum WindowEligibilityPolicyTests {
         )
 
         try expectEqual(filtered.map(\.id), [1, 2])
+    }
+
+    private static func applicationDescriptor(
+        pid: pid_t,
+        policy: NSApplication.ActivationPolicy,
+        bundleIdentifier: String,
+        path: String,
+        isFinishedLaunching: Bool = true
+    ) -> RunningApplicationDescriptor {
+        RunningApplicationDescriptor(
+            processIdentifier: pid,
+            activationPolicy: policy,
+            isFinishedLaunching: isFinishedLaunching,
+            bundleIdentifier: bundleIdentifier,
+            bundleURL: URL(fileURLWithPath: path, isDirectory: true)
+        )
     }
 }

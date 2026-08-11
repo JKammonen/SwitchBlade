@@ -75,7 +75,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool {
         log(action: "snap \(edge.rawValue)", item: item)
 
-        let appElement = appElement(for: item.pid)
+        let appElement = appElement(for: item.windowProcessIdentifier)
         guard let match = matchingWindow(
             for: appElement,
             item: item,
@@ -184,13 +184,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     /// we never accidentally log a pid without a title.
     private func log(action: String, item: WindowActionTarget) {
         Logger.activator.info(
-            "\(action, privacy: .public) pid=\(item.pid, privacy: .public) title=\(item.title, privacy: .private)"
+            "\(action, privacy: .public) pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) title=\(item.title, privacy: .private)"
         )
     }
 
     @discardableResult
     private func raiseMatchingWindow(_ item: WindowActionTarget) -> Bool {
-        let appElement = appElement(for: item.pid)
+        let appElement = appElement(for: item.windowProcessIdentifier)
         let matchStart = Date()
         guard let match = matchingWindow(
             for: appElement,
@@ -204,11 +204,12 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                     "matched": .bool(false),
                     "match_ms": .double(matchMs),
                     "pid": .int(Int(item.pid)),
+                    "window_pid": .int(Int(item.windowProcessIdentifier)),
                     "window_id": .int(Int(item.id))
                 ]
             )
             Logger.activator.notice(
-                "AX match failed pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) matchMs=\(matchMs, format: .fixed(precision: 1), privacy: .public)"
+                "AX match failed pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) matchMs=\(matchMs, format: .fixed(precision: 1), privacy: .public)"
             )
             return false
         }
@@ -245,6 +246,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 "raise_result": .int(Int(raiseResult.rawValue)),
                 "unminimize_ms": .double(unminimizeMs ?? 0),
                 "unminimize_result": .int(Int(unminimizeResult?.rawValue ?? Int32.min)),
+                "window_pid": .int(Int(item.windowProcessIdentifier)),
                 "window_id": .int(Int(item.id))
             ]
         )
@@ -351,7 +353,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     private func closeMatchingWindow(_ item: WindowActionTarget) -> Bool {
-        let appElement = appElement(for: item.pid)
+        let appElement = appElement(for: item.windowProcessIdentifier)
         guard let match = matchingWindow(
             for: appElement,
             item: item,
@@ -464,6 +466,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                     "decision_ms": .double(decisionMs),
                     "matched": .bool(true),
                     "pid": .int(Int(item.pid)),
+                    "window_pid": .int(Int(item.windowProcessIdentifier)),
                     "window_id": .int(Int(item.id)),
                     "windows_ms": .double(windowsMs)
                 ]
@@ -484,7 +487,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return count + (Self.framesAreClose(frame, item.bounds) ? 1 : 0)
         }
         Logger.activator.notice(
-            "AX no matching window pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) scanned=\(candidates.count, privacy: .public) bounded=\(candidateScanWasBounded, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public) windowsMs=\(windowsMs, format: .fixed(precision: 1), privacy: .public) candidatesMs=\(candidatesMs, format: .fixed(precision: 1), privacy: .public) decisionMs=\(decisionMs, format: .fixed(precision: 1), privacy: .public)"
+            "AX no matching window pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) scanned=\(candidates.count, privacy: .public) bounded=\(candidateScanWasBounded, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public) windowsMs=\(windowsMs, format: .fixed(precision: 1), privacy: .public) candidatesMs=\(candidatesMs, format: .fixed(precision: 1), privacy: .public) decisionMs=\(decisionMs, format: .fixed(precision: 1), privacy: .public)"
         )
         return nil
     }
@@ -500,7 +503,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     ) {
         let unminimizeRaw = unminimizeResult?.rawValue ?? Int32.min
         Logger.activator.info(
-            "AX target action=\(action, privacy: .public) pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) candidates=\(match.candidateCount, privacy: .public) chosenIndex=\(match.decision.index, privacy: .public) reason=\(match.decision.reason, privacy: .public) titleMatches=\(match.decision.titleMatchCount, privacy: .public) frameMatches=\(match.decision.frameMatchCount, privacy: .public) frameDistance=\(match.decision.frameDistanceBucket, privacy: .public) chosenMain=\(match.decision.chosenIsMain, privacy: .public) chosenFocused=\(match.decision.chosenIsFocused, privacy: .public) raiseResult=\(raiseResult.rawValue, privacy: .public) mainResult=\(mainResult.rawValue, privacy: .public) focusResult=\(focusResult.rawValue, privacy: .public) unminimizeResult=\(unminimizeRaw, privacy: .public)"
+            "AX target action=\(action, privacy: .public) pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) candidates=\(match.candidateCount, privacy: .public) chosenIndex=\(match.decision.index, privacy: .public) reason=\(match.decision.reason, privacy: .public) titleMatches=\(match.decision.titleMatchCount, privacy: .public) frameMatches=\(match.decision.frameMatchCount, privacy: .public) frameDistance=\(match.decision.frameDistanceBucket, privacy: .public) chosenMain=\(match.decision.chosenIsMain, privacy: .public) chosenFocused=\(match.decision.chosenIsFocused, privacy: .public) raiseResult=\(raiseResult.rawValue, privacy: .public) mainResult=\(mainResult.rawValue, privacy: .public) focusResult=\(focusResult.rawValue, privacy: .public) unminimizeResult=\(unminimizeRaw, privacy: .public)"
         )
     }
 

@@ -412,6 +412,100 @@ enum WindowEligibilityPolicy {
     }
 }
 
+struct RunningApplicationDescriptor: Equatable {
+    let processIdentifier: pid_t
+    let activationPolicy: NSApplication.ActivationPolicy
+    let isFinishedLaunching: Bool
+    let bundleIdentifier: String?
+    let bundleURL: URL?
+}
+
+enum HostedWindowApplicationPolicy {
+    /// Returns the regular application process that should own app-level
+    /// actions for a WindowServer surface. Accessory processes are accepted
+    /// only when their bundle lives inside a running regular app bundle. This
+    /// is deliberately bundle-name agnostic: the process topology, not an app
+    /// allowlist, establishes ownership.
+    static func hostProcessIdentifier(
+        for windowOwner: RunningApplicationDescriptor,
+        among runningApplications: [RunningApplicationDescriptor],
+        currentProcessIdentifier: pid_t
+    ) -> pid_t? {
+        if WindowEligibilityPolicy.canIncludeApplication(
+            processIdentifier: windowOwner.processIdentifier,
+            currentProcessIdentifier: currentProcessIdentifier,
+            activationPolicy: windowOwner.activationPolicy,
+            isFinishedLaunching: windowOwner.isFinishedLaunching
+        ) {
+            return windowOwner.processIdentifier
+        }
+
+        guard windowOwner.processIdentifier != currentProcessIdentifier,
+              windowOwner.activationPolicy == .accessory,
+              windowOwner.isFinishedLaunching,
+              let childBundleURL = windowOwner.bundleURL else {
+            return nil
+        }
+
+        return runningApplications
+            .filter { candidate in
+                WindowEligibilityPolicy.canIncludeApplication(
+                    processIdentifier: candidate.processIdentifier,
+                    currentProcessIdentifier: currentProcessIdentifier,
+                    activationPolicy: candidate.activationPolicy,
+                    isFinishedLaunching: candidate.isFinishedLaunching
+                ) && isNestedBundle(childBundleURL, inside: candidate.bundleURL)
+            }
+            .max { lhs, rhs in
+                (lhs.bundleURL?.standardizedFileURL.pathComponents.count ?? 0)
+                    < (rhs.bundleURL?.standardizedFileURL.pathComponents.count ?? 0)
+            }?
+            .processIdentifier
+    }
+
+    static func isNestedBundle(_ childBundleURL: URL, inside hostBundleURL: URL?) -> Bool {
+        guard let hostBundleURL else { return false }
+        let childPath = childBundleURL.standardizedFileURL.path
+        let hostContentsPath = hostBundleURL.standardizedFileURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .path
+        return childPath.hasPrefix(hostContentsPath + "/")
+    }
+}
+
+enum HostedWindowSurfacePolicy {
+    /// Some applications publish the same logical window through both their
+    /// regular process and a nested renderer/helper process. Prefer the regular
+    /// process for an exact geometric mirror; keep helper-owned surfaces whose
+    /// geometry is unique, because those are the windows the host does not own.
+    static func filteringMirroredHostedSurfaces(_ items: [WindowItem]) -> [WindowItem] {
+        let directSurfaceKeys = Set(items.compactMap { item -> SurfaceKey? in
+            guard item.windowOwnerPID == nil else { return nil }
+            return SurfaceKey(hostPID: item.pid, bounds: item.bounds)
+        })
+        return items.filter { item in
+            guard item.windowOwnerPID != nil else { return true }
+            return !directSurfaceKeys.contains(SurfaceKey(hostPID: item.pid, bounds: item.bounds))
+        }
+    }
+
+    private struct SurfaceKey: Hashable {
+        let hostPID: pid_t
+        let x: Int
+        let y: Int
+        let width: Int
+        let height: Int
+
+        init(hostPID: pid_t, bounds: CGRect) {
+            self.hostPID = hostPID
+            x = Int(bounds.origin.x.rounded())
+            y = Int(bounds.origin.y.rounded())
+            width = Int(bounds.width.rounded())
+            height = Int(bounds.height.rounded())
+        }
+    }
+}
+
 struct AXTopLevelWindowCandidate: Equatable, Sendable {
     let title: String?
     let frame: CGRect
@@ -542,6 +636,23 @@ enum IconNaming {
 }
 
 final class WindowCatalog: WindowSnapshotProviding, Sendable {
+    private struct WindowApplicationResolution {
+        let windowApplication: NSRunningApplication
+        let hostApplication: NSRunningApplication
+
+        var windowProcessIdentifier: pid_t { windowApplication.processIdentifier }
+        var hostProcessIdentifier: pid_t { hostApplication.processIdentifier }
+        var windowOwnerPID: pid_t? {
+            windowProcessIdentifier == hostProcessIdentifier ? nil : windowProcessIdentifier
+        }
+        var appName: String {
+            hostApplication.localizedName
+                ?? hostApplication.bundleIdentifier
+                ?? windowApplication.localizedName
+                ?? "Application"
+        }
+    }
+
     enum FallbackAttemptResult: @unchecked Sendable {
         case success(NSImage)
         case failed
@@ -660,8 +771,31 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        var applicationsByPID: [pid_t: NSRunningApplication?] = [:]
+        let runningApplications = NSWorkspace.shared.runningApplications
+        let runningApplicationsByPID = Dictionary(
+            uniqueKeysWithValues: runningApplications.map { ($0.processIdentifier, $0) }
+        )
+        let runningApplicationDescriptors = runningApplications.map(Self.applicationDescriptor)
+        var applicationResolutionsByPID: [pid_t: WindowApplicationResolution] = [:]
+        var rejectedApplicationPIDs = Set<pid_t>()
         var visibleWindowIDs = Set<CGWindowID>()
+
+        func applicationResolution(for ownerPID: pid_t) -> WindowApplicationResolution? {
+            if let cached = applicationResolutionsByPID[ownerPID] { return cached }
+            if rejectedApplicationPIDs.contains(ownerPID) { return nil }
+            guard let windowApplication = runningApplicationsByPID[ownerPID]
+                    ?? NSRunningApplication(processIdentifier: ownerPID),
+                  let resolution = resolveWindowApplication(
+                      windowApplication,
+                      runningApplicationsByPID: runningApplicationsByPID,
+                      runningApplicationDescriptors: runningApplicationDescriptors
+                  ) else {
+                rejectedApplicationPIDs.insert(ownerPID)
+                return nil
+            }
+            applicationResolutionsByPID[ownerPID] = resolution
+            return resolution
+        }
 
         let visibleItems = rawList.compactMap { entry -> WindowItem? in
             guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
@@ -684,11 +818,6 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
                 guard isOnScreen else { return nil }
             }
-            if windowScope == .currentApp, ownerPID != frontmostPID {
-                return nil
-            }
-            visibleWindowIDs.insert(windowID)
-
             let alpha = entry[kCGWindowAlpha as String] as? Double ?? 1
             guard alpha > 0 else {
                 return nil
@@ -701,39 +830,51 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             }
 
             let title = entry[kCGWindowName as String] as? String ?? ""
-            let application = applicationsByPID[ownerPID] ?? {
-                let application = NSRunningApplication(processIdentifier: ownerPID)
-                applicationsByPID[ownerPID] = application
-                return application
-            }()
+            guard let applicationResolution = applicationResolution(for: ownerPID) else {
+                return nil
+            }
+            if windowScope == .currentApp,
+               applicationResolution.hostProcessIdentifier != frontmostPID,
+               applicationResolution.windowProcessIdentifier != frontmostPID {
+                return nil
+            }
             let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
 
             guard shouldIncludeWindow(
-                appName: appName,
-                application: application,
+                appName: applicationResolution.appName,
+                applicationResolution: applicationResolution,
                 title: title,
                 sharingState: sharingState
             ) else {
                 return nil
             }
+            visibleWindowIDs.insert(windowID)
 
             return WindowItem(
                 windowID: windowID,
-                pid: ownerPID,
-                appName: appName,
+                pid: applicationResolution.hostProcessIdentifier,
+                appName: applicationResolution.appName,
                 title: title,
                 bounds: bounds,
-                isFrontmostApp: ownerPID == frontmostPID,
+                isFrontmostApp: applicationResolution.hostProcessIdentifier == frontmostPID
+                    || applicationResolution.windowProcessIdentifier == frontmostPID,
                 isMinimized: false,
                 canCapturePreview: sharingState != 0,
                 isTitleRedacted: false,
                 preview: nil,
-                icon: IconNaming.named(application?.icon, bundleIdentifier: application?.bundleIdentifier, appName: appName),
-                bundleIdentifier: application?.bundleIdentifier
+                icon: IconNaming.named(
+                    applicationResolution.hostApplication.icon,
+                    bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
+                    appName: applicationResolution.appName
+                ),
+                bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
+                windowOwnerPID: applicationResolution.windowOwnerPID
             )
         }
 
-        let filteredVisibleItems = filterAuxiliaryWindowSurfaces(visibleItems)
+        let filteredVisibleItems = filterAuxiliaryWindowSurfaces(
+            HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems)
+        )
         let minimized = includeMinimized
             ? minimizedItems(
                 excluding: visibleWindowIDs,
@@ -753,15 +894,15 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private func filterAuxiliaryWindowSurfaces(_ items: [WindowItem]) -> [WindowItem] {
         guard AXIsProcessTrusted(), items.count > 1 else { return items }
 
-        let itemsByPID = Dictionary(grouping: items, by: \.pid)
+        let itemsByPID = Dictionary(grouping: items, by: \.windowProcessIdentifier)
         var orderedPIDs: [pid_t] = []
         var seenPIDs = Set<pid_t>()
-        for item in items where seenPIDs.insert(item.pid).inserted {
-            guard let siblings = itemsByPID[item.pid],
+        for item in items where seenPIDs.insert(item.windowProcessIdentifier).inserted {
+            guard let siblings = itemsByPID[item.windowProcessIdentifier],
                   AXWindowEligibilityPolicy.requiresValidation(siblings) else {
                 continue
             }
-            orderedPIDs.append(item.pid)
+            orderedPIDs.append(item.windowProcessIdentifier)
         }
         guard !orderedPIDs.isEmpty else { return items }
 
@@ -792,7 +933,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
 
         let filteredItems = items.filter { item in
-            allowedWindowIDsByPID[item.pid]?.contains(item.id) ?? true
+            allowedWindowIDsByPID[item.windowProcessIdentifier]?.contains(item.id) ?? true
         }
         PerformanceDiagnostics.record(
             "window_ax_eligibility",
@@ -878,26 +1019,31 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// app's previously-front sibling can still be listed first, and
     /// `orderedForDisplay` anchors slot 0 on the first same-pid row. When the
     /// frontmost app has several visible windows, resolve its AX-focused
-    /// window and move it ahead of its siblings so slot 0 is the window that
-    /// actually has focus.
+    /// window and move it ahead of its logical app siblings so slot 0 is the
+    /// window that actually has focus. Hosted helper windows keep their helper
+    /// PID for AX while `WindowItem.pid` identifies the regular app.
     private func normalizeFrontmostWindowOrder(_ items: [WindowItem], frontmostPID: pid_t?) -> [WindowItem] {
         guard let frontmostPID else { return items }
-        let siblingCount = items.reduce(0) { $0 + ($1.pid == frontmostPID ? 1 : 0) }
+        guard let frontmostItem = items.first(where: { $0.isFrontmostApp }) else { return items }
+        let windowPID = frontmostItem.windowProcessIdentifier
+        let siblingCount = items.reduce(0) {
+            $0 + ($1.windowProcessIdentifier == windowPID ? 1 : 0)
+        }
         guard siblingCount > 1 else { return items }
 
         let axStart = Date()
-        let focusInfo = focusedAXWindowInfo(pid: frontmostPID)
+        let focusInfo = focusedAXWindowInfo(pid: windowPID)
         let axMs = Date().timeIntervalSince(axStart) * 1000
         let focused = focusInfo.flatMap {
             Self.focusedWindowMatch(
                 in: items,
-                pid: frontmostPID,
+                pid: windowPID,
                 focusedTitle: $0.title,
                 focusedFrame: $0.frame
             )
         }
         let normalized = focused.map {
-            Self.promotingWindow($0.id, in: items, beforeSiblingsOf: frontmostPID)
+            Self.promotingWindow($0.id, in: items, beforeSiblingsOf: frontmostItem.pid)
         } ?? items
         PerformanceDiagnostics.record(
             "frontmost_focus_normalize",
@@ -913,7 +1059,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return normalized
     }
 
-    /// Matches the AX-focused window info against `items` (same pid, visible
+    /// Matches the AX-focused window info against `items` (same window-owner
+    /// pid, visible
     /// only). Exact title match first; frame proximity disambiguates
     /// same-titled siblings. Returns nil when ambiguous — a wrong guess here
     /// would bake the wrong "active window" into MRU state.
@@ -923,7 +1070,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         focusedTitle: String?,
         focusedFrame: CGRect?
     ) -> WindowItem? {
-        let siblings = items.filter { $0.pid == pid && !$0.isMinimized }
+        let siblings = items.filter {
+            $0.windowProcessIdentifier == pid && !$0.isMinimized
+        }
         guard let first = siblings.first else { return nil }
         guard siblings.count > 1 else { return first }
 
@@ -963,14 +1112,23 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// from a fresh visible snapshot. Used to upgrade an identity-only
     /// activation rank to a concrete per-window rank.
     func focusedWindowItem(pid: pid_t) -> WindowItem? {
-        guard let info = focusedAXWindowInfo(pid: pid) else { return nil }
         let items = snapshotVisibleOnly()
-        return Self.focusedWindowMatch(
-            in: items,
-            pid: pid,
-            focusedTitle: info.title,
-            focusedFrame: info.frame
-        )
+        var seenWindowPIDs = Set<pid_t>()
+        for item in items where item.pid == pid {
+            let windowPID = item.windowProcessIdentifier
+            guard seenWindowPIDs.insert(windowPID).inserted,
+                  let info = focusedAXWindowInfo(pid: windowPID),
+                  let match = Self.focusedWindowMatch(
+                      in: items,
+                      pid: windowPID,
+                      focusedTitle: info.title,
+                      focusedFrame: info.frame
+                  ) else {
+                continue
+            }
+            return match
+        }
+        return nil
     }
 
     /// Reads the focused window's title and frame via AX. Bounded by the same
@@ -1317,9 +1475,42 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
     }
 
+    private static func applicationDescriptor(
+        _ application: NSRunningApplication
+    ) -> RunningApplicationDescriptor {
+        RunningApplicationDescriptor(
+            processIdentifier: application.processIdentifier,
+            activationPolicy: application.activationPolicy,
+            isFinishedLaunching: application.isFinishedLaunching,
+            bundleIdentifier: application.bundleIdentifier,
+            bundleURL: application.bundleURL
+        )
+    }
+
+    private func resolveWindowApplication(
+        _ windowApplication: NSRunningApplication,
+        runningApplicationsByPID: [pid_t: NSRunningApplication],
+        runningApplicationDescriptors: [RunningApplicationDescriptor]
+    ) -> WindowApplicationResolution? {
+        guard let hostPID = HostedWindowApplicationPolicy.hostProcessIdentifier(
+            for: Self.applicationDescriptor(windowApplication),
+            among: runningApplicationDescriptors,
+            currentProcessIdentifier: getpid()
+        ),
+              let hostApplication = hostPID == windowApplication.processIdentifier
+                ? windowApplication
+                : runningApplicationsByPID[hostPID] else {
+            return nil
+        }
+        return WindowApplicationResolution(
+            windowApplication: windowApplication,
+            hostApplication: hostApplication
+        )
+    }
+
     private func shouldIncludeWindow(
         appName: String,
-        application: NSRunningApplication?,
+        applicationResolution: WindowApplicationResolution,
         title: String,
         sharingState: Int
     ) -> Bool {
@@ -1329,29 +1520,31 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // the important exception: real meeting/chat windows can use this
         // sharing state, and switching to them is more important than showing
         // a live preview. Those tiles fall back to the app-icon treatment.
-        guard let application,
-              WindowEligibilityPolicy.canIncludeApplication(
-                  processIdentifier: application.processIdentifier,
+        let windowApplication = applicationResolution.windowApplication
+        let hostApplication = applicationResolution.hostApplication
+        guard WindowEligibilityPolicy.canIncludeApplication(
+                  processIdentifier: hostApplication.processIdentifier,
                   currentProcessIdentifier: getpid(),
-                  activationPolicy: application.activationPolicy,
-                  isFinishedLaunching: application.isFinishedLaunching
+                  activationPolicy: hostApplication.activationPolicy,
+                  isFinishedLaunching: hostApplication.isFinishedLaunching
               ) else {
             return false
         }
         guard WindowSharingPolicy.canListWindow(
             appName: appName,
-            bundleIdentifier: application.bundleIdentifier,
+            bundleIdentifier: hostApplication.bundleIdentifier,
             title: title,
             sharingState: sharingState
         ) else {
             return false
         }
-        if let bundleIdentifier = application.bundleIdentifier,
-           excludedBundleIdentifiers.contains(bundleIdentifier) {
+        if [windowApplication.bundleIdentifier, hostApplication.bundleIdentifier]
+            .compactMap({ $0 })
+            .contains(where: excludedBundleIdentifiers.contains) {
             return false
         }
 
-        if isHiddenByUser(appName: appName, bundleIdentifier: application.bundleIdentifier) {
+        if isHiddenByUser(appName: appName, bundleIdentifier: hostApplication.bundleIdentifier) {
             return false
         }
 
@@ -1391,23 +1584,39 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             startedAt: ProcessInfo.processInfo.systemUptime
         )
         var result: [WindowItem] = []
-        applicationLoop: for application in NSWorkspace.shared.runningApplications {
+        let runningApplications = NSWorkspace.shared.runningApplications
+        let runningApplicationsByPID = Dictionary(
+            uniqueKeysWithValues: runningApplications.map { ($0.processIdentifier, $0) }
+        )
+        let runningApplicationDescriptors = runningApplications.map(Self.applicationDescriptor)
+        applicationLoop: for windowApplication in runningApplications {
             // Bypass the rest of the sweep if the merge consumer already lost
             // interest (panel hidden, generation bumped). Won't unstick an
             // already-blocked AX call; only stops *new* per-app iterations.
             if cancellation.isCancelled { break }
-            guard shouldIncludeApplication(application, hiddenAppTokens: hiddenAppTokens) else { continue }
+            guard let applicationResolution = resolveWindowApplication(
+                windowApplication,
+                runningApplicationsByPID: runningApplicationsByPID,
+                runningApplicationDescriptors: runningApplicationDescriptors
+            ),
+                  shouldIncludeApplication(
+                      applicationResolution,
+                      hiddenAppTokens: hiddenAppTokens
+                  ) else {
+                continue
+            }
             if scope == .currentApp,
-               application.processIdentifier != frontmostPID {
+               applicationResolution.hostProcessIdentifier != frontmostPID,
+               applicationResolution.windowProcessIdentifier != frontmostPID {
                 continue
             }
             guard budget.beginApplication(now: ProcessInfo.processInfo.systemUptime) else { break }
 
-            let appElement = AXUIElementCreateApplication(application.processIdentifier)
+            let appElement = AXUIElementCreateApplication(applicationResolution.windowProcessIdentifier)
             _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
             guard let windows = axWindows(for: appElement) else { continue }
 
-            let appName = application.localizedName ?? application.bundleIdentifier ?? "Application"
+            let appName = applicationResolution.appName
             for (index, window) in windows.enumerated() {
                 guard !cancellation.isCancelled else { break applicationLoop }
                 guard budget.beginWindow(now: ProcessInfo.processInfo.systemUptime) else {
@@ -1419,10 +1628,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 let title = axString(kAXTitleAttribute, on: window) ?? ""
                 let titleDecision = WindowSharingPolicy.minimizedTitleDecision(
                     appName: appName,
-                    bundleIdentifier: application.bundleIdentifier,
+                    bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
                     title: title,
                     matchingSharingStates: sharingStateIndex.sharingStates(
-                        pid: application.processIdentifier,
+                        pid: applicationResolution.windowProcessIdentifier,
                         title: title
                     )
                 )
@@ -1431,23 +1640,31 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 }
 
                 let syntheticID = SyntheticWindowID.make(
-                    pid: application.processIdentifier, index: index, title: title
+                    pid: applicationResolution.windowProcessIdentifier,
+                    index: index,
+                    title: title
                 )
                 guard !visibleWindowIDs.contains(syntheticID) else { continue }
 
                 result.append(WindowItem(
                     windowID: syntheticID,
-                    pid: application.processIdentifier,
+                    pid: applicationResolution.hostProcessIdentifier,
                     appName: appName,
                     title: title,
                     bounds: axFrame(on: window) ?? CGRect(x: 0, y: 0, width: 640, height: 400),
-                    isFrontmostApp: application.processIdentifier == frontmostPID,
+                    isFrontmostApp: applicationResolution.hostProcessIdentifier == frontmostPID
+                        || applicationResolution.windowProcessIdentifier == frontmostPID,
                     isMinimized: true,
                     canCapturePreview: false,
                     isTitleRedacted: titleDecision == .redactTitle,
                     preview: nil,
-                    icon: IconNaming.named(application.icon, bundleIdentifier: application.bundleIdentifier, appName: appName),
-                    bundleIdentifier: application.bundleIdentifier
+                    icon: IconNaming.named(
+                        applicationResolution.hostApplication.icon,
+                        bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
+                        appName: appName
+                    ),
+                    bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
+                    windowOwnerPID: applicationResolution.windowOwnerPID
                 ))
             }
         }
@@ -1456,28 +1673,31 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "Minimized AX scan stopped at budget apps=\(budget.scannedApplications, privacy: .public) windows=\(budget.scannedWindows, privacy: .public)"
             )
         }
-        return result
+        return HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
     }
 
     private func shouldIncludeApplication(
-        _ application: NSRunningApplication,
+        _ applicationResolution: WindowApplicationResolution,
         hiddenAppTokens: Set<HiddenAppToken>
     ) -> Bool {
+        let windowApplication = applicationResolution.windowApplication
+        let hostApplication = applicationResolution.hostApplication
         guard WindowEligibilityPolicy.canIncludeApplication(
-            processIdentifier: application.processIdentifier,
+            processIdentifier: hostApplication.processIdentifier,
             currentProcessIdentifier: getpid(),
-            activationPolicy: application.activationPolicy,
-            isFinishedLaunching: application.isFinishedLaunching
+            activationPolicy: hostApplication.activationPolicy,
+            isFinishedLaunching: hostApplication.isFinishedLaunching
         ) else { return false }
 
-        if let bundleIdentifier = application.bundleIdentifier,
-           excludedBundleIdentifiers.contains(bundleIdentifier) {
+        if [windowApplication.bundleIdentifier, hostApplication.bundleIdentifier]
+            .compactMap({ $0 })
+            .contains(where: excludedBundleIdentifiers.contains) {
             return false
         }
 
         if isHiddenByUser(
-            appName: application.localizedName ?? application.bundleIdentifier ?? "",
-            bundleIdentifier: application.bundleIdentifier,
+            appName: applicationResolution.appName,
+            bundleIdentifier: hostApplication.bundleIdentifier,
             tokens: hiddenAppTokens
         ) {
             return false

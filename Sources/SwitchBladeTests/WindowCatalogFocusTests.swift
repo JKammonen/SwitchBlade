@@ -10,6 +10,7 @@ enum WindowCatalogFocusTests {
         ("CatalogFocus/focusedWindowMatch_frameDisambiguatesDuplicateTitles", frameDisambiguates),
         ("CatalogFocus/focusedWindowMatch_ambiguousDuplicatesReturnNil", ambiguousReturnsNil),
         ("CatalogFocus/focusedWindowMatch_singleSiblingReturnsIt", singleSiblingReturnsIt),
+        ("CatalogFocus/focusedWindowMatch_usesHostedWindowOwnerPID", hostedWindowUsesOwnerPID),
         ("CatalogFocus/promotingWindow_movesFocusedBeforeSiblings", promotingMovesFocused),
         ("CatalogFocus/promotingWindow_noopWhenAlreadyLeading", promotingNoop)
     ]
@@ -65,6 +66,21 @@ enum WindowCatalogFocusTests {
             in: items, pid: 100, focusedTitle: "Stale Title", focusedFrame: nil
         )
         try expectEqual(match?.id, 1)
+    }
+
+    @MainActor static func hostedWindowUsesOwnerPID() throws {
+        let items = [
+            makeItem(id: 1, pid: 100, title: "Steam", windowOwnerPID: 200),
+            makeItem(id: 2, pid: 100, title: "Friends", windowOwnerPID: 200)
+        ]
+        let match = WindowCatalog.focusedWindowMatch(
+            in: items,
+            pid: 200,
+            focusedTitle: "Friends",
+            focusedFrame: nil
+        )
+
+        try expectEqual(match?.id, 2)
     }
 
     @MainActor static func promotingMovesFocused() throws {

@@ -17,7 +17,8 @@ func makeItem(
     canCapturePreview: Bool = true,
     isTitleRedacted: Bool = false,
     bounds: CGRect = CGRect(x: 0, y: 0, width: 800, height: 600),
-    bundleIdentifier: String? = nil
+    bundleIdentifier: String? = nil,
+    windowOwnerPID: pid_t? = nil
 ) -> WindowItem {
     WindowItem(
         windowID: id,
@@ -31,7 +32,8 @@ func makeItem(
         isTitleRedacted: isTitleRedacted,
         preview: nil,
         icon: nil,
-        bundleIdentifier: bundleIdentifier
+        bundleIdentifier: bundleIdentifier,
+        windowOwnerPID: windowOwnerPID
     )
 }
 

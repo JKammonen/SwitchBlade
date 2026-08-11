@@ -21,6 +21,7 @@ enum WindowActivatorTests {
         ("WindowActivator/bestScreen_windowOffAllScreens_picksNearestByCenter", bestScreenWindowOffAllScreensPicksNearestByCenter),
         ("WindowActivator/activate_frontmostWindow_skipsAppActivation", activateFrontmostWindowSkipsAppActivation),
         ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
+        ("WindowActivator/activate_hostedWindow_targetsOwnerAndActivatesHost", activateHostedWindowTargetsOwnerAndActivatesHost),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
         ("WindowActivator/activate_backgroundWindow_requiresRaiseAndAppActivation", activateBackgroundWindowRequiresBothSteps),
         ("WindowActivator/activationConfirmation_waitsForObservedActiveState", activationConfirmationWaitsForObservedState),
@@ -307,6 +308,34 @@ enum WindowActivatorTests {
         try expect(succeeded)
         try expectEqual(raisedItems, [3])
         try expectEqual(activatedPIDs, [200])
+    }
+
+    static func activateHostedWindowTargetsOwnerAndActivatesHost() throws {
+        var targetedWindowPIDs: [pid_t] = []
+        var activatedPIDs: [pid_t] = []
+        let activator = WindowActivator(
+            raiseWindowOverride: { item in
+                targetedWindowPIDs.append(item.windowProcessIdentifier)
+                return true
+            },
+            activateApplicationOverride: { pid in
+                activatedPIDs.append(pid)
+                return true
+            }
+        )
+
+        let item = makeItem(
+            id: 3,
+            pid: 36581,
+            appName: "Steam",
+            title: "Steam",
+            windowOwnerPID: 36706
+        )
+        let succeeded = activator.activate(item.actionTarget)
+
+        try expect(succeeded)
+        try expectEqual(targetedWindowPIDs, [36706])
+        try expectEqual(activatedPIDs, [36581])
     }
 
     static func activateApplicationCallsAppActivation() throws {

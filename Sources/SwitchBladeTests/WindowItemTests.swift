@@ -14,6 +14,7 @@ enum WindowItemTests {
         ("WindowItem/withPreview_setsPreview_keepsOtherFields", withPreview_setsPreview),
         ("WindowItem/withPreview_canClearPreview", withPreview_canClear),
         ("WindowItem/withFrontmostState_updatesOnlyFrontmostFlag", withFrontmostState_updatesOnlyFlag),
+        ("WindowItem/hostedWindow_preservesWindowOwnerPID", hostedWindowPreservesWindowOwnerPID),
         ("WindowItem/equatable_sameContents_areEqual", equatable_sameContents)
     ]
 
@@ -86,6 +87,17 @@ enum WindowItemTests {
         try expectEqual(updated.canCapturePreview, item.canCapturePreview)
         try expectEqual(updated.isTitleRedacted, item.isTitleRedacted)
         try expectEqual(updated.bundleIdentifier, item.bundleIdentifier)
+    }
+
+    @MainActor static func hostedWindowPreservesWindowOwnerPID() throws {
+        let item = makeItem(id: 1, pid: 100, windowOwnerPID: 200)
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+
+        try expectEqual(item.windowProcessIdentifier, 200)
+        try expectEqual(item.actionTarget.pid, 100)
+        try expectEqual(item.actionTarget.windowProcessIdentifier, 200)
+        try expectEqual(item.withPreview(preview).windowOwnerPID, 200)
+        try expectEqual(item.withFrontmostState(true).windowOwnerPID, 200)
     }
 
     @MainActor static func equatable_sameContents() throws {
