@@ -65,9 +65,12 @@ enum SwitcherLayoutCalculator {
         let tileH = tileW / tileAspectRatio
 
         let contentGridWidth = CGFloat(columns) * tileW + CGFloat(columns - 1) * gap
-        // Small result sets keep their compact panel. Dense result sets use the
-        // selected selector width and center fixed-width tiles inside it.
-        let gridWidth = itemCount > maxColumns * 2 ? maxGridWidth : contentGridWidth
+        // The selector setting is a maximum width. Keep dense, max-column grids
+        // stable across tile-width thresholds, but when balancing deliberately
+        // removes columns, shrink the panel around the resulting grid instead of
+        // leaving large empty margins on both sides.
+        let fillsSelectorWidth = itemCount > maxColumns * 2 && columns == maxColumns
+        let gridWidth = fillsSelectorWidth ? maxGridWidth : contentGridWidth
         let gridH = CGFloat(rows) * tileH + CGFloat(rows - 1) * gap + gridPadY * 2
         let verticalChrome = cardMarginY * 2 + verticalSafety
         let maxCardHeight = max(1, min(frame.height * 0.80, frame.height - verticalChrome))

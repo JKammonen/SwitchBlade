@@ -17,7 +17,7 @@ enum SwitcherLayoutCalculatorTests {
         ("Layout/extremeTileWidths_stayInsideVisibleFrame", extremeTileWidths),
         ("Layout/malformedNumericInputs_stayFiniteAndContained", malformedNumericInputs),
         ("Layout/previewWidth_doesNotJumpAtColumnThreshold", previewWidthDoesNotJumpAtColumnThreshold),
-        ("Layout/selectorWidth_controlsDensePanelWidth", selectorWidthControlsDensePanelWidth),
+        ("Layout/selectorWidth_capsDensePanelAndAllowsBalancedCompaction", selectorWidthCapsDensePanelAndAllowsBalancedCompaction),
         ("Layout/permissionFooter_reservesExactHeightAndStaysContained", permissionFooterReservesHeight)
     ]
 
@@ -59,6 +59,7 @@ enum SwitcherLayoutCalculatorTests {
         try expectEqual(r.columns, 5)
         try expectEqual(r.rows, 3)
         try expectEqual(r.tileWidth, 300)
+        try expectEqual(r.panelFrame.width, balancedFiveColumnPanelWidth(tileWidth: 300))
     }
 
     static func fifteenItems_balancedDense() throws {
@@ -72,6 +73,7 @@ enum SwitcherLayoutCalculatorTests {
         try expectEqual(r.columns, 5)
         try expectEqual(r.rows, 3)
         try expectEqual(r.tileWidth, 300)
+        try expectEqual(r.panelFrame.width, balancedFiveColumnPanelWidth(tileWidth: 300))
     }
 
     static func panelCentered() throws {
@@ -173,7 +175,7 @@ enum SwitcherLayoutCalculatorTests {
         try expect(abs(at260.panelFrame.width - at250.panelFrame.width) < 0.5)
     }
 
-    static func selectorWidthControlsDensePanelWidth() throws {
+    static func selectorWidthCapsDensePanelAndAllowsBalancedCompaction() throws {
         let narrow = SwitcherLayoutCalculator.calculate(.init(
             visibleFrame: screen,
             tileMinWidth: tileW,
@@ -190,7 +192,9 @@ enum SwitcherLayoutCalculatorTests {
         ))
 
         try expect(abs(narrow.panelFrame.width - screen.width * 0.6) < 0.5)
-        try expect(abs(wide.panelFrame.width - screen.width * 0.8) < 0.5)
+        try expectEqual(wide.panelFrame.width, balancedFiveColumnPanelWidth(tileWidth: tileW))
+        try expectLessThan(wide.panelFrame.width, screen.width * 0.8)
+        try expectGreaterThan(wide.panelFrame.width, narrow.panelFrame.width)
         try expect(abs(narrow.tileWidth - wide.tileWidth) < 0.5)
     }
 
@@ -231,5 +235,12 @@ enum SwitcherLayoutCalculatorTests {
             file: file,
             line: line
         )
+    }
+
+    private static func balancedFiveColumnPanelWidth(tileWidth: CGFloat) -> CGFloat {
+        5 * tileWidth
+            + 4 * SwitcherLayoutCalculator.gap
+            + 2 * SwitcherLayoutCalculator.gridPadX
+            + 2 * SwitcherLayoutCalculator.cardMarginX
     }
 }
