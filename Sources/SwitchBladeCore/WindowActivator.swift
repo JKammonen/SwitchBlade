@@ -232,6 +232,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let focusStart = Date()
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let focusMs = Date().timeIntervalSince(focusStart) * 1000
+        let targeted = Self.activationTargetingSucceeded(
+            raiseResult: raiseResult,
+            mainResult: mainResult,
+            focusResult: focusResult
+        )
         PerformanceDiagnostics.record(
             "activation_ax_target",
             fields: [
@@ -244,6 +249,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 "pid": .int(Int(item.pid)),
                 "raise_ms": .double(raiseMs),
                 "raise_result": .int(Int(raiseResult.rawValue)),
+                "targeted": .bool(targeted),
                 "unminimize_ms": .double(unminimizeMs ?? 0),
                 "unminimize_result": .int(Int(unminimizeResult?.rawValue ?? Int32.min)),
                 "window_pid": .int(Int(item.windowProcessIdentifier)),
@@ -259,7 +265,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             focusResult: focusResult,
             unminimizeResult: unminimizeResult
         )
-        return raiseResult == .success && mainResult == .success && focusResult == .success
+        return targeted
     }
 
     @discardableResult
@@ -317,6 +323,19 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             isComplete: isActive,
             wait: wait
         )
+    }
+
+    static func activationTargetingSucceeded(
+        raiseResult: AXError,
+        mainResult: AXError,
+        focusResult: AXError
+    ) -> Bool {
+        // Some valid application windows report AXRaise as attributeUnsupported.
+        // If both selection attributes accepted the target, that unavailable
+        // raise is a no-op rather than a failed selection. Other AX errors stay
+        // fail-closed.
+        let raiseAccepted = raiseResult == .success || raiseResult == .attributeUnsupported
+        return raiseAccepted && mainResult == .success && focusResult == .success
     }
 
     static func confirmRequest(

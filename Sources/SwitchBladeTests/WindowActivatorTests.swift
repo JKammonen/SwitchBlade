@@ -24,6 +24,8 @@ enum WindowActivatorTests {
         ("WindowActivator/activate_hostedWindow_targetsOwnerAndActivatesHost", activateHostedWindowTargetsOwnerAndActivatesHost),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
         ("WindowActivator/activate_backgroundWindow_requiresRaiseAndAppActivation", activateBackgroundWindowRequiresBothSteps),
+        ("WindowActivator/activationTargeting_acceptsAttributeUnsupportedRaiseAfterMainAndFocus", activationTargetingAcceptsAttributeUnsupportedRaiseAfterMainAndFocus),
+        ("WindowActivator/activationTargeting_keepsOtherAXFailuresClosed", activationTargetingKeepsOtherAXFailuresClosed),
         ("WindowActivator/activationConfirmation_waitsForObservedActiveState", activationConfirmationWaitsForObservedState),
         ("WindowActivator/activationConfirmation_rejectsUnconfirmedRequest", activationConfirmationRejectsUnconfirmedRequest),
         ("WindowActivator/shouldActivateApplication_falseForFrontmostAppWindow", shouldSkipActivationForFrontmostAppWindow),
@@ -364,6 +366,40 @@ enum WindowActivatorTests {
         )
 
         try expect(!succeeded)
+    }
+
+    static func activationTargetingAcceptsAttributeUnsupportedRaiseAfterMainAndFocus() throws {
+        try expect(
+            WindowActivator.activationTargetingSucceeded(
+                raiseResult: .attributeUnsupported,
+                mainResult: .success,
+                focusResult: .success
+            )
+        )
+    }
+
+    static func activationTargetingKeepsOtherAXFailuresClosed() throws {
+        try expect(
+            !WindowActivator.activationTargetingSucceeded(
+                raiseResult: .cannotComplete,
+                mainResult: .success,
+                focusResult: .success
+            )
+        )
+        try expect(
+            !WindowActivator.activationTargetingSucceeded(
+                raiseResult: .attributeUnsupported,
+                mainResult: .failure,
+                focusResult: .success
+            )
+        )
+        try expect(
+            !WindowActivator.activationTargetingSucceeded(
+                raiseResult: .attributeUnsupported,
+                mainResult: .success,
+                focusResult: .failure
+            )
+        )
     }
 
     static func activationConfirmationWaitsForObservedState() throws {
