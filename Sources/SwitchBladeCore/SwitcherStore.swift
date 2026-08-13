@@ -376,6 +376,10 @@ final class SwitcherStore: ObservableObject {
     /// macOS does not disable the tap while SwitchBlade enumerates windows.
     func requestCycle(forward: Bool) {
         Logger.switcher.notice("requestCycle: enter isVisible=\(self.isVisible, privacy: .public) isSwitching=\(self.isSwitching, privacy: .public)")
+        guard windowActionTask == nil else {
+            Logger.switcher.info("Cmd+Tab ignored while a committed window action is in flight")
+            return
+        }
         if isVisible {
             cycle(forward: forward)
             return
@@ -795,7 +799,12 @@ final class SwitcherStore: ObservableObject {
                 Logger.switcher.info(
                     "Commit selection from prepared hidden open item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
                 )
-                performSelectionAction(for: item, actionName: "activate", updateCachedSelectionState: true) { activator, selectedItem in
+                performSelectionAction(
+                    for: item,
+                    actionName: "activate",
+                    updateCachedSelectionState: true,
+                    dismissVisiblePanelImmediately: true
+                ) { activator, selectedItem in
                     activator.activate(selectedItem)
                 }
                 return
@@ -814,7 +823,12 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.info(
             "Commit selection item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) isVisible=\(self.isVisible, privacy: .public) isSwitching=\(self.isSwitching, privacy: .public)"
         )
-        performSelectionAction(for: item, actionName: "activate", updateCachedSelectionState: true) { activator, selectedItem in
+        performSelectionAction(
+            for: item,
+            actionName: "activate",
+            updateCachedSelectionState: true,
+            dismissVisiblePanelImmediately: true
+        ) { activator, selectedItem in
             activator.activate(selectedItem)
         }
     }
@@ -1074,6 +1088,7 @@ final class SwitcherStore: ObservableObject {
         actionName: String,
         source: String? = nil,
         updateCachedSelectionState: Bool = false,
+        dismissVisiblePanelImmediately: Bool = false,
         action: @escaping @Sendable (WindowActivating, WindowActionTarget) -> Bool
     ) -> Bool {
         let actionStart = Date()
@@ -1081,10 +1096,11 @@ final class SwitcherStore: ObservableObject {
         let actionSource = source ?? currentOpenSource ?? "unknown"
         let activator = self.activator
         let target = item.actionTarget
+        let dismissBeforeCompletion = dismissVisiblePanelImmediately && isVisible
         Logger.switcher.info(
             "Begin selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
-        return startWindowAction(
+        let started = startWindowAction(
             operation: { action(activator, target) },
             completion: { [weak self] didPerformAction in
                 self?.completeSelectionAction(
@@ -1094,10 +1110,15 @@ final class SwitcherStore: ObservableObject {
                     actionName: actionName,
                     actionSource: actionSource,
                     updateCachedSelectionState: updateCachedSelectionState,
+                    dismissedBeforeCompletion: dismissBeforeCompletion,
                     actionStart: actionStart
                 )
             }
         )
+        if started, dismissBeforeCompletion {
+            hide(cancelWindowAction: false, scheduleWarmups: false)
+        }
+        return started
     }
 
     @discardableResult
@@ -1134,6 +1155,7 @@ final class SwitcherStore: ObservableObject {
         actionName: String,
         actionSource: String,
         updateCachedSelectionState: Bool,
+        dismissedBeforeCompletion: Bool,
         actionStart: Date
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
@@ -1151,7 +1173,11 @@ final class SwitcherStore: ObservableObject {
                     "window_id": .int(Int(item.id))
                 ]
             )
-            if !isVisible {
+            if dismissedBeforeCompletion {
+                applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
+                enterPreviewHidden(stale: false)
+                showPreparedPanelIfNeeded()
+            } else if !isVisible {
                 if case .resolving = phase {
                     applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
                     enterPreviewHidden(stale: false)
@@ -1174,7 +1200,11 @@ final class SwitcherStore: ObservableObject {
         }
         let cacheSyncMs = Date().timeIntervalSince(cacheSyncStart) * 1000
         let scheduledAt = Date()
-        hide()
+        if dismissedBeforeCompletion {
+            schedulePostHideWarmups()
+        } else {
+            hide()
+        }
         let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
         let preHideMs = scheduledAt.timeIntervalSince(actionStart) * 1000
         let totalPrepareMs = Date().timeIntervalSince(actionStart) * 1000
@@ -1343,11 +1373,16 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func hide() {
-        windowActionGeneration &+= 1
-        windowActionTask?.cancel()
-        windowActionTask = nil
-        windowActionID = nil
+    private func hide(
+        cancelWindowAction: Bool = true,
+        scheduleWarmups: Bool = true
+    ) {
+        if cancelWindowAction {
+            windowActionGeneration &+= 1
+            windowActionTask?.cancel()
+            windowActionTask = nil
+            windowActionID = nil
+        }
         previewGeneration += 1
         previewLoadTask?.cancel()
         previewLoadTask = nil
@@ -1364,6 +1399,12 @@ final class SwitcherStore: ObservableObject {
         activeOpenRequestedAt = nil
         currentOpenSource = nil
         onHide?()
+        if scheduleWarmups {
+            schedulePostHideWarmups()
+        }
+    }
+
+    private func schedulePostHideWarmups() {
         scheduleContentCacheWarmup(delayNanoseconds: 250_000_000)
         scheduleOpenItemsCacheWarmup(context: "after hide", delayNanoseconds: 250_000_000)
     }

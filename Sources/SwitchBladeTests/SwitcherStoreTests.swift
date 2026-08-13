@@ -94,8 +94,9 @@ enum SwitcherStoreTests {
         ("Store/snap_failure_keepsPanelVisible", snap_failureKeepsPanelVisible),
         // commit / cancel
         ("Store/commitSelection_activatesAndHides", commit_activates),
-        ("Store/commitSelection_runsActivationOffMainBeforeHiding", commit_runsActivationOffMainBeforeHiding),
-        ("Store/commitSelection_activationFailure_keepsPanelVisible", commit_activationFailureKeepsPanelVisible),
+        ("Store/commitSelection_hidesBeforeDelayedActivationCompletes", commit_hidesBeforeDelayedActivationCompletes),
+        ("Store/commitSelection_reopenDuringActivationIsIgnored", commit_reopenDuringActivationIsIgnored),
+        ("Store/commitSelection_activationFailure_reopensPanel", commit_activationFailureReopensPanel),
         ("Store/commitSelection_withNoSelection_hides", commit_noSelection),
         ("Store/cancel_hidesWithoutActivating", cancel_hides),
         // close
@@ -2101,7 +2102,7 @@ enum SwitcherStoreTests {
         try expectEqual(activator.activatedItems.map(\.id), [1])
     }
 
-    @MainActor static func commit_runsActivationOffMainBeforeHiding() async throws {
+    @MainActor static func commit_hidesBeforeDelayedActivationCompletes() async throws {
         let (store, catalog, activator, _) = makeStore()
         activator.actionDelayNanoseconds = 100_000_000
         catalog.visibleItems = [
@@ -2113,13 +2114,13 @@ enum SwitcherStoreTests {
 
         store.commitSelection()
 
-        // The AX worker is delayed, but MainActor remains free and the panel
-        // stays visible until the confirmed result returns.
+        // The AX worker is delayed, but the committed switcher surface must not
+        // linger while macOS finishes activation confirmation off-main.
         var mainActorProgressed = false
         Task { @MainActor in mainActorProgressed = true }
         await Task.yield()
         try expect(mainActorProgressed)
-        try expect(store.isVisible)
+        try expect(!store.isVisible)
         try expect(activator.activatedItems.isEmpty)
 
         try? await Task.sleep(nanoseconds: 120_000_000)
@@ -2128,9 +2129,9 @@ enum SwitcherStoreTests {
         try expect(!store.isVisible)
     }
 
-    @MainActor static func commit_activationFailureKeepsPanelVisible() async throws {
+    @MainActor static func commit_reopenDuringActivationIsIgnored() async throws {
         let (store, catalog, activator, _) = makeStore()
-        activator.activationSucceeds = false
+        activator.actionDelayNanoseconds = 100_000_000
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
@@ -2139,6 +2140,36 @@ enum SwitcherStoreTests {
         store.selectedID = 2
 
         store.commitSelection()
+        store.requestCycle(forward: true)
+        await Task.yield()
+
+        try expect(!store.isVisible)
+        try expectEqual(catalog.visibleSnapshotCount, 1)
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        await runPendingMainTasks()
+        try expectEqual(activator.activatedItems.map(\.id), [2])
+        try expect(!store.isVisible)
+    }
+
+    @MainActor static func commit_activationFailureReopensPanel() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        activator.activationSucceeds = false
+        activator.actionDelayNanoseconds = 100_000_000
+        catalog.visibleItems = [
+            makeItem(id: 1, isFrontmostApp: true),
+            makeItem(id: 2)
+        ]
+        await openSwitcher(store)
+        store.selectedID = 2
+
+        store.commitSelection()
+        await Task.yield()
+
+        try expect(!store.isVisible)
+        try expect(activator.activatedItems.isEmpty)
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
         await runPendingMainTasks()
 
         try expectEqual(activator.activatedItems.map(\.id), [2])
