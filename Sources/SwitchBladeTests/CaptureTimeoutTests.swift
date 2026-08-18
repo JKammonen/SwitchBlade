@@ -17,7 +17,12 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/externalActivation_upgradesToFocusedWindowRank", activation_externalActivationUpgradesToFocusedWindowRank),
         ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
-        ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation)
+        ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation),
+        ("CaptureStability/stableVisibleWindowIsAccepted", captureStability_stableVisibleWindowIsAccepted),
+        ("CaptureStability/visibilityTransitionIsRejected", captureStability_visibilityTransitionIsRejected),
+        ("CaptureStability/boundsTransitionIsRejected", captureStability_boundsTransitionIsRejected),
+        ("CaptureStability/privacyOrIdentityTransitionIsRejected", captureStability_privacyOrIdentityTransitionIsRejected),
+        ("CaptureStability/currentSpaceRejectsStableOffscreenWindow", captureStability_currentSpaceRejectsStableOffscreenWindow)
     ]
 
     /// We can't invoke captureWithSoftTimeout against a real SCWindow from
@@ -307,5 +312,107 @@ enum CaptureTimeoutTests {
 
         try expectEqual(catalog.invalidateContentCacheCallCount, 1)
         try expectEqual(catalog.lastInvalidationReason, "test display change")
+    }
+
+    static func captureStability_stableVisibleWindowIsAccepted() async throws {
+        let state = captureState()
+        let accepted = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: state],
+            after: [1: state],
+            scope: .currentSpace
+        )
+
+        try expectEqual(accepted, Set([CGWindowID(1)]))
+    }
+
+    static func captureStability_visibilityTransitionIsRejected() async throws {
+        let visible = captureState(isOnScreen: true)
+        let offscreen = captureState(isOnScreen: false)
+
+        let minimizing = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: visible],
+            after: [1: offscreen],
+            scope: .currentSpace
+        )
+        let restoring = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: offscreen],
+            after: [1: visible],
+            scope: .currentSpace
+        )
+
+        try expect(minimizing.isEmpty, "minimization transition frame must be rejected")
+        try expect(restoring.isEmpty, "restore transition frame must be rejected")
+    }
+
+    static func captureStability_boundsTransitionIsRejected() async throws {
+        let before = captureState(bounds: CGRect(x: 100, y: 100, width: 1200, height: 800))
+        let after = captureState(bounds: CGRect(x: 140, y: 120, width: 1160, height: 760))
+        let accepted = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: before],
+            after: [1: after],
+            scope: .currentSpace
+        )
+
+        try expect(accepted.isEmpty, "a moving or resizing window must not replace a stable preview")
+    }
+
+    static func captureStability_privacyOrIdentityTransitionIsRejected() async throws {
+        let before = captureState(ownerPID: 42, sharingState: 1)
+        let privateAfter = captureState(ownerPID: 42, sharingState: 0)
+        let reusedIDAfter = captureState(ownerPID: 84, sharingState: 1)
+
+        let privateCapture = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: before],
+            after: [1: privateAfter],
+            scope: .currentSpace
+        )
+        let reusedIDCapture = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: before],
+            after: [1: reusedIDAfter],
+            scope: .currentSpace
+        )
+
+        try expect(privateCapture.isEmpty, "a newly-private window must reject the captured frame")
+        try expect(reusedIDCapture.isEmpty, "a reused window id must reject the captured frame")
+    }
+
+    static func captureStability_currentSpaceRejectsStableOffscreenWindow() async throws {
+        let offscreen = captureState(isOnScreen: false)
+        let currentSpace = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: offscreen],
+            after: [1: offscreen],
+            scope: .currentSpace
+        )
+        let allSpaces = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: offscreen],
+            after: [1: offscreen],
+            scope: .allSpaces
+        )
+
+        try expect(currentSpace.isEmpty)
+        try expectEqual(allSpaces, Set([CGWindowID(1)]))
+    }
+
+    private static func captureState(
+        ownerPID: pid_t = 42,
+        bounds: CGRect = CGRect(x: 100, y: 100, width: 1200, height: 800),
+        isOnScreen: Bool = true,
+        sharingState: Int = 1
+    ) -> PreviewCaptureWindowState {
+        PreviewCaptureWindowState(
+            ownerPID: ownerPID,
+            bounds: bounds,
+            isOnScreen: isOnScreen,
+            sharingState: sharingState,
+            alpha: 1
+        )
     }
 }

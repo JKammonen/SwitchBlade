@@ -351,6 +351,55 @@ private struct WindowCaptureOutcome {
     let fallbackAttempt: WindowCatalog.FallbackAttemptResult?
 }
 
+struct PreviewCaptureWindowState: Equatable {
+    let ownerPID: pid_t
+    let bounds: CGRect
+    let isOnScreen: Bool
+    let sharingState: Int
+    let alpha: Double
+}
+
+enum PreviewCaptureStabilityPolicy {
+    private static let boundsTolerance: CGFloat = 1
+
+    static func acceptedWindowIDs(
+        capturedWindowIDs: Set<CGWindowID>,
+        before: [CGWindowID: PreviewCaptureWindowState],
+        after: [CGWindowID: PreviewCaptureWindowState],
+        scope: SBWindowScope
+    ) -> Set<CGWindowID> {
+        Set(capturedWindowIDs.filter { windowID in
+            guard let beforeState = before[windowID],
+                  let afterState = after[windowID],
+                  beforeState.ownerPID == afterState.ownerPID,
+                  beforeState.sharingState != 0,
+                  afterState.sharingState != 0,
+                  beforeState.alpha > 0,
+                  afterState.alpha > 0,
+                  beforeState.isOnScreen == afterState.isOnScreen,
+                  stableBounds(beforeState.bounds, afterState.bounds) else {
+                return false
+            }
+
+            // A current-Space snapshot can only legitimately capture windows
+            // that stay on-screen. A false value here means the window started
+            // minimizing before capture began or completed the transition while
+            // SCScreenshotManager was producing the frame.
+            if scope == .currentSpace, !beforeState.isOnScreen {
+                return false
+            }
+            return true
+        })
+    }
+
+    private static func stableBounds(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= boundsTolerance
+            && abs(lhs.minY - rhs.minY) <= boundsTolerance
+            && abs(lhs.width - rhs.width) <= boundsTolerance
+            && abs(lhs.height - rhs.height) <= boundsTolerance
+    }
+}
+
 enum WindowSharingPolicy {
     enum MinimizedTitleDecision: Equatable {
         case showTitle
@@ -418,6 +467,50 @@ struct RunningApplicationDescriptor: Equatable {
     let isFinishedLaunching: Bool
     let bundleIdentifier: String?
     let bundleURL: URL?
+}
+
+struct RunningApplicationSnapshot {
+    let applications: [NSRunningApplication]
+    let applicationsByProcessIdentifier: [pid_t: NSRunningApplication]
+    let discardedInvalidProcessIdentifiers: Int
+    let coalescedDuplicateProcessIdentifiers: Int
+
+    static func coalescing(_ applications: [NSRunningApplication]) -> RunningApplicationSnapshot {
+        var orderedApplications: [NSRunningApplication] = []
+        var orderedIndexByProcessIdentifier: [pid_t: Int] = [:]
+        var applicationsByProcessIdentifier: [pid_t: NSRunningApplication] = [:]
+        var discardedInvalidProcessIdentifiers = 0
+        var coalescedDuplicateProcessIdentifiers = 0
+
+        for application in applications {
+            let processIdentifier = application.processIdentifier
+            guard processIdentifier > 0 else {
+                discardedInvalidProcessIdentifiers += 1
+                continue
+            }
+
+            if let existingIndex = orderedIndexByProcessIdentifier[processIdentifier] {
+                coalescedDuplicateProcessIdentifiers += 1
+                let existingApplication = orderedApplications[existingIndex]
+                if existingApplication.isTerminated && !application.isTerminated {
+                    orderedApplications[existingIndex] = application
+                    applicationsByProcessIdentifier[processIdentifier] = application
+                }
+                continue
+            }
+
+            orderedIndexByProcessIdentifier[processIdentifier] = orderedApplications.count
+            orderedApplications.append(application)
+            applicationsByProcessIdentifier[processIdentifier] = application
+        }
+
+        return RunningApplicationSnapshot(
+            applications: orderedApplications,
+            applicationsByProcessIdentifier: applicationsByProcessIdentifier,
+            discardedInvalidProcessIdentifiers: discardedInvalidProcessIdentifiers,
+            coalescedDuplicateProcessIdentifiers: coalescedDuplicateProcessIdentifiers
+        )
+    }
 }
 
 enum HostedWindowApplicationPolicy {
@@ -682,6 +775,46 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         capturePermitPool = Self.processCapturePermitPool
     }
 
+    private static func captureWindowStates(
+        for windowIDs: Set<CGWindowID>
+    ) -> [CGWindowID: PreviewCaptureWindowState] {
+        guard !windowIDs.isEmpty else { return [:] }
+        // CGWindowListCreateDescriptionFromArray returns an empty list on
+        // current macOS even for valid visible IDs. Use the same public window
+        // list surface as enumeration and filter it down to this small batch.
+        guard let rawList = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return [:]
+        }
+
+        var states: [CGWindowID: PreviewCaptureWindowState] = [:]
+        states.reserveCapacity(windowIDs.count)
+        for entry in rawList {
+            guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
+                  windowIDs.contains(windowID),
+                  let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+                  let layer = entry[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+                  let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool,
+                  let sharingState = entry[kCGWindowSharingState as String] as? Int,
+                  let alpha = entry[kCGWindowAlpha as String] as? Double else {
+                continue
+            }
+            states[windowID] = PreviewCaptureWindowState(
+                ownerPID: ownerPID,
+                bounds: bounds,
+                isOnScreen: isOnScreen,
+                sharingState: sharingState,
+                alpha: alpha
+            )
+        }
+        return states
+    }
+
     /// Re-warms the cache after a capture session so the next Cmd+Tab is fast.
     func refreshContentCache() async {
         await contentCache.refreshIfAllowed()
@@ -771,10 +904,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let runningApplications = NSWorkspace.shared.runningApplications
-        let runningApplicationsByPID = Dictionary(
-            uniqueKeysWithValues: runningApplications.map { ($0.processIdentifier, $0) }
-        )
+        let runningApplicationSnapshot = Self.runningApplicationSnapshot()
+        let runningApplications = runningApplicationSnapshot.applications
+        let runningApplicationsByPID = runningApplicationSnapshot.applicationsByProcessIdentifier
         let runningApplicationDescriptors = runningApplications.map(Self.applicationDescriptor)
         var applicationResolutionsByPID: [pid_t: WindowApplicationResolution] = [:]
         var rejectedApplicationPIDs = Set<pid_t>()
@@ -1183,6 +1315,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let captureTimeoutMs = 300
         let fallbackTimeoutMs = 300
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
+        let requestedIDSet = Set(requestedIDs)
+        let captureScope = WindowFilterState.scope
+        let captureStatesBefore = Self.captureWindowStates(for: requestedIDSet)
         let captureTargets = requestedIDs.compactMap { windowID -> (CGWindowID, SCWindow)? in
             guard let window = windowsByID[windowID] else { return nil }
             return (windowID, window)
@@ -1445,6 +1580,21 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     }
                 }
             }
+            let captureStatesAfter = Self.captureWindowStates(for: Set(result.keys))
+            let acceptedWindowIDs = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+                capturedWindowIDs: Set(result.keys),
+                before: captureStatesBefore,
+                after: captureStatesAfter,
+                scope: captureScope
+            )
+            let transitionRejected = result.count - acceptedWindowIDs.count
+            if transitionRejected > 0 {
+                result = result.filter { acceptedWindowIDs.contains($0.key) }
+                Logger.capture.notice(
+                    "Rejected \(transitionRejected, privacy: .public) preview frame(s) captured during a window transition"
+                )
+            }
+
             let ms = Date().timeIntervalSince(captureStart) * 1000
             PerformanceDiagnostics.record(
                 "capture_previews",
@@ -1463,7 +1613,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     "fallback_timeouts": .int(fallbackTimeouts),
                     "second_failures": .int(secondAttemptFailures),
                     "second_resource_limited": .int(secondAttemptResourceLimits),
-                    "second_timeouts": .int(secondAttemptTimeouts)
+                    "second_timeouts": .int(secondAttemptTimeouts),
+                    "stability_after": .int(captureStatesAfter.count),
+                    "stability_before": .int(captureStatesBefore.count),
+                    "transition_rejected": .int(transitionRejected)
                 ]
             )
             if PerformanceLoggingState.mode == .debug {
@@ -1485,6 +1638,18 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             bundleIdentifier: application.bundleIdentifier,
             bundleURL: application.bundleURL
         )
+    }
+
+    private static func runningApplicationSnapshot() -> RunningApplicationSnapshot {
+        let snapshot = RunningApplicationSnapshot.coalescing(NSWorkspace.shared.runningApplications)
+        let irregularCount = snapshot.discardedInvalidProcessIdentifiers
+            + snapshot.coalescedDuplicateProcessIdentifiers
+        if irregularCount > 0 {
+            Logger.switcher.notice(
+                "Coalesced running application snapshot: invalidPIDs=\(snapshot.discardedInvalidProcessIdentifiers, privacy: .public), duplicatePIDs=\(snapshot.coalescedDuplicateProcessIdentifiers, privacy: .public)"
+            )
+        }
+        return snapshot
     }
 
     private func resolveWindowApplication(
@@ -1584,10 +1749,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             startedAt: ProcessInfo.processInfo.systemUptime
         )
         var result: [WindowItem] = []
-        let runningApplications = NSWorkspace.shared.runningApplications
-        let runningApplicationsByPID = Dictionary(
-            uniqueKeysWithValues: runningApplications.map { ($0.processIdentifier, $0) }
-        )
+        let runningApplicationSnapshot = Self.runningApplicationSnapshot()
+        let runningApplications = runningApplicationSnapshot.applications
+        let runningApplicationsByPID = runningApplicationSnapshot.applicationsByProcessIdentifier
         let runningApplicationDescriptors = runningApplications.map(Self.applicationDescriptor)
         applicationLoop: for windowApplication in runningApplications {
             // Bypass the rest of the sweep if the merge consumer already lost

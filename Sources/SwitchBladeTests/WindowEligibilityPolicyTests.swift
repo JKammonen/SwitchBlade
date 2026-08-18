@@ -6,6 +6,7 @@ enum WindowEligibilityPolicyTests {
         ("WindowEligibilityPolicy/rejectsOwnProcessUnconditionally", rejectsOwnProcess),
         ("WindowEligibilityPolicy/rejectsAccessoryAndUnfinishedApps", rejectsAccessoryAndUnfinishedApps),
         ("WindowEligibilityPolicy/allowsFinishedRegularExternalApp", allowsFinishedRegularExternalApp),
+        ("RunningApplicationSnapshot/coalescesDuplicateProcessIdentifiers", coalescesDuplicateProcessIdentifiers),
         ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
         ("HostedWindowApplication/rejectsUnrelatedAccessory", rejectsUnrelatedAccessory),
         ("HostedWindowApplication/prefersDeepestNestedRegularHost", prefersDeepestNestedRegularHost),
@@ -52,6 +53,29 @@ enum WindowEligibilityPolicyTests {
             activationPolicy: .regular,
             isFinishedLaunching: true
         ))
+    }
+
+    @MainActor static func coalescesDuplicateProcessIdentifiers() throws {
+        guard let runningApplication = NSWorkspace.shared.runningApplications.first(where: {
+            $0.processIdentifier > 0
+        }) else {
+            try expect(false, "expected at least one running application with a valid process identifier")
+            return
+        }
+
+        let snapshot = RunningApplicationSnapshot.coalescing([
+            runningApplication,
+            runningApplication
+        ])
+
+        try expectEqual(snapshot.applications.count, 1)
+        try expectEqual(snapshot.applicationsByProcessIdentifier.count, 1)
+        try expectEqual(snapshot.discardedInvalidProcessIdentifiers, 0)
+        try expectEqual(snapshot.coalescedDuplicateProcessIdentifiers, 1)
+        try expect(
+            snapshot.applicationsByProcessIdentifier[runningApplication.processIdentifier]
+                === runningApplication
+        )
     }
 
     @MainActor static func resolvesNestedAccessoryToRegularHost() throws {
