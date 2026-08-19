@@ -469,6 +469,13 @@ enum ApplicationFallbackPolicy {
         frontmostPID: pid_t?,
         scope: SBWindowScope
     ) -> [pid_t] {
+        // Window-scoped switchers must contain concrete window rows. App-only
+        // placeholders create full-size tiles that can never have a preview and
+        // also pull applications from outside the selected Space into the grid.
+        // Keep the fallback only for current-app mode, where it prevents an
+        // otherwise empty selector when the frontmost app has no eligible row.
+        guard scope == .currentApp, let frontmostPID else { return [] }
+
         var seen = Set<pid_t>()
         return applications.compactMap { application in
             let pid = application.processIdentifier
@@ -479,7 +486,7 @@ enum ApplicationFallbackPolicy {
                       activationPolicy: application.activationPolicy,
                       isFinishedLaunching: application.isFinishedLaunching
                   ),
-                  scope != .currentApp || pid == frontmostPID,
+                  pid == frontmostPID,
                   seen.insert(pid).inserted else {
                 return nil
             }
@@ -701,10 +708,20 @@ struct WindowSharingStateIndex {
         let sharingState: Int
     }
 
-    private let matchesByKey: [Key: [Match]]
+    private struct FramedMatch {
+        let match: Match
+        let bounds: CGRect
+    }
 
-    private init(matchesByKey: [Key: [Match]]) {
+    private let matchesByKey: [Key: [Match]]
+    private let framedMatchesByPID: [pid_t: [FramedMatch]]
+
+    private init(
+        matchesByKey: [Key: [Match]],
+        framedMatchesByPID: [pid_t: [FramedMatch]]
+    ) {
         self.matchesByKey = matchesByKey
+        self.framedMatchesByPID = framedMatchesByPID
     }
 
     static func fromCurrentWindowList() -> Self {
@@ -712,13 +729,14 @@ struct WindowSharingStateIndex {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
-            return WindowSharingStateIndex(matchesByKey: [:])
+            return WindowSharingStateIndex(matchesByKey: [:], framedMatchesByPID: [:])
         }
         return WindowSharingStateIndex(rawList: rawList)
     }
 
     init(rawList: [[String: Any]]) {
         var matchesByKey: [Key: [Match]] = [:]
+        var framedMatchesByPID: [pid_t: [FramedMatch]] = [:]
         for entry in rawList {
             guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
                   let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
@@ -726,15 +744,23 @@ struct WindowSharingStateIndex {
                   layer == 0 else {
                 continue
             }
+            let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
+            let match = Match(windowID: windowID, sharingState: sharingState)
+            if let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary,
+               let bounds = CGRect(dictionaryRepresentation: boundsDictionary) {
+                framedMatchesByPID[ownerPID, default: []].append(
+                    FramedMatch(match: match, bounds: bounds)
+                )
+            }
             let title = (entry[kCGWindowName as String] as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { continue }
-            let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
             matchesByKey[Key(pid: ownerPID, title: title), default: []].append(
-                Match(windowID: windowID, sharingState: sharingState)
+                match
             )
         }
         self.matchesByKey = matchesByKey
+        self.framedMatchesByPID = framedMatchesByPID
     }
 
     func sharingStates(pid: pid_t, title: String) -> [Int]? {
@@ -755,6 +781,24 @@ struct WindowSharingStateIndex {
             return nil
         }
         return matches[0]
+    }
+
+    /// AX and WindowServer titles can differ for the same document window.
+    /// A full-frame match within the same process is a safe fallback only when
+    /// exactly one layer-0 row matches; ambiguity keeps the synthetic identity.
+    func uniqueWindow(pid: pid_t, bounds: CGRect) -> Match? {
+        let matches = framedMatchesByPID[pid, default: []].filter {
+            Self.framesAreClose($0.bounds, bounds)
+        }
+        return matches.count == 1 ? matches[0].match : nil
+    }
+
+    private static func framesAreClose(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        let tolerance: CGFloat = 2
+        return abs(lhs.minX - rhs.minX) <= tolerance
+            && abs(lhs.minY - rhs.minY) <= tolerance
+            && abs(lhs.width - rhs.width) <= tolerance
+            && abs(lhs.height - rhs.height) <= tolerance
     }
 }
 
@@ -1887,6 +1931,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             startedAt: ProcessInfo.processInfo.systemUptime
         )
         var result: [WindowItem] = []
+        var exactTitleMatchCount = 0
+        var frameMatchCount = 0
         let runningApplicationSnapshot = Self.runningApplicationSnapshot()
         let runningApplications = runningApplicationSnapshot.applications
         let runningApplicationsByPID = runningApplicationSnapshot.applicationsByProcessIdentifier
@@ -1928,25 +1974,39 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 guard axBool(kAXMinimizedAttribute, on: window) == true else { continue }
 
                 let title = axString(kAXTitleAttribute, on: window) ?? ""
+                let frame = axFrame(on: window)
+                let exactTitleMatch = sharingStateIndex.uniqueWindow(
+                    pid: applicationResolution.windowProcessIdentifier,
+                    title: title
+                )
+                let frameMatch = exactTitleMatch == nil
+                    ? frame.flatMap {
+                        sharingStateIndex.uniqueWindow(
+                            pid: applicationResolution.windowProcessIdentifier,
+                            bounds: $0
+                        )
+                    }
+                    : nil
+                let matchedWindow = exactTitleMatch ?? frameMatch
+                if exactTitleMatch != nil {
+                    exactTitleMatchCount += 1
+                } else if frameMatch != nil {
+                    frameMatchCount += 1
+                }
                 let titleDecision = WindowSharingPolicy.minimizedTitleDecision(
                     appName: appName,
                     bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
                     title: title,
-                    matchingSharingStates: sharingStateIndex.sharingStates(
-                        pid: applicationResolution.windowProcessIdentifier,
-                        title: title
-                    )
+                    matchingSharingStates: matchedWindow.map { [$0.sharingState] }
+                        ?? sharingStateIndex.sharingStates(
+                            pid: applicationResolution.windowProcessIdentifier,
+                            title: title
+                        )
                 )
                 if titleDecision == .exclude {
                     continue
                 }
 
-                let matchedWindow = titleDecision == .showTitle
-                    ? sharingStateIndex.uniqueWindow(
-                        pid: applicationResolution.windowProcessIdentifier,
-                        title: title
-                    )
-                    : nil
                 let windowID = matchedWindow?.windowID ?? SyntheticWindowID.make(
                     pid: applicationResolution.windowProcessIdentifier,
                     index: index,
@@ -1959,7 +2019,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     pid: applicationResolution.hostProcessIdentifier,
                     appName: appName,
                     title: title,
-                    bounds: axFrame(on: window) ?? CGRect(x: 0, y: 0, width: 640, height: 400),
+                    bounds: frame ?? CGRect(x: 0, y: 0, width: 640, height: 400),
                     isFrontmostApp: applicationResolution.hostProcessIdentifier == frontmostPID
                         || applicationResolution.windowProcessIdentifier == frontmostPID,
                     isMinimized: true,
@@ -1981,7 +2041,18 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "Minimized AX scan stopped at budget apps=\(budget.scannedApplications, privacy: .public) windows=\(budget.scannedWindows, privacy: .public)"
             )
         }
-        return HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
+        let filteredResult = HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
+        PerformanceDiagnostics.record(
+            "minimized_window_snapshot",
+            fields: [
+                "count": .int(filteredResult.count),
+                "frame_matches": .int(frameMatchCount),
+                "redacted_titles": .int(filteredResult.filter(\.isTitleRedacted).count),
+                "synthetic_ids": .int(filteredResult.filter { SyntheticWindowID.isSynthetic($0.id) }.count),
+                "title_matches": .int(exactTitleMatchCount)
+            ]
+        )
+        return filteredResult
     }
 
     private func shouldIncludeApplication(

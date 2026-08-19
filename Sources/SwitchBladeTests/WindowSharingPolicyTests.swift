@@ -14,7 +14,9 @@ enum WindowSharingPolicyTests {
         ("WindowSharingPolicy/minimizedPrivateTeamsMatchShowsTitle", minimizedPrivateTeamsMatchShowsTitle),
         ("WindowSharingPolicy/minimizedTeamsSharingIndicatorIsExcluded", minimizedTeamsSharingIndicatorIsExcluded),
         ("WindowSharingStateIndex/uniqueExactTitleReturnsWindowServerID", uniqueExactTitleReturnsWindowServerID),
-        ("WindowSharingStateIndex/duplicateExactTitleDoesNotGuessID", duplicateExactTitleDoesNotGuessID)
+        ("WindowSharingStateIndex/duplicateExactTitleDoesNotGuessID", duplicateExactTitleDoesNotGuessID),
+        ("WindowSharingStateIndex/uniqueFrameReturnsWindowServerIDWhenTitlesDiffer", uniqueFrameReturnsWindowServerIDWhenTitlesDiffer),
+        ("WindowSharingStateIndex/duplicateFrameDoesNotGuessID", duplicateFrameDoesNotGuessID)
     ]
 
     @MainActor static func listsShareableWindows() async throws {
@@ -153,18 +155,71 @@ enum WindowSharingPolicyTests {
         try expectNil(index.uniqueWindow(pid: 100, title: "Document"))
     }
 
+    @MainActor static func uniqueFrameReturnsWindowServerIDWhenTitlesDiffer() async throws {
+        let documentFrame = CGRect(x: 289, y: 44, width: 923, height: 1366)
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(
+                windowID: 4561,
+                pid: 67035,
+                title: "WindowServer document title",
+                sharingState: 1,
+                bounds: documentFrame
+            ),
+            sharingRow(
+                windowID: 99,
+                pid: 67035,
+                title: "Other",
+                sharingState: 1,
+                bounds: CGRect(x: 33, y: 63, width: 923, height: 1366)
+            )
+        ])
+
+        try expectNil(index.uniqueWindow(pid: 67035, title: "AX document title"))
+        try expectEqual(
+            index.uniqueWindow(pid: 67035, bounds: documentFrame),
+            WindowSharingStateIndex.Match(windowID: 4561, sharingState: 1)
+        )
+    }
+
+    @MainActor static func duplicateFrameDoesNotGuessID() async throws {
+        let duplicateFrame = CGRect(x: 289, y: 44, width: 923, height: 1366)
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(
+                windowID: 1,
+                pid: 100,
+                title: "Document A",
+                sharingState: 1,
+                bounds: duplicateFrame
+            ),
+            sharingRow(
+                windowID: 2,
+                pid: 100,
+                title: "Document B",
+                sharingState: 1,
+                bounds: duplicateFrame
+            )
+        ])
+
+        try expectNil(index.uniqueWindow(pid: 100, bounds: duplicateFrame))
+    }
+
     private static func sharingRow(
         windowID: CGWindowID,
         pid: pid_t,
         title: String,
-        sharingState: Int
+        sharingState: Int,
+        bounds: CGRect? = nil
     ) -> [String: Any] {
-        [
+        var row: [String: Any] = [
             kCGWindowNumber as String: windowID,
             kCGWindowOwnerPID as String: pid,
             kCGWindowLayer as String: 0,
             kCGWindowName as String: title,
             kCGWindowSharingState as String: sharingState
         ]
+        if let bounds {
+            row[kCGWindowBounds as String] = bounds.dictionaryRepresentation
+        }
+        return row
     }
 }

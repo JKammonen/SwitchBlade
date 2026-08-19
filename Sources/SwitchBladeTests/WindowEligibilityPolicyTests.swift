@@ -6,7 +6,7 @@ enum WindowEligibilityPolicyTests {
         ("WindowEligibilityPolicy/rejectsOwnProcessUnconditionally", rejectsOwnProcess),
         ("WindowEligibilityPolicy/rejectsAccessoryAndUnfinishedApps", rejectsAccessoryAndUnfinishedApps),
         ("WindowEligibilityPolicy/allowsFinishedRegularExternalApp", allowsFinishedRegularExternalApp),
-        ("ApplicationFallback/includesOnlyUnrepresentedRegularApps", fallbackIncludesOnlyUnrepresentedRegularApps),
+        ("ApplicationFallback/windowScopesExcludeAppOnlyRows", fallbackWindowScopesExcludeAppOnlyRows),
         ("ApplicationFallback/currentAppIncludesOnlyFrontmostApp", fallbackCurrentAppIncludesOnlyFrontmostApp),
         ("RunningApplicationSnapshot/coalescesDuplicateProcessIdentifiers", coalescesDuplicateProcessIdentifiers),
         ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
@@ -57,7 +57,7 @@ enum WindowEligibilityPolicyTests {
         ))
     }
 
-    @MainActor static func fallbackIncludesOnlyUnrepresentedRegularApps() throws {
+    @MainActor static func fallbackWindowScopesExcludeAppOnlyRows() throws {
         let represented = applicationDescriptor(
             pid: 100,
             policy: .regular,
@@ -84,16 +84,19 @@ enum WindowEligibilityPolicyTests {
             isFinishedLaunching: false
         )
 
-        try expectEqual(
-            ApplicationFallbackPolicy.processIdentifiers(
-                from: [represented, appOnly, accessory, unfinished],
-                representedApplicationPIDs: [100],
-                currentProcessIdentifier: 999,
-                frontmostPID: 100,
-                scope: .currentSpace
-            ),
-            [200]
-        )
+        for scope in [SBWindowScope.currentSpace, .allSpaces] {
+            try expectEqual(
+                ApplicationFallbackPolicy.processIdentifiers(
+                    from: [represented, appOnly, accessory, unfinished],
+                    representedApplicationPIDs: [100],
+                    currentProcessIdentifier: 999,
+                    frontmostPID: 100,
+                    scope: scope
+                ),
+                [],
+                "window scopes should contain windows, not app-only placeholder rows"
+            )
+        }
     }
 
     @MainActor static func fallbackCurrentAppIncludesOnlyFrontmostApp() throws {
