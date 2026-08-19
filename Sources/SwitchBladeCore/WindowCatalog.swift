@@ -362,11 +362,22 @@ struct PreviewCaptureWindowState: Equatable {
 enum PreviewCaptureStabilityPolicy {
     private static let boundsTolerance: CGFloat = 1
 
+    static func onScreenState(
+        rawValue: Any?,
+        allowMissingAsOffscreen: Bool
+    ) -> Bool? {
+        if let value = rawValue as? Bool {
+            return value
+        }
+        return allowMissingAsOffscreen ? false : nil
+    }
+
     static func acceptedWindowIDs(
         capturedWindowIDs: Set<CGWindowID>,
         before: [CGWindowID: PreviewCaptureWindowState],
         after: [CGWindowID: PreviewCaptureWindowState],
-        scope: SBWindowScope
+        scope: SBWindowScope,
+        allowedOffscreenWindowIDs: Set<CGWindowID> = []
     ) -> Set<CGWindowID> {
         Set(capturedWindowIDs.filter { windowID in
             guard let beforeState = before[windowID],
@@ -385,7 +396,9 @@ enum PreviewCaptureStabilityPolicy {
             // that stay on-screen. A false value here means the window started
             // minimizing before capture began or completed the transition while
             // SCScreenshotManager was producing the frame.
-            if scope == .currentSpace, !beforeState.isOnScreen {
+            if scope == .currentSpace,
+               !beforeState.isOnScreen,
+               !allowedOffscreenWindowIDs.contains(windowID) {
                 return false
             }
             return true
@@ -438,6 +451,13 @@ enum WindowSharingPolicy {
                 sharingState: $0
             )
         } ? .showTitle : .exclude
+    }
+
+    static func canCaptureMinimizedPreview(
+        matchedSharingState: Int?,
+        titleDecision: MinimizedTitleDecision
+    ) -> Bool {
+        titleDecision == .showTitle && matchedSharingState.map { $0 != 0 } == true
     }
 
     private static func isMicrosoftTeams(appName: String, bundleIdentifier: String?) -> Bool {
@@ -869,7 +889,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     }
 
     private static func captureWindowStates(
-        for windowIDs: Set<CGWindowID>
+        for windowIDs: Set<CGWindowID>,
+        allowedMissingOnScreenWindowIDs: Set<CGWindowID> = []
     ) -> [CGWindowID: PreviewCaptureWindowState] {
         guard !windowIDs.isEmpty else { return [:] }
         // CGWindowListCreateDescriptionFromArray returns an empty list on
@@ -892,7 +913,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                   layer == 0,
                   let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
-                  let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool,
+                  let isOnScreen = PreviewCaptureStabilityPolicy.onScreenState(
+                      rawValue: entry[kCGWindowIsOnscreen as String],
+                      allowMissingAsOffscreen: allowedMissingOnScreenWindowIDs.contains(windowID)
+                  ),
                   let sharingState = entry[kCGWindowSharingState as String] as? Int,
                   let alpha = entry[kCGWindowAlpha as String] as? Double else {
                 continue
@@ -1403,7 +1427,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     func capturePreviews(
         for windowIDs: [CGWindowID],
         maxCount: Int?,
-        maxConcurrentCaptures: Int
+        maxConcurrentCaptures: Int,
+        allowedOffscreenWindowIDs: Set<CGWindowID>
     ) async -> [CGWindowID: NSImage] {
         guard !Task.isCancelled else { return [:] }
         // Single preflight syscall instead of currentState() which does three.
@@ -1412,6 +1437,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "capture_previews",
                 fields: [
                     "captured": .int(0),
+                    "allowed_offscreen": .int(allowedOffscreenWindowIDs.count),
                     "max_concurrent": .int(maxConcurrentCaptures),
                     "requested": .int(maxCount.map { min(windowIDs.count, $0) } ?? windowIDs.count),
                     "screen_recording": .bool(false)
@@ -1435,8 +1461,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let fallbackTimeoutMs = 300
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
         let requestedIDSet = Set(requestedIDs)
+        let requestedOffscreenWindowIDs = allowedOffscreenWindowIDs.intersection(requestedIDSet)
         let captureScope = WindowFilterState.scope
-        let captureStatesBefore = Self.captureWindowStates(for: requestedIDSet)
+        let captureStatesBefore = Self.captureWindowStates(
+            for: requestedIDSet,
+            allowedMissingOnScreenWindowIDs: requestedOffscreenWindowIDs
+        )
         let captureTargets = requestedIDs.compactMap { windowID -> (CGWindowID, SCWindow)? in
             guard let window = windowsByID[windowID] else { return nil }
             return (windowID, window)
@@ -1699,12 +1729,16 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     }
                 }
             }
-            let captureStatesAfter = Self.captureWindowStates(for: Set(result.keys))
+            let captureStatesAfter = Self.captureWindowStates(
+                for: Set(result.keys),
+                allowedMissingOnScreenWindowIDs: requestedOffscreenWindowIDs
+            )
             let acceptedWindowIDs = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
                 capturedWindowIDs: Set(result.keys),
                 before: captureStatesBefore,
                 after: captureStatesAfter,
-                scope: captureScope
+                scope: captureScope,
+                allowedOffscreenWindowIDs: requestedOffscreenWindowIDs
             )
             let transitionRejected = result.count - acceptedWindowIDs.count
             if transitionRejected > 0 {
@@ -1719,6 +1753,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "capture_previews",
                 fields: [
                     "captured": .int(result.count),
+                    "allowed_offscreen": .int(requestedOffscreenWindowIDs.count),
                     "first_failures": .int(firstAttemptFailures),
                     "first_resource_limited": .int(firstAttemptResourceLimits),
                     "first_timeouts": .int(firstAttemptTimeouts),
@@ -2006,6 +2041,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 if titleDecision == .exclude {
                     continue
                 }
+                let canCapturePreview = WindowSharingPolicy.canCaptureMinimizedPreview(
+                    matchedSharingState: matchedWindow?.sharingState,
+                    titleDecision: titleDecision
+                )
 
                 let windowID = matchedWindow?.windowID ?? SyntheticWindowID.make(
                     pid: applicationResolution.windowProcessIdentifier,
@@ -2023,7 +2062,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     isFrontmostApp: applicationResolution.hostProcessIdentifier == frontmostPID
                         || applicationResolution.windowProcessIdentifier == frontmostPID,
                     isMinimized: true,
-                    canCapturePreview: false,
+                    canCapturePreview: canCapturePreview,
                     isTitleRedacted: titleDecision == .redactTitle,
                     preview: nil,
                     icon: IconNaming.named(
@@ -2046,6 +2085,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             "minimized_window_snapshot",
             fields: [
                 "count": .int(filteredResult.count),
+                "capturable": .int(filteredResult.filter(\.canCapturePreview).count),
                 "frame_matches": .int(frameMatchCount),
                 "redacted_titles": .int(filteredResult.filter(\.isTitleRedacted).count),
                 "synthetic_ids": .int(filteredResult.filter { SyntheticWindowID.isSynthetic($0.id) }.count),

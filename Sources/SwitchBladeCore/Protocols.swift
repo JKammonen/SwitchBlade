@@ -30,7 +30,10 @@ protocol WindowSnapshotProviding: Sendable {
     func capturePreviews(
         for windowIDs: [CGWindowID],
         maxCount: Int?,
-        maxConcurrentCaptures: Int
+        maxConcurrentCaptures: Int,
+        /// Exact WindowServer IDs that may remain off-screen before and after
+        /// capture. Used only for already-verified minimized windows.
+        allowedOffscreenWindowIDs: Set<CGWindowID>
     ) async -> [CGWindowID: NSImage]
     func refreshContentCache() async
     /// Cheaper variant — no-op when the cache is still fresh. Use for

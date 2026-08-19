@@ -22,7 +22,9 @@ enum CaptureTimeoutTests {
         ("CaptureStability/visibilityTransitionIsRejected", captureStability_visibilityTransitionIsRejected),
         ("CaptureStability/boundsTransitionIsRejected", captureStability_boundsTransitionIsRejected),
         ("CaptureStability/privacyOrIdentityTransitionIsRejected", captureStability_privacyOrIdentityTransitionIsRejected),
-        ("CaptureStability/currentSpaceRejectsStableOffscreenWindow", captureStability_currentSpaceRejectsStableOffscreenWindow)
+        ("CaptureStability/currentSpaceRejectsStableOffscreenWindow", captureStability_currentSpaceRejectsStableOffscreenWindow),
+        ("CaptureStability/explicitOffscreenAllowanceIsExact", captureStability_explicitOffscreenAllowanceIsExact),
+        ("CaptureStability/missingOnScreenStateRequiresExplicitAllowance", captureStability_missingOnScreenStateRequiresExplicitAllowance)
     ]
 
     /// We can't invoke captureWithSoftTimeout against a real SCWindow from
@@ -399,6 +401,52 @@ enum CaptureTimeoutTests {
 
         try expect(currentSpace.isEmpty)
         try expectEqual(allSpaces, Set([CGWindowID(1)]))
+    }
+
+    static func captureStability_explicitOffscreenAllowanceIsExact() async throws {
+        let offscreen = captureState(isOnScreen: false)
+        let accepted = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1, 2],
+            before: [1: offscreen, 2: offscreen],
+            after: [1: offscreen, 2: offscreen],
+            scope: .currentSpace,
+            allowedOffscreenWindowIDs: [1]
+        )
+        let moved = captureState(
+            bounds: CGRect(x: 120, y: 100, width: 1200, height: 800),
+            isOnScreen: false
+        )
+        let unstable = PreviewCaptureStabilityPolicy.acceptedWindowIDs(
+            capturedWindowIDs: [1],
+            before: [1: offscreen],
+            after: [1: moved],
+            scope: .currentSpace,
+            allowedOffscreenWindowIDs: [1]
+        )
+
+        try expectEqual(accepted, Set([CGWindowID(1)]))
+        try expect(unstable.isEmpty, "offscreen allowance must not bypass transition checks")
+    }
+
+    static func captureStability_missingOnScreenStateRequiresExplicitAllowance() async throws {
+        try expectNil(PreviewCaptureStabilityPolicy.onScreenState(
+            rawValue: nil,
+            allowMissingAsOffscreen: false
+        ))
+        try expectEqual(
+            PreviewCaptureStabilityPolicy.onScreenState(
+                rawValue: nil,
+                allowMissingAsOffscreen: true
+            ),
+            false
+        )
+        try expectEqual(
+            PreviewCaptureStabilityPolicy.onScreenState(
+                rawValue: true,
+                allowMissingAsOffscreen: false
+            ),
+            true
+        )
     }
 
     private static func captureState(

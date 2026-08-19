@@ -13,6 +13,7 @@ enum WindowSharingPolicyTests {
         ("WindowSharingPolicy/minimizedPrivateNonTeamsMatchIsExcluded", minimizedPrivateNonTeamsMatchIsExcluded),
         ("WindowSharingPolicy/minimizedPrivateTeamsMatchShowsTitle", minimizedPrivateTeamsMatchShowsTitle),
         ("WindowSharingPolicy/minimizedTeamsSharingIndicatorIsExcluded", minimizedTeamsSharingIndicatorIsExcluded),
+        ("WindowSharingPolicy/minimizedPreviewRequiresShareableExactMatch", minimizedPreviewRequiresShareableExactMatch),
         ("WindowSharingStateIndex/uniqueExactTitleReturnsWindowServerID", uniqueExactTitleReturnsWindowServerID),
         ("WindowSharingStateIndex/duplicateExactTitleDoesNotGuessID", duplicateExactTitleDoesNotGuessID),
         ("WindowSharingStateIndex/uniqueFrameReturnsWindowServerIDWhenTitlesDiffer", uniqueFrameReturnsWindowServerIDWhenTitlesDiffer),
@@ -131,6 +132,25 @@ enum WindowSharingPolicyTests {
             ),
             .exclude
         )
+    }
+
+    @MainActor static func minimizedPreviewRequiresShareableExactMatch() async throws {
+        try expect(WindowSharingPolicy.canCaptureMinimizedPreview(
+            matchedSharingState: 1,
+            titleDecision: .showTitle
+        ))
+        try expect(!WindowSharingPolicy.canCaptureMinimizedPreview(
+            matchedSharingState: nil,
+            titleDecision: .showTitle
+        ))
+        try expect(!WindowSharingPolicy.canCaptureMinimizedPreview(
+            matchedSharingState: 0,
+            titleDecision: .showTitle
+        ))
+        try expect(!WindowSharingPolicy.canCaptureMinimizedPreview(
+            matchedSharingState: 1,
+            titleDecision: .redactTitle
+        ))
     }
 
     @MainActor static func uniqueExactTitleReturnsWindowServerID() async throws {

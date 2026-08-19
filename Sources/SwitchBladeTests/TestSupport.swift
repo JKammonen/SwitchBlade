@@ -54,6 +54,7 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     private var _captureCallCount = 0
     private var _lastCaptureWindowIDs: [CGWindowID] = []
     private var _captureWindowIDCalls: [[CGWindowID]] = []
+    private var _allowedOffscreenWindowIDCalls: [Set<CGWindowID>] = []
     private var _refreshCallCount = 0
 
     private func withLock<T>(_ body: () -> T) -> T {
@@ -69,6 +70,7 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     var captureCallCount: Int { withLock { _captureCallCount } }
     var lastCaptureWindowIDs: [CGWindowID] { withLock { _lastCaptureWindowIDs } }
     var captureWindowIDCalls: [[CGWindowID]] { withLock { _captureWindowIDCalls } }
+    var allowedOffscreenWindowIDCalls: [Set<CGWindowID>] { withLock { _allowedOffscreenWindowIDCalls } }
     var refreshCallCount: Int { withLock { _refreshCallCount } }
 
     func snapshotVisibleOnly() -> [WindowItem] {
@@ -103,13 +105,15 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     func capturePreviews(
         for windowIDs: [CGWindowID],
         maxCount: Int?,
-        maxConcurrentCaptures: Int
+        maxConcurrentCaptures: Int,
+        allowedOffscreenWindowIDs: Set<CGWindowID>
     ) async -> [CGWindowID: NSImage] {
         let requestedIDs = maxCount.map { Array(windowIDs.prefix($0)) } ?? windowIDs
         withLock {
             _captureCallCount += 1
             _lastCaptureWindowIDs = requestedIDs
             _captureWindowIDCalls.append(requestedIDs)
+            _allowedOffscreenWindowIDCalls.append(allowedOffscreenWindowIDs.intersection(requestedIDs))
         }
         let requestedSet = Set(requestedIDs)
         return previewsToReturn.filter { requestedSet.contains($0.key) }

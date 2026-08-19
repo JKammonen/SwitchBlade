@@ -331,7 +331,8 @@ final class SwitcherStore: ObservableObject {
         let previews = await catalog.capturePreviews(
             for: initialWindowIDs,
             maxCount: nil,
-            maxConcurrentCaptures: min(4, initialWindowIDs.count)
+            maxConcurrentCaptures: min(4, initialWindowIDs.count),
+            allowedOffscreenWindowIDs: []
         )
         guard !Task.isCancelled,
               settingsGeneration == generation,
@@ -2188,7 +2189,8 @@ final class SwitcherStore: ObservableObject {
                 let batchPreviews = await catalog.capturePreviews(
                     for: firstBatchWindowIDs,
                     maxCount: nil,
-                    maxConcurrentCaptures: min(4, firstBatchWindowIDs.count)
+                    maxConcurrentCaptures: min(4, firstBatchWindowIDs.count),
+                    allowedOffscreenWindowIDs: []
                 )
                 guard !Task.isCancelled else { return }
                 previews.merge(batchPreviews) { _, fresh in fresh }
@@ -2224,7 +2226,8 @@ final class SwitcherStore: ObservableObject {
                 let followUpPreviews = await catalog.capturePreviews(
                     for: followUpInitialWindowIDs,
                     maxCount: nil,
-                    maxConcurrentCaptures: min(4, followUpInitialWindowIDs.count)
+                    maxConcurrentCaptures: min(4, followUpInitialWindowIDs.count),
+                    allowedOffscreenWindowIDs: []
                 )
                 guard !Task.isCancelled else { return }
                 previews.merge(followUpPreviews) { _, fresh in fresh }
@@ -2260,7 +2263,8 @@ final class SwitcherStore: ObservableObject {
                 let allPreviews = await catalog.capturePreviews(
                     for: deferredWindowIDs,
                     maxCount: nil,
-                    maxConcurrentCaptures: 6
+                    maxConcurrentCaptures: 6,
+                    allowedOffscreenWindowIDs: []
                 )
                 guard !Task.isCancelled else { return }
                 await self.applyPreviews(allPreviews, generation: generation)
@@ -2322,15 +2326,29 @@ final class SwitcherStore: ObservableObject {
             await withTaskCancellationHandler {
                 let minimized = await catalog.snapshotMinimized(cancellation: cancellation)
                 guard !Task.isCancelled, !cancellation.isCancelled else { return }
-                self?.mergeMinimizedItems(minimized, generation: mergeGeneration)
+                let previewWindowIDs = self?.mergeMinimizedItems(
+                    minimized,
+                    generation: mergeGeneration
+                ) ?? []
+                guard !Task.isCancelled,
+                      !cancellation.isCancelled,
+                      !previewWindowIDs.isEmpty else { return }
+                let previews = await catalog.capturePreviews(
+                    for: previewWindowIDs,
+                    maxCount: nil,
+                    maxConcurrentCaptures: min(4, previewWindowIDs.count),
+                    allowedOffscreenWindowIDs: Set(previewWindowIDs)
+                )
+                guard !Task.isCancelled, !cancellation.isCancelled else { return }
+                await self?.applyPreviews(previews, generation: mergeGeneration)
             } onCancel: {
                 cancellation.cancel()
             }
         }
     }
 
-    private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) {
-        guard isVisible, previewGeneration == generation else { return }
+    private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) -> [CGWindowID] {
+        guard isVisible, previewGeneration == generation else { return [] }
         updateCachedMinimizedItems(minimized)
         let previousSelectedID = selectedID
         let selectionWasDefault = previousSelectedID == defaultSelectedID(in: items)
@@ -2346,7 +2364,7 @@ final class SwitcherStore: ObservableObject {
                 : previewCache.hydrated(item, liveItems: visibleItems + minimized)
         }
         let mergedItems = visibleItems + minimizedItems
-        guard !mergedItems.isEmpty else { return }
+        guard !mergedItems.isEmpty else { return [] }
         let orderedItems = orderItems(
             mruTracker.orderedForDisplay(
                 from: mergedItems,
@@ -2354,7 +2372,33 @@ final class SwitcherStore: ObservableObject {
             )
         )
         updateCachedOpenItems(orderedItems)
-        guard orderedItems != items else { return }
+        let minimizedPreviewCandidates = SwitchBladeSettings.shared.previewMode == .iconsOnly
+            ? []
+            : orderedItems.compactMap { item -> CGWindowID? in
+                guard item.isMinimized,
+                      item.canCapturePreview,
+                      !item.isTitleRedacted,
+                      !item.isApplicationFallback,
+                      !SyntheticWindowID.isSynthetic(item.windowID),
+                      item.preview == nil else {
+                    return nil
+                }
+                return item.windowID
+            }
+        let minimizedPreviewWindowIDs = Array(
+            minimizedPreviewCandidates.prefix(deferredPreviewCaptureBudget)
+        )
+        if PerformanceLoggingState.mode == .debug, !minimizedPreviewCandidates.isEmpty {
+            PerformanceDiagnostics.record(
+                "minimized_preview_selection",
+                fields: [
+                    "budget": .int(deferredPreviewCaptureBudget),
+                    "candidates": .int(minimizedPreviewCandidates.count),
+                    "scheduled": .int(minimizedPreviewWindowIDs.count)
+                ]
+            )
+        }
+        guard orderedItems != items else { return minimizedPreviewWindowIDs }
         items = orderedItems
         if selectionWasDefault {
             selectedID = defaultSelectedID(in: orderedItems)
@@ -2364,6 +2408,7 @@ final class SwitcherStore: ObservableObject {
         } else {
             selectedID = defaultSelectedID(in: orderedItems)
         }
+        return minimizedPreviewWindowIDs
     }
 
     private func scheduleHoverEnable(generation: Int) {

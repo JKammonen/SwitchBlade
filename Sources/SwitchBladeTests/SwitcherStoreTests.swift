@@ -38,6 +38,8 @@ enum SwitcherStoreTests {
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
         ("Store/minimizedMerge_windowServerIDReplacesTransitioningVisibleRowAndKeepsPreview", minimizedMergeWindowServerIDReplacesTransitioningVisibleRowAndKeepsPreview),
+        ("Store/minimizedMerge_capturesShareableWindowServerRow", minimizedMergeCapturesShareableWindowServerRow),
+        ("Store/minimizedMerge_limitsCaptureBatch", minimizedMergeLimitsCaptureBatch),
         ("Store/appFallback_activatesApplicationWithoutWindowActions", appFallbackActivatesApplicationWithoutWindowActions),
         ("Store/minimizedMerge_replacesMatchingAppFallback", minimizedMergeReplacesMatchingAppFallback),
         ("Store/minimizedMerge_reflowsPanelForVisibleItemCount", minimizedMergeReflowsPanelForVisibleItemCount),
@@ -741,6 +743,80 @@ enum SwitcherStoreTests {
         try expectEqual(excelRows.count, 1)
         try expect(excelRows.first?.isMinimized == true)
         try expect(excelRows.first?.preview === preview)
+    }
+
+    @MainActor static func minimizedMergeCapturesShareableWindowServerRow() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let (store, catalog, _, _) = makeStore(cachedOpenItemsMaxAge: -1)
+        let frontmost = makeItem(
+            id: 1,
+            pid: 100,
+            isFrontmostApp: true,
+            canCapturePreview: false
+        )
+        let minimizedMail = makeItem(
+            id: 4561,
+            pid: 200,
+            appName: "Mail",
+            title: "Inbox",
+            isMinimized: true,
+            canCapturePreview: true,
+            bundleIdentifier: "com.apple.mail"
+        )
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+        catalog.visibleItems = [frontmost]
+        catalog.minimizedItems = [minimizedMail]
+        catalog.previewsToReturn = [minimizedMail.id: preview]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where store.items.first(where: { $0.id == minimizedMail.id })?.preview !== preview {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try expect(store.items.first(where: { $0.id == minimizedMail.id })?.preview === preview)
+        try expect(catalog.allowedOffscreenWindowIDCalls.contains(Set([minimizedMail.id])))
+    }
+
+    @MainActor static func minimizedMergeLimitsCaptureBatch() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let (store, catalog, _, _) = makeStore(
+            cachedOpenItemsMaxAge: -1,
+            deferredPreviewCaptureBudget: 2
+        )
+        catalog.visibleItems = [makeItem(
+            id: 1,
+            pid: 100,
+            isFrontmostApp: true,
+            canCapturePreview: false
+        )]
+        catalog.minimizedItems = (10 ... 12).map { windowID in
+            makeItem(
+                id: CGWindowID(windowID),
+                pid: pid_t(200 + windowID),
+                appName: "Minimized \(windowID)",
+                title: "Window \(windowID)",
+                isMinimized: true,
+                canCapturePreview: true
+            )
+        }
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !catalog.allowedOffscreenWindowIDCalls.contains(where: { !$0.isEmpty }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        let scheduled = catalog.allowedOffscreenWindowIDCalls.first(where: { !$0.isEmpty })
+        try expectEqual(scheduled?.count, 2)
     }
 
     @MainActor static func appFallbackActivatesApplicationWithoutWindowActions() async throws {
