@@ -257,7 +257,9 @@ public enum L10n {
         case actionSnapBottom
         case actionCloseWindow
         case accessibilityWindowTileHint
+        case accessibilityApplicationTileHint
         case windowStateMinimized
+        case windowStateApplication
 
         // Permission messages
         case permissionMessageAccessibility

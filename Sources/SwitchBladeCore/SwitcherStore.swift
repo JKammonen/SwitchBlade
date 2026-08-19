@@ -718,6 +718,12 @@ final class SwitcherStore: ObservableObject {
     }
 
     func snap(_ item: WindowItem, to edge: WindowSnapEdge) {
+        guard !item.isApplicationFallback else {
+            Logger.switcher.info(
+                "Snap ignored for app-only item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+            )
+            return
+        }
         selectedID = item.id
         performSelectionAction(for: item, actionName: "snap-\(edge.rawValue)") { activator, selectedItem in
             activator.snap(selectedItem, to: edge)
@@ -725,6 +731,12 @@ final class SwitcherStore: ObservableObject {
     }
 
     func close(_ item: WindowItem) {
+        guard !item.isApplicationFallback else {
+            Logger.switcher.info(
+                "Close ignored for app-only item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
+            )
+            return
+        }
         let activator = self.activator
         let target = item.actionTarget
         _ = startWindowAction(
@@ -805,7 +817,7 @@ final class SwitcherStore: ObservableObject {
                     updateCachedSelectionState: true,
                     dismissVisiblePanelImmediately: true
                 ) { activator, selectedItem in
-                    activator.activate(selectedItem)
+                    Self.activateSelectionTarget(selectedItem, using: activator)
                 }
                 return
             }
@@ -829,7 +841,7 @@ final class SwitcherStore: ObservableObject {
             updateCachedSelectionState: true,
             dismissVisiblePanelImmediately: true
         ) { activator, selectedItem in
-            activator.activate(selectedItem)
+            Self.activateSelectionTarget(selectedItem, using: activator)
         }
     }
 
@@ -923,7 +935,9 @@ final class SwitcherStore: ObservableObject {
             )
             let activator = self.activator
             let target = targetItem.actionTarget
-            guard await runActivatorOperation({ activator.activate(target) }) else {
+            guard await runActivatorOperation({
+                Self.activateSelectionTarget(target, using: activator)
+            }) else {
                 Logger.switcher.notice(
                     "Double modifier window activation failed targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public); preserving app history"
                 )
@@ -1079,6 +1093,16 @@ final class SwitcherStore: ObservableObject {
 
     private var selectedItem: WindowItem? {
         items.first(where: { $0.id == selectedID })
+    }
+
+    private nonisolated static func activateSelectionTarget(
+        _ item: WindowActionTarget,
+        using activator: WindowActivating
+    ) -> Bool {
+        if item.isApplicationFallback {
+            return activator.reopenApplication(pid: item.pid)
+        }
+        return activator.activate(item)
     }
 
     @discardableResult
@@ -1471,7 +1495,7 @@ final class SwitcherStore: ObservableObject {
                 actionName: "activate",
                 source: source
             ) { activator, selectedItem in
-                activator.activate(selectedItem)
+                Self.activateSelectionTarget(selectedItem, using: activator)
             }
             return
         }
@@ -1863,19 +1887,25 @@ final class SwitcherStore: ObservableObject {
         let rememberedMinimizedItems = freshCachedMinimizedItems()
         guard !rememberedMinimizedItems.isEmpty else { return orderedItems }
 
-        let existingIDs = Set(orderedItems.map(\.id))
+        let rememberedMinimizedIDs = Set(rememberedMinimizedItems.map(\.id))
+        let minimizedApplicationPIDs = Set(rememberedMinimizedItems.map(\.pid))
+        let baseItems = orderedItems.filter { item in
+            guard !rememberedMinimizedIDs.contains(item.id) else { return false }
+            return !item.isApplicationFallback || !minimizedApplicationPIDs.contains(item.pid)
+        }
+        let existingIDs = Set(baseItems.map(\.id))
         let additions = rememberedMinimizedItems
             .filter { !existingIDs.contains($0.id) }
             .map { item in
                 SwitchBladeSettings.shared.previewMode == .iconsOnly
                     ? item.withPreview(nil)
-                    : previewCache.hydrated(item, liveItems: orderedItems + rememberedMinimizedItems)
+                    : previewCache.hydrated(item, liveItems: baseItems + rememberedMinimizedItems)
             }
-        guard !additions.isEmpty else { return orderedItems }
+        guard !additions.isEmpty || baseItems != orderedItems else { return orderedItems }
 
         return orderItems(
             mruTracker.orderedForDisplay(
-                from: orderedItems + additions,
+                from: baseItems + additions,
                 context: context
             )
         )
@@ -2304,7 +2334,12 @@ final class SwitcherStore: ObservableObject {
         updateCachedMinimizedItems(minimized)
         let previousSelectedID = selectedID
         let selectionWasDefault = previousSelectedID == defaultSelectedID(in: items)
-        let visibleItems = items.filter { !$0.isMinimized }
+        let minimizedIDs = Set(minimized.map(\.id))
+        let minimizedApplicationPIDs = Set(minimized.map(\.pid))
+        let visibleItems = items.filter { item in
+            guard !item.isMinimized, !minimizedIDs.contains(item.id) else { return false }
+            return !item.isApplicationFallback || !minimizedApplicationPIDs.contains(item.pid)
+        }
         let minimizedItems = minimized.map { item in
             SwitchBladeSettings.shared.previewMode == .iconsOnly
                 ? item

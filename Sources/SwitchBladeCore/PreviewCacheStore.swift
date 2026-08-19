@@ -39,6 +39,7 @@ final class PreviewCacheStore {
     private var byID: LRUDictionary<CGWindowID, CachedPreview>
     private var bySignature: LRUDictionary<String, CachedPreview>
     private var byAppProcessIdentity: LRUDictionary<String, CachedPreview>
+    private var byRecentlySeenWindowIdentity: LRUDictionary<String, CachedPreview>
     private var byRecentlySeenSignature: LRUDictionary<String, CachedPreview>
     /// Window IDs whose last capture was mostly-white and was deferred once.
     /// A second consecutive white capture for the same window is then accepted
@@ -55,6 +56,7 @@ final class PreviewCacheStore {
         byID = LRUDictionary(capacity: capacity)
         bySignature = LRUDictionary(capacity: capacity)
         byAppProcessIdentity = LRUDictionary(capacity: capacity)
+        byRecentlySeenWindowIdentity = LRUDictionary(capacity: capacity)
         byRecentlySeenSignature = LRUDictionary(capacity: capacity)
         self.retainedPreviewMaxAge = retainedPreviewMaxAge
         self.now = now
@@ -76,10 +78,15 @@ final class PreviewCacheStore {
     /// for ~100 ms. Window IDs are stable for the lifetime of the window in
     /// macOS, so there's no risk of showing the wrong window's image.
     func hydrated(_ item: WindowItem, liveItems: [WindowItem]) -> WindowItem {
-        guard !item.isTitleRedacted else {
+        guard !item.isTitleRedacted, !item.isApplicationFallback else {
             return item.withPreview(nil)
         }
         if let cached = byID[item.windowID] {
+            return item.withPreview(cached.image)
+        }
+        if item.isMinimized,
+           let cached = byRecentlySeenWindowIdentity[windowIdentity(for: item)],
+           isFreshEnough(cached) {
             return item.withPreview(cached.image)
         }
         let itemSignature = signature(for: item)
@@ -157,6 +164,7 @@ final class PreviewCacheStore {
             let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
             bySignature[signature(for: item)] = cached
+            byRecentlySeenWindowIdentity[windowIdentity(for: item)] = cached
             byRecentlySeenSignature[recentSignature(for: item)] = cached
             if singleWindowAppIdentities.contains(appIdentity(for: item)) {
                 byAppProcessIdentity[appProcessIdentity(for: item)] = cached
@@ -176,10 +184,12 @@ final class PreviewCacheStore {
         guard !items.isEmpty else { return }
         let windowIDs = Set(items.map(\.windowID))
         let signatures = Set(items.map(signature(for:)))
+        let windowIdentities = Set(items.map(windowIdentity(for:)))
         let recentSignatures = Set(items.map(recentSignature(for:)))
         let appProcessIdentities = Set(items.map(appProcessIdentity(for:)))
         byID.removeAll { windowIDs.contains($0) }
         bySignature.removeAll { signatures.contains($0) }
+        byRecentlySeenWindowIdentity.removeAll { windowIdentities.contains($0) }
         byRecentlySeenSignature.removeAll { recentSignatures.contains($0) }
         byAppProcessIdentity.removeAll { appProcessIdentities.contains($0) }
         whiteDeferredIDs.subtract(windowIDs)
@@ -188,6 +198,7 @@ final class PreviewCacheStore {
     func removeAll() {
         byID.keepOnly([])
         bySignature.keepOnly([])
+        byRecentlySeenWindowIdentity.keepOnly([])
         byRecentlySeenSignature.keepOnly([])
         byAppProcessIdentity.keepOnly([])
         whiteDeferredIDs.removeAll()
@@ -212,6 +223,10 @@ final class PreviewCacheStore {
 
     private func recentSignature(for item: WindowItem) -> String {
         "\(item.pid)::\(appIdentity(for: item))::\(item.displayTitle)"
+    }
+
+    private func windowIdentity(for item: WindowItem) -> String {
+        "\(item.pid)::\(item.windowProcessIdentifier)::\(item.windowID)"
     }
 
     private func appIdentity(for item: WindowItem) -> String {

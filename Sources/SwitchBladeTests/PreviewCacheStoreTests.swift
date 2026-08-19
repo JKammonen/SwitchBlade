@@ -8,7 +8,11 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/record_then_hydrated_returnsImage_byWindowID", roundTrip_byWindowID),
         ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
         ("PreviewCache/hydrated_fallsBackTo_signature_whenBoundsChange", signatureFallback),
+        ("PreviewCache/applicationFallback_neverHydratesWindowPreview", applicationFallbackNeverHydratesWindowPreview),
         ("PreviewCache/minimizedExactSignatureSurvivesVisiblePrune", minimizedExactSignatureSurvivesVisiblePrune),
+        ("PreviewCache/minimizedWindowServerIDHydratesDuringVisibilityTransition", minimizedWindowServerIDHydratesDuringVisibilityTransition),
+        ("PreviewCache/minimizedWindowServerIDSurvivesTitleChangeAndVisiblePrune", minimizedWindowServerIDSurvivesTitleChangeAndVisiblePrune),
+        ("PreviewCache/minimizedReusedWindowServerIDDoesNotCrossProcesses", minimizedReusedWindowServerIDDoesNotCrossProcesses),
         ("PreviewCache/redactedMinimizedDoesNotHydrateRetainedPreview", redactedMinimizedDoesNotHydrateRetainedPreview),
         ("PreviewCache/nonMinimizedDoesNotUseRetainedPrunedPreview", nonMinimizedDoesNotUseRetainedPrunedPreview),
         ("PreviewCache/minimizedDuplicateExactSignatureDoesNotGuess", minimizedDuplicateExactSignatureDoesNotGuess),
@@ -76,6 +80,34 @@ enum PreviewCacheStoreTests {
         try expect(result.preview === img)
     }
 
+    @MainActor static func applicationFallbackNeverHydratesWindowPreview() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Example",
+            title: "Document",
+            bundleIdentifier: "com.example.app"
+        )
+        let image = NSImage(size: .init(width: 4, height: 4))
+        store.record([original.id: image], liveItems: [original])
+
+        let fallback = makeItem(
+            id: SyntheticApplicationID.make(
+                pid: original.pid,
+                bundleIdentifier: original.bundleIdentifier,
+                appName: original.appName
+            ),
+            pid: original.pid,
+            appName: original.appName,
+            title: "",
+            canCapturePreview: false,
+            bundleIdentifier: original.bundleIdentifier
+        )
+
+        try expectNil(store.hydrated(fallback, liveItems: [fallback]).preview)
+    }
+
     @MainActor static func minimizedExactSignatureSurvivesVisiblePrune() throws {
         let store = PreviewCacheStore()
         let original = makeItem(
@@ -106,6 +138,91 @@ enum PreviewCacheStoreTests {
         )
         let result = store.hydrated(minimized, liveItems: [other, minimized])
         try expect(result.preview === img)
+    }
+
+    @MainActor static func minimizedWindowServerIDHydratesDuringVisibilityTransition() throws {
+        let store = PreviewCacheStore()
+        let visible = makeItem(
+            id: 4561,
+            pid: 67035,
+            appName: "Microsoft Excel",
+            title: "Book",
+            bundleIdentifier: "com.microsoft.Excel"
+        )
+        let preview = NSImage(size: .init(width: 4, height: 4))
+        store.record([visible.id: preview], liveItems: [visible])
+
+        let minimized = makeItem(
+            id: visible.id,
+            pid: visible.pid,
+            appName: visible.appName,
+            title: visible.title,
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: visible.bundleIdentifier
+        )
+
+        // During minimize animation, current-Space CG data may still contain the
+        // visible row while AX already reports the same WindowServer ID minimized.
+        let result = store.hydrated(minimized, liveItems: [visible, minimized])
+        try expect(result.preview === preview)
+    }
+
+    @MainActor static func minimizedWindowServerIDSurvivesTitleChangeAndVisiblePrune() throws {
+        let store = PreviewCacheStore()
+        let visible = makeItem(
+            id: 13_228,
+            pid: 36_743,
+            appName: "ChatGPT",
+            title: "ChatGPT - Work",
+            bundleIdentifier: "com.openai.chat"
+        )
+        let preview = NSImage(size: .init(width: 4, height: 4))
+        store.record([visible.id: preview], liveItems: [visible])
+
+        // A visible-only warmup after minimization prunes the normal live keys.
+        // The AX row can expose a different title, but the real WindowServer ID
+        // and owning process still identify the exact same live window.
+        let other = makeItem(id: 2, pid: 200, appName: "Notes", title: "Note")
+        store.record([2: NSImage(size: .init(width: 4, height: 4))], liveItems: [other])
+        let minimized = makeItem(
+            id: visible.id,
+            pid: visible.pid,
+            appName: visible.appName,
+            title: "ChatGPT",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: visible.bundleIdentifier
+        )
+
+        let result = store.hydrated(minimized, liveItems: [other, minimized])
+        try expect(result.preview === preview)
+    }
+
+    @MainActor static func minimizedReusedWindowServerIDDoesNotCrossProcesses() throws {
+        let store = PreviewCacheStore()
+        let original = makeItem(
+            id: 9_001,
+            pid: 100,
+            appName: "Example",
+            title: "Original",
+            bundleIdentifier: "com.example.app"
+        )
+        store.record([original.id: NSImage(size: .init(width: 4, height: 4))], liveItems: [original])
+
+        let other = makeItem(id: 2, pid: 200, appName: "Notes", title: "Note")
+        store.record([2: NSImage(size: .init(width: 4, height: 4))], liveItems: [other])
+        let reusedByRelaunchedProcess = makeItem(
+            id: original.id,
+            pid: 101,
+            appName: original.appName,
+            title: "Relaunched",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: original.bundleIdentifier
+        )
+
+        try expectNil(store.hydrated(reusedByRelaunchedProcess, liveItems: [other, reusedByRelaunchedProcess]).preview)
     }
 
     @MainActor static func redactedMinimizedDoesNotHydrateRetainedPreview() throws {
@@ -181,6 +298,7 @@ enum PreviewCacheStoreTests {
             title: "shell",
             isMinimized: true,
             canCapturePreview: false,
+            isTitleRedacted: true,
             bundleIdentifier: "com.apple.Terminal"
         )
         let secondMinimized = makeItem(
@@ -190,6 +308,7 @@ enum PreviewCacheStoreTests {
             title: "shell",
             isMinimized: true,
             canCapturePreview: false,
+            isTitleRedacted: true,
             bundleIdentifier: "com.apple.Terminal"
         )
 

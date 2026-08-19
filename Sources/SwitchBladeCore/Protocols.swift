@@ -47,6 +47,10 @@ protocol WindowSnapshotProviding: Sendable {
 protocol WindowActivating: Sendable {
     func activate(_ item: WindowActionTarget) -> Bool
     func activateApplication(pid: pid_t) -> Bool
+    /// Reopens an app-only row through its Dock item, then confirms the app is
+    /// active. This stays separate from previous-app activation, which must not
+    /// create or restore windows as a side effect.
+    func reopenApplication(pid: pid_t) -> Bool
     func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool
     func close(_ item: WindowActionTarget) -> Bool
     /// Sends NSRunningApplication.terminate(). The whole app quits, not just

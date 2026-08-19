@@ -13,6 +13,7 @@ enum UIRenderSmokeTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("UIRender/switcherView_rendersWithPositiveFittingSize", switcherViewRenders),
+        ("UIRender/applicationFallback_rendersAsIconOnlyTile", applicationFallbackRendersAsIconOnlyTile),
         ("UIRender/minimizedMerge_reflowsAndRendersThirteenthItem", minimizedMergeReflowsAndRendersThirteenthItem),
         ("UIRender/fifteenItems_renderAsBalancedThreeRows", fifteenItemsRenderAsBalancedThreeRows),
         ("UIRender/switcherColumns_remainFixedAtPanelTileWidth", switcherColumnsRemainFixedAtPanelTileWidth),
@@ -58,6 +59,57 @@ enum UIRenderSmokeTests {
         try expectGreaterThan(host.fittingSize.width, CGFloat(0))
         try expectGreaterThan(host.fittingSize.height, CGFloat(0))
         try writeRenderArtifactIfRequested(host, name: "switcher-default")
+    }
+
+    @MainActor
+    static func applicationFallbackRendersAsIconOnlyTile() async throws {
+        let previousLanguage = LocalizationState.selection
+        LocalizationState.selection = .finnish
+        defer { LocalizationState.selection = previousLanguage }
+
+        let (store, catalog, _, _) = makeStore()
+        let fallbackID = SyntheticApplicationID.make(
+            pid: 200,
+            bundleIdentifier: "com.example.app-only",
+            appName: "Vain sovellus"
+        )
+        let fallback = WindowItem(
+            windowID: fallbackID,
+            pid: 200,
+            appName: "Vain sovellus",
+            title: "",
+            bounds: CGRect(x: 0, y: 0, width: 640, height: 400),
+            isFrontmostApp: false,
+            isMinimized: false,
+            canCapturePreview: false,
+            isTitleRedacted: false,
+            preview: nil,
+            icon: makeRenderPreview(color: .systemPurple, label: "S"),
+            bundleIdentifier: "com.example.app-only",
+            windowOwnerPID: nil
+        )
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, appName: "Ikkuna", title: "Dokumentti", isFrontmostApp: true)
+                .withPreview(makeRenderPreview(color: .systemTeal, label: "I")),
+            fallback
+        ]
+        await openSwitcher(store)
+
+        let layout = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            tileMinWidth: SwitchBladeSettings.shared.tileMinWidth,
+            itemCount: store.items.count,
+            tileAspectRatio: SwitcherLayout.tileAspectRatio
+        ))
+        store.updatePanelLayout(columns: layout.columns, tileWidth: layout.tileWidth)
+        let host = NSHostingView(rootView: SwitcherView(store: store))
+        host.frame = CGRect(origin: .zero, size: layout.panelFrame.size)
+        host.layoutSubtreeIfNeeded()
+
+        try expect(store.items.contains(where: { $0.id == fallbackID && $0.preview == nil }))
+        try expectGreaterThan(host.fittingSize.width, CGFloat(0))
+        try expectGreaterThan(host.fittingSize.height, CGFloat(0))
+        try writeRenderArtifactIfRequested(host, name: "switcher-application-fallback")
     }
 
     @MainActor

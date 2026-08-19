@@ -10,6 +10,7 @@ enum WindowItemTests {
         ("WindowItem/subtitle_isAppName_whenTitlePresent", subtitle_appName),
         ("WindowItem/subtitle_isFallback_whenTitleEmpty", subtitle_fallback),
         ("WindowItem/subtitle_isFallback_whenTitleRedacted", subtitle_redactedTitle),
+        ("WindowItem/appFallback_hasApplicationSemantics", appFallbackHasApplicationSemantics),
         ("WindowItem/id_isWindowID", id_isWindowID),
         ("WindowItem/withPreview_setsPreview_keepsOtherFields", withPreview_setsPreview),
         ("WindowItem/withPreview_canClearPreview", withPreview_canClear),
@@ -47,6 +48,21 @@ enum WindowItemTests {
     @MainActor static func subtitle_redactedTitle() throws {
         let item = makeItem(id: 1, appName: "Mail", title: "Private Subject", isTitleRedacted: true)
         try expectEqual(item.subtitle, "App")
+    }
+
+    @MainActor static func appFallbackHasApplicationSemantics() throws {
+        LocalizationState.selection = .english
+        let id = SyntheticApplicationID.make(
+            pid: 42,
+            bundleIdentifier: "com.example.app",
+            appName: "Example"
+        )
+        let item = makeItem(id: id, pid: 42, appName: "Example", title: "")
+
+        try expect(item.isApplicationFallback)
+        try expect(item.actionTarget.isApplicationFallback)
+        try expectEqual(item.displayTitle, "Example")
+        try expectEqual(item.subtitle, "Application")
     }
 
     @MainActor static func id_isWindowID() throws {

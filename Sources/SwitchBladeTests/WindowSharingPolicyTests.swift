@@ -1,3 +1,4 @@
+import CoreGraphics
 @testable import SwitchBladeCore
 
 enum WindowSharingPolicyTests {
@@ -11,7 +12,9 @@ enum WindowSharingPolicyTests {
         ("WindowSharingPolicy/minimizedShareableMatchShowsTitle", minimizedShareableMatchShowsTitle),
         ("WindowSharingPolicy/minimizedPrivateNonTeamsMatchIsExcluded", minimizedPrivateNonTeamsMatchIsExcluded),
         ("WindowSharingPolicy/minimizedPrivateTeamsMatchShowsTitle", minimizedPrivateTeamsMatchShowsTitle),
-        ("WindowSharingPolicy/minimizedTeamsSharingIndicatorIsExcluded", minimizedTeamsSharingIndicatorIsExcluded)
+        ("WindowSharingPolicy/minimizedTeamsSharingIndicatorIsExcluded", minimizedTeamsSharingIndicatorIsExcluded),
+        ("WindowSharingStateIndex/uniqueExactTitleReturnsWindowServerID", uniqueExactTitleReturnsWindowServerID),
+        ("WindowSharingStateIndex/duplicateExactTitleDoesNotGuessID", duplicateExactTitleDoesNotGuessID)
     ]
 
     @MainActor static func listsShareableWindows() async throws {
@@ -126,5 +129,42 @@ enum WindowSharingPolicyTests {
             ),
             .exclude
         )
+    }
+
+    @MainActor static func uniqueExactTitleReturnsWindowServerID() async throws {
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(windowID: 4561, pid: 67035, title: "Book", sharingState: 1),
+            sharingRow(windowID: 99, pid: 100, title: "Other", sharingState: 1)
+        ])
+
+        try expectEqual(index.sharingStates(pid: 67035, title: "Book"), [1])
+        try expectEqual(
+            index.uniqueWindow(pid: 67035, title: "Book"),
+            WindowSharingStateIndex.Match(windowID: 4561, sharingState: 1)
+        )
+    }
+
+    @MainActor static func duplicateExactTitleDoesNotGuessID() async throws {
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(windowID: 1, pid: 100, title: "Document", sharingState: 1),
+            sharingRow(windowID: 2, pid: 100, title: "Document", sharingState: 1)
+        ])
+
+        try expectNil(index.uniqueWindow(pid: 100, title: "Document"))
+    }
+
+    private static func sharingRow(
+        windowID: CGWindowID,
+        pid: pid_t,
+        title: String,
+        sharingState: Int
+    ) -> [String: Any] {
+        [
+            kCGWindowNumber as String: windowID,
+            kCGWindowOwnerPID as String: pid,
+            kCGWindowLayer as String: 0,
+            kCGWindowName as String: title,
+            kCGWindowSharingState as String: sharingState
+        ]
     }
 }

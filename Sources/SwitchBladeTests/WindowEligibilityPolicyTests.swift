@@ -6,6 +6,8 @@ enum WindowEligibilityPolicyTests {
         ("WindowEligibilityPolicy/rejectsOwnProcessUnconditionally", rejectsOwnProcess),
         ("WindowEligibilityPolicy/rejectsAccessoryAndUnfinishedApps", rejectsAccessoryAndUnfinishedApps),
         ("WindowEligibilityPolicy/allowsFinishedRegularExternalApp", allowsFinishedRegularExternalApp),
+        ("ApplicationFallback/includesOnlyUnrepresentedRegularApps", fallbackIncludesOnlyUnrepresentedRegularApps),
+        ("ApplicationFallback/currentAppIncludesOnlyFrontmostApp", fallbackCurrentAppIncludesOnlyFrontmostApp),
         ("RunningApplicationSnapshot/coalescesDuplicateProcessIdentifiers", coalescesDuplicateProcessIdentifiers),
         ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
         ("HostedWindowApplication/rejectsUnrelatedAccessory", rejectsUnrelatedAccessory),
@@ -53,6 +55,71 @@ enum WindowEligibilityPolicyTests {
             activationPolicy: .regular,
             isFinishedLaunching: true
         ))
+    }
+
+    @MainActor static func fallbackIncludesOnlyUnrepresentedRegularApps() throws {
+        let represented = applicationDescriptor(
+            pid: 100,
+            policy: .regular,
+            bundleIdentifier: "com.example.visible",
+            path: "/Applications/Visible.app"
+        )
+        let appOnly = applicationDescriptor(
+            pid: 200,
+            policy: .regular,
+            bundleIdentifier: "com.example.app-only",
+            path: "/Applications/App Only.app"
+        )
+        let accessory = applicationDescriptor(
+            pid: 300,
+            policy: .accessory,
+            bundleIdentifier: "com.example.helper",
+            path: "/Applications/Helper.app"
+        )
+        let unfinished = applicationDescriptor(
+            pid: 400,
+            policy: .regular,
+            bundleIdentifier: "com.example.launching",
+            path: "/Applications/Launching.app",
+            isFinishedLaunching: false
+        )
+
+        try expectEqual(
+            ApplicationFallbackPolicy.processIdentifiers(
+                from: [represented, appOnly, accessory, unfinished],
+                representedApplicationPIDs: [100],
+                currentProcessIdentifier: 999,
+                frontmostPID: 100,
+                scope: .currentSpace
+            ),
+            [200]
+        )
+    }
+
+    @MainActor static func fallbackCurrentAppIncludesOnlyFrontmostApp() throws {
+        let frontmost = applicationDescriptor(
+            pid: 100,
+            policy: .regular,
+            bundleIdentifier: "com.example.frontmost",
+            path: "/Applications/Frontmost.app"
+        )
+        let background = applicationDescriptor(
+            pid: 200,
+            policy: .regular,
+            bundleIdentifier: "com.example.background",
+            path: "/Applications/Background.app"
+        )
+
+        try expectEqual(
+            ApplicationFallbackPolicy.processIdentifiers(
+                from: [frontmost, background],
+                representedApplicationPIDs: [],
+                currentProcessIdentifier: 999,
+                frontmostPID: 100,
+                scope: .currentApp
+            ),
+            [100]
+        )
     }
 
     @MainActor static func coalescesDuplicateProcessIdentifiers() throws {

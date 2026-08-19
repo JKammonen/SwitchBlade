@@ -8,7 +8,8 @@ enum SyntheticWindowIDTests {
         ("SyntheticWindowID/stableWithinLaunch", stableWithinLaunch),
         ("SyntheticWindowID/differsByPidIndexAndTitle", differsByPidIndexAndTitle),
         ("SyntheticWindowID/noCollisionsOverManyDistinctInputs", noCollisionsOverManyDistinctInputs),
-        ("SyntheticWindowID/isSyntheticDetectsRealAndSynthetic", isSyntheticDetectsRealAndSynthetic)
+        ("SyntheticWindowID/isSyntheticDetectsRealAndSynthetic", isSyntheticDetectsRealAndSynthetic),
+        ("SyntheticApplicationID/usesDistinctNamespace", applicationFallbackUsesDistinctNamespace)
     ]
 
     @MainActor static func topBitIsReserved() async throws {
@@ -64,5 +65,19 @@ enum SyntheticWindowIDTests {
 
         let synthetic = SyntheticWindowID.make(pid: 99, index: 7, title: "Title")
         try expect(SyntheticWindowID.isSynthetic(synthetic))
+    }
+
+    @MainActor static func applicationFallbackUsesDistinctNamespace() async throws {
+        let appID = SyntheticApplicationID.make(
+            pid: 99,
+            bundleIdentifier: "com.example.app",
+            appName: "Example"
+        )
+        let minimizedID = SyntheticWindowID.make(pid: 99, index: 0, title: "Example")
+
+        try expect(SyntheticApplicationID.isSynthetic(appID))
+        try expect(!SyntheticWindowID.isSynthetic(appID))
+        try expect(!SyntheticApplicationID.isSynthetic(minimizedID))
+        try expectNotEqual(appID, minimizedID)
     }
 }

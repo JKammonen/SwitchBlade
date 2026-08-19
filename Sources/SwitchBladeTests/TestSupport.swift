@@ -154,6 +154,7 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
     private struct State {
         var activatedItems: [WindowActionTarget] = []
         var activatedApplicationPIDs: [pid_t] = []
+        var reopenedApplicationPIDs: [pid_t] = []
         var snapCalls: [SnapCall] = []
         var closedItems: [WindowActionTarget] = []
         var quitItems: [WindowActionTarget] = []
@@ -170,6 +171,7 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
     private let state = LockedValue(State())
     var activatedItems: [WindowActionTarget] { state.value.activatedItems }
     var activatedApplicationPIDs: [pid_t] { state.value.activatedApplicationPIDs }
+    var reopenedApplicationPIDs: [pid_t] { state.value.reopenedApplicationPIDs }
     var snapCalls: [SnapCall] { state.value.snapCalls }
     var closedItems: [WindowActionTarget] { state.value.closedItems }
     var quitItems: [WindowActionTarget] { state.value.quitItems }
@@ -221,6 +223,13 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
         delayIfNeeded()
         return state.withValue {
             $0.activatedApplicationPIDs.append(pid)
+            return $0.applicationActivationSucceeds
+        }
+    }
+    func reopenApplication(pid: pid_t) -> Bool {
+        delayIfNeeded()
+        return state.withValue {
+            $0.reopenedApplicationPIDs.append(pid)
             return $0.applicationActivationSucceeds
         }
     }

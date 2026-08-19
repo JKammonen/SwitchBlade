@@ -37,6 +37,9 @@ enum SwitcherStoreTests {
         ("Store/minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty", minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty),
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
+        ("Store/minimizedMerge_windowServerIDReplacesTransitioningVisibleRowAndKeepsPreview", minimizedMergeWindowServerIDReplacesTransitioningVisibleRowAndKeepsPreview),
+        ("Store/appFallback_activatesApplicationWithoutWindowActions", appFallbackActivatesApplicationWithoutWindowActions),
+        ("Store/minimizedMerge_replacesMatchingAppFallback", minimizedMergeReplacesMatchingAppFallback),
         ("Store/minimizedMerge_reflowsPanelForVisibleItemCount", minimizedMergeReflowsPanelForVisibleItemCount),
         ("Store/minimizedMerge_cancellationStopsUnderlyingAXWork", minimizedMergeCancellationStopsUnderlyingWork),
         // ordering
@@ -686,6 +689,133 @@ enum SwitcherStoreTests {
         try expectEqual(merged.subtitle, "App")
         try expect(!merged.canCapturePreview)
         try expectNil(merged.preview)
+    }
+
+    @MainActor static func minimizedMergeWindowServerIDReplacesTransitioningVisibleRowAndKeepsPreview() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldPreviewMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldPreviewMode }
+
+        let (store, catalog, _, _) = makeStore(cachedOpenItemsMaxAge: -1)
+        let frontmost = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Safari",
+            title: "Docs",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.apple.Safari"
+        )
+        let visibleExcel = makeItem(
+            id: 4561,
+            pid: 67035,
+            appName: "Microsoft Excel",
+            title: "Book",
+            bundleIdentifier: "com.microsoft.Excel"
+        )
+        let preview = NSImage(size: CGSize(width: 10, height: 10))
+        catalog.visibleItems = [frontmost, visibleExcel]
+        catalog.previewsToReturn = [visibleExcel.id: preview]
+        await store.warmPreviewCache(context: "seed-visible-excel")
+
+        catalog.minimizedItems = [makeItem(
+            id: visibleExcel.id,
+            pid: visibleExcel.pid,
+            appName: visibleExcel.appName,
+            title: visibleExcel.title,
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: visibleExcel.bundleIdentifier
+        )]
+        catalog.previewsToReturn = [:]
+
+        // Model the real transition: CG still exposes the visible row while AX
+        // already exposes the same WindowServer ID as minimized.
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where store.items.first(where: { $0.id == visibleExcel.id })?.isMinimized != true {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        let excelRows = store.items.filter { $0.id == visibleExcel.id }
+        try expectEqual(excelRows.count, 1)
+        try expect(excelRows.first?.isMinimized == true)
+        try expect(excelRows.first?.preview === preview)
+    }
+
+    @MainActor static func appFallbackActivatesApplicationWithoutWindowActions() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        let frontmost = makeItem(id: 1, pid: 100, isFrontmostApp: true)
+        let fallback = makeItem(
+            id: SyntheticApplicationID.make(
+                pid: 200,
+                bundleIdentifier: "com.example.app-only",
+                appName: "App Only"
+            ),
+            pid: 200,
+            appName: "App Only",
+            title: "",
+            canCapturePreview: false,
+            bundleIdentifier: "com.example.app-only"
+        )
+        catalog.visibleItems = [frontmost, fallback]
+
+        await openSwitcher(store)
+        store.snap(fallback, to: .left)
+        store.close(fallback)
+        await runPendingMainTasks()
+        try expect(activator.snapCalls.isEmpty)
+        try expect(activator.closedItems.isEmpty)
+
+        store.choose(fallback)
+        for _ in 0 ..< 60 where activator.reopenedApplicationPIDs.isEmpty {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try expectEqual(activator.reopenedApplicationPIDs, [200])
+        try expect(activator.activatedApplicationPIDs.isEmpty)
+        try expect(activator.activatedItems.isEmpty)
+    }
+
+    @MainActor static func minimizedMergeReplacesMatchingAppFallback() async throws {
+        let (store, catalog, _, _) = makeStore()
+        let frontmost = makeItem(id: 1, pid: 100, isFrontmostApp: true)
+        let fallback = makeItem(
+            id: SyntheticApplicationID.make(
+                pid: 200,
+                bundleIdentifier: "com.example.app",
+                appName: "Example"
+            ),
+            pid: 200,
+            appName: "Example",
+            title: "",
+            canCapturePreview: false,
+            bundleIdentifier: "com.example.app"
+        )
+        let minimized = makeItem(
+            id: SyntheticWindowID.make(pid: 200, index: 0, title: "Document"),
+            pid: 200,
+            appName: "Example",
+            title: "Document",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.example.app"
+        )
+        catalog.visibleItems = [frontmost, fallback]
+        catalog.minimizedItems = [minimized]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == minimized.id }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        let exampleRows = store.items.filter { $0.pid == 200 }
+        try expectEqual(exampleRows.count, 1)
+        try expectEqual(exampleRows.first?.id, minimized.id)
+        try expect(exampleRows.first?.isMinimized == true)
+        try expect(!store.items.contains(where: { $0.id == fallback.id }))
     }
 
     @MainActor static func minimizedMergeReflowsPanelForVisibleItemCount() async throws {

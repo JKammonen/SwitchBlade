@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 @testable import SwitchBladeCore
 
 enum WindowActivatorTests {
@@ -23,8 +24,11 @@ enum WindowActivatorTests {
         ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
         ("WindowActivator/activate_hostedWindow_targetsOwnerAndActivatesHost", activateHostedWindowTargetsOwnerAndActivatesHost),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
+        ("WindowActivator/reopenApplication_pressesDockBeforeAppActivation", reopenApplicationPressesDockBeforeAppActivation),
+        ("WindowActivator/dockCandidate_prefersURLThenLocalizedTitle", dockCandidatePrefersURLThenLocalizedTitle),
         ("WindowActivator/activate_backgroundWindow_requiresRaiseAndAppActivation", activateBackgroundWindowRequiresBothSteps),
         ("WindowActivator/activationTargeting_acceptsAttributeUnsupportedRaiseAfterMainAndFocus", activationTargetingAcceptsAttributeUnsupportedRaiseAfterMainAndFocus),
+        ("WindowActivator/activationTargeting_acceptsMinimizedTransitionCannotCompleteAfterRestoreAndFocus", activationTargetingAcceptsMinimizedTransitionCannotCompleteAfterRestoreAndFocus),
         ("WindowActivator/activationTargeting_keepsOtherAXFailuresClosed", activationTargetingKeepsOtherAXFailuresClosed),
         ("WindowActivator/activationConfirmation_waitsForObservedActiveState", activationConfirmationWaitsForObservedState),
         ("WindowActivator/activationConfirmation_rejectsUnconfirmedRequest", activationConfirmationRejectsUnconfirmedRequest),
@@ -355,6 +359,62 @@ enum WindowActivatorTests {
         try expectEqual(activatedPIDs, [300])
     }
 
+    static func reopenApplicationPressesDockBeforeAppActivation() throws {
+        var calls: [String] = []
+        let activator = WindowActivator(
+            activateApplicationOverride: { pid in
+                calls.append("activate:\(pid)")
+                return true
+            },
+            reopenApplicationOverride: { pid in
+                calls.append("reopen:\(pid)")
+                return true
+            }
+        )
+
+        try expect(activator.reopenApplication(pid: 301))
+        try expectEqual(calls, ["reopen:301", "activate:301"])
+
+        let failedReopen = WindowActivator(
+            activateApplicationOverride: { _ in true },
+            reopenApplicationOverride: { _ in false }
+        )
+        try expect(!failedReopen.reopenApplication(pid: 302))
+    }
+
+    static func dockCandidatePrefersURLThenLocalizedTitle() throws {
+        let targetURL = URL(fileURLWithPath: "/Applications/Example.app")
+        let candidates = [
+            WindowActivator.DockApplicationCandidate(
+                title: "Esimerkki",
+                applicationURL: nil,
+                isRunning: true
+            ),
+            WindowActivator.DockApplicationCandidate(
+                title: "Example",
+                applicationURL: targetURL,
+                isRunning: true
+            )
+        ]
+
+        try expectEqual(
+            WindowActivator.bestDockApplicationCandidateIndex(
+                targetTitle: "Esimerkki",
+                targetURL: targetURL,
+                candidates: candidates
+            ),
+            1
+        )
+        try expectEqual(
+            WindowActivator.bestDockApplicationCandidateIndex(
+                targetTitle: "Esimerkki",
+                targetURL: nil,
+                candidates: candidates
+            ),
+            0
+        )
+    }
+
     static func activateBackgroundWindowRequiresBothSteps() throws {
         let activator = WindowActivator(
             raiseWindowOverride: { _ in true },
@@ -374,6 +434,27 @@ enum WindowActivatorTests {
                 raiseResult: .attributeUnsupported,
                 mainResult: .success,
                 focusResult: .success
+            )
+        )
+    }
+
+    static func activationTargetingAcceptsMinimizedTransitionCannotCompleteAfterRestoreAndFocus() throws {
+        try expect(
+            WindowActivator.activationTargetingSucceeded(
+                raiseResult: .cannotComplete,
+                mainResult: .cannotComplete,
+                focusResult: .success,
+                itemWasMinimized: true,
+                unminimizeResult: .success
+            )
+        )
+        try expect(
+            WindowActivator.activationTargetingSucceeded(
+                raiseResult: .success,
+                mainResult: .cannotComplete,
+                focusResult: .success,
+                itemWasMinimized: true,
+                unminimizeResult: .success
             )
         )
     }
@@ -398,6 +479,33 @@ enum WindowActivatorTests {
                 raiseResult: .attributeUnsupported,
                 mainResult: .success,
                 focusResult: .failure
+            )
+        )
+        try expect(
+            !WindowActivator.activationTargetingSucceeded(
+                raiseResult: .cannotComplete,
+                mainResult: .cannotComplete,
+                focusResult: .success,
+                itemWasMinimized: false,
+                unminimizeResult: nil
+            )
+        )
+        try expect(
+            !WindowActivator.activationTargetingSucceeded(
+                raiseResult: .cannotComplete,
+                mainResult: .cannotComplete,
+                focusResult: .failure,
+                itemWasMinimized: true,
+                unminimizeResult: .success
+            )
+        )
+        try expect(
+            !WindowActivator.activationTargetingSucceeded(
+                raiseResult: .cannotComplete,
+                mainResult: .cannotComplete,
+                focusResult: .success,
+                itemWasMinimized: true,
+                unminimizeResult: .cannotComplete
             )
         )
     }

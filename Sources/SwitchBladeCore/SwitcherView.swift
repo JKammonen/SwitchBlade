@@ -492,11 +492,19 @@ private struct WindowTile: View {
         .onHover { isHovered = $0; if $0 { onHover() } }
         .onTapGesture(perform: onSelect)
         .contextMenu {
-            snapMenuItems
+            if !item.isApplicationFallback {
+                snapMenuItems
+            }
         }
         .modifier(WindowTileAccessibilityModifier(
             label: tileAccessibilityLabel,
+            hint: L10n.tr(
+                item.isApplicationFallback
+                    ? .accessibilityApplicationTileHint
+                    : .accessibilityWindowTileHint
+            ),
             isSelected: isSelected,
+            allowsWindowActions: !item.isApplicationFallback,
             onSelect: onSelect,
             onClose: onClose,
             onSnap: onSnap
@@ -562,7 +570,7 @@ private struct WindowTile: View {
 
     @ViewBuilder
     private var tileActionControls: some View {
-        if isHovered || isSelected {
+        if !item.isApplicationFallback, isHovered || isSelected {
             VStack {
                 HStack {
                     Spacer()
@@ -730,24 +738,33 @@ private struct WindowTile: View {
 
 private struct WindowTileAccessibilityModifier: ViewModifier {
     let label: String
+    let hint: String
     let isSelected: Bool
+    let allowsWindowActions: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
     let onSnap: (WindowSnapEdge) -> Void
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
+        let base = content
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(label)
-            .accessibilityHint(L10n.tr(.accessibilityWindowTileHint))
+            .accessibilityHint(hint)
             .accessibilityAddTraits(.isButton)
             .accessibilityAddTraits(isSelected ? [.isSelected] : [])
             .accessibilityAction { onSelect() }
-            .accessibilityAction(named: Text(L10n.tr(.actionCloseWindow)), onClose)
-            .accessibilityAction(named: snapTitle(.left)) { onSnap(.left) }
-            .accessibilityAction(named: snapTitle(.right)) { onSnap(.right) }
-            .accessibilityAction(named: snapTitle(.top)) { onSnap(.top) }
-            .accessibilityAction(named: snapTitle(.bottom)) { onSnap(.bottom) }
+
+        if allowsWindowActions {
+            base
+                .accessibilityAction(named: Text(L10n.tr(.actionCloseWindow)), onClose)
+                .accessibilityAction(named: snapTitle(.left)) { onSnap(.left) }
+                .accessibilityAction(named: snapTitle(.right)) { onSnap(.right) }
+                .accessibilityAction(named: snapTitle(.top)) { onSnap(.top) }
+                .accessibilityAction(named: snapTitle(.bottom)) { onSnap(.bottom) }
+        } else {
+            base
+        }
     }
 
     private func snapTitle(_ edge: WindowSnapEdge) -> Text {

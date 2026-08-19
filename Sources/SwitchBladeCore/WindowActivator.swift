@@ -31,6 +31,12 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let chosenIsFocused: Bool
     }
 
+    struct DockApplicationCandidate: Equatable {
+        let title: String?
+        let applicationURL: URL?
+        let isRunning: Bool?
+    }
+
     private struct MatchedWindow {
         let element: AXUIElement
         let decision: WindowMatchDecision
@@ -39,13 +45,16 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
     private let raiseWindowOverride: ((WindowActionTarget) -> Bool)?
     private let activateApplicationOverride: ((pid_t) -> Bool)?
+    private let reopenApplicationOverride: ((pid_t) -> Bool)?
 
     init(
         raiseWindowOverride: ((WindowActionTarget) -> Bool)? = nil,
-        activateApplicationOverride: ((pid_t) -> Bool)? = nil
+        activateApplicationOverride: ((pid_t) -> Bool)? = nil,
+        reopenApplicationOverride: ((pid_t) -> Bool)? = nil
     ) {
         self.raiseWindowOverride = raiseWindowOverride
         self.activateApplicationOverride = activateApplicationOverride
+        self.reopenApplicationOverride = reopenApplicationOverride
     }
 
     func activate(_ item: WindowActionTarget) -> Bool {
@@ -70,6 +79,29 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let activated = performApplicationActivation(pid: pid)
         Logger.activator.info("activate app result pid=\(pid, privacy: .public) appActivated=\(activated, privacy: .public)")
         return activated
+    }
+
+    func reopenApplication(pid: pid_t) -> Bool {
+        Logger.activator.info("reopen app pid=\(pid, privacy: .public)")
+        let reopened = performApplicationReopen(pid: pid)
+        // The Dock press normally activates the app by itself. Repeat explicit
+        // activation with all-windows semantics so a delayed reopen cannot
+        // leave the target behind the previously frontmost application.
+        let activated = performApplicationActivation(pid: pid, options: [.activateAllWindows])
+        let succeeded = reopened && activated
+        PerformanceDiagnostics.record(
+            "activation_app_reopen",
+            fields: [
+                "activated": .bool(activated),
+                "pid": .int(Int(pid)),
+                "reopened": .bool(reopened),
+                "succeeded": .bool(succeeded)
+            ]
+        )
+        Logger.activator.info(
+            "reopen app result pid=\(pid, privacy: .public) reopened=\(reopened, privacy: .public) appActivated=\(activated, privacy: .public) succeeded=\(succeeded, privacy: .public)"
+        )
+        return succeeded
     }
 
     func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool {
@@ -232,10 +264,17 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let focusStart = Date()
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let focusMs = Date().timeIntervalSince(focusStart) * 1000
-        let targeted = Self.activationTargetingSucceeded(
+        let directTargetingSucceeded = Self.activationTargetingSucceeded(
             raiseResult: raiseResult,
             mainResult: mainResult,
             focusResult: focusResult
+        )
+        let targeted = Self.activationTargetingSucceeded(
+            raiseResult: raiseResult,
+            mainResult: mainResult,
+            focusResult: focusResult,
+            itemWasMinimized: item.isMinimized,
+            unminimizeResult: unminimizeResult
         )
         PerformanceDiagnostics.record(
             "activation_ax_target",
@@ -246,6 +285,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 "main_ms": .double(mainMs),
                 "main_result": .int(Int(mainResult.rawValue)),
                 "match_ms": .double(matchMs),
+                "minimized_transition_recovered": .bool(targeted && !directTargetingSucceeded),
                 "pid": .int(Int(item.pid)),
                 "raise_ms": .double(raiseMs),
                 "raise_result": .int(Int(raiseResult.rawValue)),
@@ -277,7 +317,10 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     @discardableResult
-    private func activateRunningApplication(pid: pid_t) -> Bool {
+    private func activateRunningApplication(
+        pid: pid_t,
+        options: NSApplication.ActivationOptions = []
+    ) -> Bool {
         guard pid != getpid(),
               let app = NSRunningApplication(processIdentifier: pid) else {
             Logger.activator.notice("App activation unavailable pid=\(pid, privacy: .public)")
@@ -285,7 +328,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
 
         let start = Date()
-        let requestAccepted = app.activate(options: [])
+        let requestAccepted = app.activate(options: options)
         // NSRunningApplication.activate only acknowledges the request. Real
         // telemetry has p95=84ms and p99=1.79s from request to frontmost
         // observation, so wait up to 2s before mutating MRU/hiding the panel.
@@ -328,14 +371,34 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     static func activationTargetingSucceeded(
         raiseResult: AXError,
         mainResult: AXError,
-        focusResult: AXError
+        focusResult: AXError,
+        itemWasMinimized: Bool = false,
+        unminimizeResult: AXError? = nil
     ) -> Bool {
         // Some valid application windows report AXRaise as attributeUnsupported.
         // If both selection attributes accepted the target, that unavailable
         // raise is a no-op rather than a failed selection. Other AX errors stay
         // fail-closed.
         let raiseAccepted = raiseResult == .success || raiseResult == .attributeUnsupported
-        return raiseAccepted && mainResult == .success && focusResult == .success
+        let directTargetingSucceeded = raiseAccepted
+            && mainResult == .success
+            && focusResult == .success
+        if directTargetingSucceeded { return true }
+
+        // During a real minimized-window restore, macOS can accept unminimize
+        // and focus, then return AXError.cannotComplete for raise/main while the
+        // WindowServer row is transitioning back on-screen. The exact matched
+        // target has already been restored and focused; app activation confirms
+        // the visible result in `activate`. Accept only this narrow transition
+        // shape so unrelated AX failures still restore the switcher panel.
+        guard itemWasMinimized,
+              unminimizeResult == .success,
+              focusResult == .success else {
+            return false
+        }
+        let transitionRaiseAccepted = raiseAccepted || raiseResult == .cannotComplete
+        let transitionMainAccepted = mainResult == .success || mainResult == .cannotComplete
+        return transitionRaiseAccepted && transitionMainAccepted
     }
 
     static func confirmRequest(
@@ -353,11 +416,161 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     @discardableResult
-    private func performApplicationActivation(pid: pid_t) -> Bool {
+    private func performApplicationActivation(
+        pid: pid_t,
+        options: NSApplication.ActivationOptions = []
+    ) -> Bool {
         if let activateApplicationOverride {
             return activateApplicationOverride(pid)
         }
-        return activateRunningApplication(pid: pid)
+        return activateRunningApplication(pid: pid, options: options)
+    }
+
+    @discardableResult
+    private func performApplicationReopen(pid: pid_t) -> Bool {
+        if let reopenApplicationOverride {
+            return reopenApplicationOverride(pid)
+        }
+        return pressRunningApplicationDockItem(pid: pid)
+    }
+
+    private func pressRunningApplicationDockItem(pid: pid_t) -> Bool {
+        guard pid != getpid(),
+              let targetApplication = NSRunningApplication(processIdentifier: pid),
+              !targetApplication.isTerminated,
+              let dockApplication = NSRunningApplication.runningApplications(
+                  withBundleIdentifier: "com.apple.dock"
+              ).first else {
+            Logger.activator.notice("Dock reopen unavailable pid=\(pid, privacy: .public)")
+            return false
+        }
+
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let deadline = startedAt + 1.0
+        let maximumElements = 256
+        var queue: [(element: AXUIElement, depth: Int)] = [
+            (appElement(for: dockApplication.processIdentifier), 0)
+        ]
+        var candidates: [(element: AXUIElement, descriptor: DockApplicationCandidate)] = []
+        var scanned = 0
+
+        while !queue.isEmpty,
+              scanned < maximumElements,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            let current = queue.removeFirst()
+            scanned += 1
+            applyAXMessagingTimeout(to: current.element)
+
+            if axString(kAXSubroleAttribute, on: current.element)
+                == (kAXApplicationDockItemSubrole as String) {
+                candidates.append((
+                    element: current.element,
+                    descriptor: DockApplicationCandidate(
+                        title: axString(kAXTitleAttribute, on: current.element),
+                        applicationURL: axURL(on: current.element),
+                        isRunning: axOptionalBool(
+                            kAXIsApplicationRunningAttribute,
+                            on: current.element
+                        )
+                    )
+                ))
+            }
+
+            guard current.depth < 4 else { continue }
+            for child in axChildren(on: current.element) {
+                queue.append((child, current.depth + 1))
+            }
+        }
+
+        let targetIndex = Self.bestDockApplicationCandidateIndex(
+            targetTitle: targetApplication.localizedName,
+            targetURL: targetApplication.bundleURL,
+            candidates: candidates.map(\.descriptor)
+        )
+        let pressResult: AXError
+        if let targetIndex {
+            pressResult = AXUIElementPerformAction(
+                candidates[targetIndex].element,
+                kAXPressAction as CFString
+            )
+        } else {
+            pressResult = .noValue
+        }
+        let elapsedMs = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+        let succeeded = pressResult == .success
+        PerformanceDiagnostics.record(
+            "activation_dock_reopen",
+            fields: [
+                "candidate_count": .int(candidates.count),
+                "elapsed_ms": .double(elapsedMs),
+                "matched": .bool(targetIndex != nil),
+                "pid": .int(Int(pid)),
+                "press_result": .int(Int(pressResult.rawValue)),
+                "scanned": .int(scanned),
+                "succeeded": .bool(succeeded)
+            ]
+        )
+        return succeeded
+    }
+
+    static func bestDockApplicationCandidateIndex(
+        targetTitle: String?,
+        targetURL: URL?,
+        candidates: [DockApplicationCandidate]
+    ) -> Int? {
+        let eligible = candidates.indices.filter { candidates[$0].isRunning != false }
+        if let targetURL {
+            let normalizedTargetURL = targetURL.standardizedFileURL
+            if let exactURLMatch = eligible.first(where: { index in
+                candidates[index].applicationURL?.standardizedFileURL == normalizedTargetURL
+            }) {
+                return exactURLMatch
+            }
+        }
+        guard let targetTitle, !targetTitle.isEmpty else { return nil }
+        return eligible.first(where: { candidates[$0].title == targetTitle })
+    }
+
+    private func axChildren(on element: AXUIElement) -> [AXUIElement] {
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXChildrenAttribute as CFString,
+            &rawValue
+        ) == .success,
+        let children = rawValue as? [AXUIElement] else {
+            return []
+        }
+        return children
+    }
+
+    private func axURL(on element: AXUIElement) -> URL? {
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXURLAttribute as CFString,
+            &rawValue
+        ) == .success,
+        let rawValue else {
+            return nil
+        }
+        if CFGetTypeID(rawValue) == CFURLGetTypeID() {
+            return rawValue as? URL
+        }
+        if let stringValue = rawValue as? String {
+            return URL(string: stringValue)
+        }
+        return nil
+    }
+
+    private func axOptionalBool(_ attribute: String, on element: AXUIElement) -> Bool? {
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &rawValue) == .success,
+              let rawValue,
+              CFGetTypeID(rawValue) == CFBooleanGetTypeID() else {
+            return nil
+        }
+        return CFBooleanGetValue((rawValue as! CFBoolean))
     }
 
     static func shouldActivateApplication(afterTargeting item: WindowActionTarget) -> Bool {

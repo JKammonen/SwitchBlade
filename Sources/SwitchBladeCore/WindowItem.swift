@@ -17,6 +17,7 @@ struct WindowActionTarget: Identifiable, Equatable, Sendable {
 
     var id: CGWindowID { windowID }
     var windowProcessIdentifier: pid_t { windowOwnerPID ?? pid }
+    var isApplicationFallback: Bool { SyntheticApplicationID.isSynthetic(windowID) }
 }
 
 struct WindowItem: Identifiable, Equatable {
@@ -42,13 +43,17 @@ struct WindowItem: Identifiable, Equatable {
 
     var id: CGWindowID { windowID }
     var windowProcessIdentifier: pid_t { windowOwnerPID ?? pid }
+    var isApplicationFallback: Bool { SyntheticApplicationID.isSynthetic(windowID) }
 
     var displayTitle: String {
         isTitleRedacted || title.isEmpty ? appName : title
     }
 
     var subtitle: String {
-        isTitleRedacted || title.isEmpty ? "App" : appName
+        if isApplicationFallback {
+            return L10n.tr(.windowStateApplication)
+        }
+        return isTitleRedacted || title.isEmpty ? "App" : appName
     }
 
     var actionTarget: WindowActionTarget {

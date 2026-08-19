@@ -461,6 +461,33 @@ enum WindowEligibilityPolicy {
     }
 }
 
+enum ApplicationFallbackPolicy {
+    static func processIdentifiers(
+        from applications: [RunningApplicationDescriptor],
+        representedApplicationPIDs: Set<pid_t>,
+        currentProcessIdentifier: pid_t,
+        frontmostPID: pid_t?,
+        scope: SBWindowScope
+    ) -> [pid_t] {
+        var seen = Set<pid_t>()
+        return applications.compactMap { application in
+            let pid = application.processIdentifier
+            guard !representedApplicationPIDs.contains(pid),
+                  WindowEligibilityPolicy.canIncludeApplication(
+                      processIdentifier: pid,
+                      currentProcessIdentifier: currentProcessIdentifier,
+                      activationPolicy: application.activationPolicy,
+                      isFinishedLaunching: application.isFinishedLaunching
+                  ),
+                  scope != .currentApp || pid == frontmostPID,
+                  seen.insert(pid).inserted else {
+                return nil
+            }
+            return pid
+        }
+    }
+}
+
 struct RunningApplicationDescriptor: Equatable {
     let processIdentifier: pid_t
     let activationPolicy: NSApplication.ActivationPolicy
@@ -663,16 +690,21 @@ enum AXWindowEligibilityPolicy {
     }
 }
 
-private struct WindowSharingStateIndex {
+struct WindowSharingStateIndex {
     private struct Key: Hashable {
         let pid: pid_t
         let title: String
     }
 
-    private let statesByKey: [Key: [Int]]
+    struct Match: Equatable {
+        let windowID: CGWindowID
+        let sharingState: Int
+    }
 
-    private init(statesByKey: [Key: [Int]]) {
-        self.statesByKey = statesByKey
+    private let matchesByKey: [Key: [Match]]
+
+    private init(matchesByKey: [Key: [Match]]) {
+        self.matchesByKey = matchesByKey
     }
 
     static func fromCurrentWindowList() -> Self {
@@ -680,15 +712,16 @@ private struct WindowSharingStateIndex {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
-            return WindowSharingStateIndex(statesByKey: [:])
+            return WindowSharingStateIndex(matchesByKey: [:])
         }
         return WindowSharingStateIndex(rawList: rawList)
     }
 
     init(rawList: [[String: Any]]) {
-        var statesByKey: [Key: [Int]] = [:]
+        var matchesByKey: [Key: [Match]] = [:]
         for entry in rawList {
-            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+            guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
+                  let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
                   let layer = entry[kCGWindowLayer as String] as? Int,
                   layer == 0 else {
                 continue
@@ -697,15 +730,31 @@ private struct WindowSharingStateIndex {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { continue }
             let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
-            statesByKey[Key(pid: ownerPID, title: title), default: []].append(sharingState)
+            matchesByKey[Key(pid: ownerPID, title: title), default: []].append(
+                Match(windowID: windowID, sharingState: sharingState)
+            )
         }
-        self.statesByKey = statesByKey
+        self.matchesByKey = matchesByKey
     }
 
     func sharingStates(pid: pid_t, title: String) -> [Int]? {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else { return nil }
-        return statesByKey[Key(pid: pid, title: trimmedTitle)]
+        return matchesByKey[Key(pid: pid, title: trimmedTitle)]?.map(\.sharingState)
+    }
+
+    /// A minimized window remains in CGWindowList with its original WindowServer
+    /// ID even though current-Space snapshots stop returning it. Reuse that ID
+    /// only when pid + exact raw title identify one layer-0 row. Ambiguous rows
+    /// keep the synthetic ID so a preview can never be borrowed from a sibling.
+    func uniqueWindow(pid: pid_t, title: String) -> Match? {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty,
+              let matches = matchesByKey[Key(pid: pid, title: trimmedTitle)],
+              matches.count == 1 else {
+            return nil
+        }
+        return matches[0]
     }
 }
 
@@ -843,8 +892,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         await contentCache.refreshIfAllowed(successContext: context)
     }
 
-    /// Fast path used on the Cmd+Tab critical path. Skips the AX walk for
-    /// minimized windows entirely; merge those in lazily via `snapshotMinimized`.
+    /// Fast path used on the Cmd+Tab critical path. Includes one icon-only
+    /// fallback for each running regular app that has no eligible window in the
+    /// selected scope. Skips the AX walk for minimized windows entirely; merge
+    /// concrete minimized rows in lazily via `snapshotMinimized`.
     /// One AX cost remains: the frontmost app's focused-window probe in
     /// `normalizeFrontmostWindowOrder`, only when that app has several visible
     /// windows, bounded by the 0.25 s messaging timeout and reported as
@@ -1007,6 +1058,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let filteredVisibleItems = filterAuxiliaryWindowSurfaces(
             HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems)
         )
+        let applicationFallbacks = applicationFallbackItems(
+            representedApplicationPIDs: Set(filteredVisibleItems.map(\.pid)),
+            runningApplications: runningApplications,
+            frontmostPID: frontmostPID,
+            scope: windowScope,
+            hiddenAppTokens: HiddenAppFilterState.normalizedTokens
+        )
         let minimized = includeMinimized
             ? minimizedItems(
                 excluding: visibleWindowIDs,
@@ -1017,8 +1075,25 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 cancellation: CooperativeCancellationToken()
             )
             : []
+        let minimizedApplicationPIDs = Set(minimized.map(\.pid))
+        let visibleAndApplicationFallbacks = (filteredVisibleItems + applicationFallbacks)
+            .filter { item in
+                !item.isApplicationFallback || !minimizedApplicationPIDs.contains(item.pid)
+            }
+        PerformanceDiagnostics.record(
+            "window_snapshot",
+            fields: [
+                "application_fallbacks": .int(applicationFallbacks.count),
+                "concrete_visible": .int(filteredVisibleItems.count),
+                "minimized": .int(minimized.count),
+                "scope": .string(windowScope.rawValue)
+            ]
+        )
         return SnapshotResult(
-            visible: normalizeFrontmostWindowOrder(filteredVisibleItems, frontmostPID: frontmostPID),
+            visible: normalizeFrontmostWindowOrder(
+                visibleAndApplicationFallbacks,
+                frontmostPID: frontmostPID
+            ),
             minimized: minimized
         )
     }
@@ -1722,6 +1797,69 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return true
     }
 
+    private func applicationFallbackItems(
+        representedApplicationPIDs: Set<pid_t>,
+        runningApplications: [NSRunningApplication],
+        frontmostPID: pid_t?,
+        scope: SBWindowScope,
+        hiddenAppTokens: Set<HiddenAppToken>
+    ) -> [WindowItem] {
+        let descriptors = runningApplications.map(Self.applicationDescriptor)
+        let fallbackPIDs = Set(ApplicationFallbackPolicy.processIdentifiers(
+            from: descriptors,
+            representedApplicationPIDs: representedApplicationPIDs,
+            currentProcessIdentifier: getpid(),
+            frontmostPID: frontmostPID,
+            scope: scope
+        ))
+        guard !fallbackPIDs.isEmpty else { return [] }
+
+        return runningApplications.compactMap { application in
+            let pid = application.processIdentifier
+            guard fallbackPIDs.contains(pid), !application.isTerminated else { return nil }
+
+            let bundleIdentifier = application.bundleIdentifier
+            guard bundleIdentifier.map({ !excludedBundleIdentifiers.contains($0) }) ?? true else {
+                return nil
+            }
+            let appName = application.localizedName
+                ?? bundleIdentifier
+                ?? application.bundleURL?.deletingPathExtension().lastPathComponent
+                ?? "Application"
+            guard !isHiddenByUser(
+                appName: appName,
+                bundleIdentifier: bundleIdentifier,
+                tokens: hiddenAppTokens
+            ) else {
+                return nil
+            }
+
+            return WindowItem(
+                windowID: SyntheticApplicationID.make(
+                    pid: pid,
+                    bundleIdentifier: bundleIdentifier,
+                    appName: appName
+                ),
+                pid: pid,
+                appName: appName,
+                title: "",
+                bounds: CGRect(x: 0, y: 0, width: 640, height: 400),
+                isFrontmostApp: pid == frontmostPID,
+                isMinimized: false,
+                canCapturePreview: false,
+                isTitleRedacted: false,
+                preview: nil,
+                icon: IconNaming.named(
+                    application.icon,
+                    bundleIdentifier: bundleIdentifier,
+                    appName: appName
+                ),
+                bundleIdentifier: bundleIdentifier,
+                windowOwnerPID: nil
+            )
+        }
+    }
+
     private func minimizedItems(
         excluding visibleWindowIDs: Set<CGWindowID>,
         frontmostPID: pid_t?,
@@ -1803,15 +1941,21 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     continue
                 }
 
-                let syntheticID = SyntheticWindowID.make(
+                let matchedWindow = titleDecision == .showTitle
+                    ? sharingStateIndex.uniqueWindow(
+                        pid: applicationResolution.windowProcessIdentifier,
+                        title: title
+                    )
+                    : nil
+                let windowID = matchedWindow?.windowID ?? SyntheticWindowID.make(
                     pid: applicationResolution.windowProcessIdentifier,
                     index: index,
                     title: title
                 )
-                guard !visibleWindowIDs.contains(syntheticID) else { continue }
+                guard !visibleWindowIDs.contains(windowID) else { continue }
 
                 result.append(WindowItem(
-                    windowID: syntheticID,
+                    windowID: windowID,
                     pid: applicationResolution.hostProcessIdentifier,
                     appName: appName,
                     title: title,
@@ -2017,5 +2161,26 @@ enum SyntheticWindowID {
 
     static func isSynthetic(_ id: CGWindowID) -> Bool {
         (id & markerBit) != 0
+    }
+}
+
+/// Stable-for-launch identity for an app that is running but has no eligible
+/// window row in the current scope. The `01` high-bit namespace keeps these
+/// icon-only rows distinct from both real and AX-minimized window identifiers.
+enum SyntheticApplicationID {
+    private static let namespaceMask: UInt32 = 0xC000_0000
+    private static let namespace: UInt32 = 0x4000_0000
+
+    static func make(pid: pid_t, bundleIdentifier: String?, appName: String) -> CGWindowID {
+        var hasher = Hasher()
+        hasher.combine(pid)
+        hasher.combine(bundleIdentifier)
+        hasher.combine(appName)
+        let raw = UInt32(truncatingIfNeeded: hasher.finalize())
+        return namespace | (raw & 0x3FFF_FFFF)
+    }
+
+    static func isSynthetic(_ id: CGWindowID) -> Bool {
+        (id & namespaceMask) == namespace
     }
 }

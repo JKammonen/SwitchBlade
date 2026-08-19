@@ -62,7 +62,9 @@ enum L10nTables {
         .actionSnapBottom:                "Down",
         .actionCloseWindow:               "Close window",
         .accessibilityWindowTileHint:     "Selects this window",
+        .accessibilityApplicationTileHint:"Activates this application",
         .windowStateMinimized:            "Minimized",
+        .windowStateApplication:          "Application",
 
         .permissionMessageAccessibility:  "Enable Accessibility for the global switcher and window controls.",
         .permissionMessageScreenRecording:"Enable Screen Recording for live window previews.",
@@ -204,7 +206,9 @@ enum L10nTables {
         .actionSnapBottom:                "Alas",
         .actionCloseWindow:               "Sulje ikkuna",
         .accessibilityWindowTileHint:     "Valitsee tämän ikkunan",
+        .accessibilityApplicationTileHint:"Aktivoi tämän sovelluksen",
         .windowStateMinimized:            "Minimoitu",
+        .windowStateApplication:          "Sovellus",
 
         .permissionMessageAccessibility:  "Salli Käyttöapu yleiseen ikkunanvaihtoon ja ikkunoiden hallintaan.",
         .permissionMessageScreenRecording:"Salli Näytön tallennus elävien ikkunaesikatselujen näyttämiseksi.",
