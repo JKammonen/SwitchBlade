@@ -264,13 +264,15 @@ enum CaptureTimeoutTests {
     /// app's sibling window later in the raw snapshot, it must not push that
     /// sibling behind other apps in the next cached open.
     @MainActor static func activation_warmupDoesNotPushSameAppSiblingToTail() async throws {
-        let (store, catalog, _, _) = makeStore()
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker)
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, title: "Ghostty B", isFrontmostApp: true),
             makeItem(id: 2, pid: 100, title: "Ghostty A"),
             makeItem(id: 3, pid: 200, title: "Other App")
         ]
         await seedOpenItemsCache(store)
+        let baselineConcreteMRU = tracker.recentWindowIDs
 
         let baselineSnapshots = catalog.visibleSnapshotCount
 
@@ -294,6 +296,11 @@ enum CaptureTimeoutTests {
         // Let the warmup task's continuation (order + stabilize + cache update)
         // run after its snapshot returned, before the open reads the cache.
         await runPendingMainTasks()
+        try expectEqual(
+            tracker.recentWindowIDs,
+            baselineConcreteMRU,
+            "background open-items warmup must not mutate concrete window MRU"
+        )
 
         store.requestCycle(forward: true)
         await runPendingMainTasks()

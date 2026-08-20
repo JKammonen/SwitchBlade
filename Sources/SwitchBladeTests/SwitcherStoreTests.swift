@@ -29,6 +29,10 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_slowSnapshotDoesNotPaySecondPanelDelay", requestCycle_slowSnapshotDoesNotPaySecondPanelDelay),
         ("Store/requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes", requestCycle_usesStaleCachedItemsImmediatelyThenRefreshes),
         ("Store/requestCycle_currentAppMultiWindowCacheUsesFreshSnapshot", requestCycle_currentAppMultiWindowCacheUsesFreshSnapshot),
+        ("Store/requestCycle_currentAppFocusedSiblingKeepsConcreteMRURank", requestCycle_currentAppFocusedSiblingKeepsConcreteMRURank),
+        ("Store/requestCycle_warmCurrentAppCacheTracksFocusedSibling", requestCycle_warmCurrentAppCacheTracksFocusedSibling),
+        ("Store/requestCycle_staleCacheHealTracksFocusedSiblingWhileOpen", requestCycle_staleCacheHealTracksFocusedSiblingWhileOpen),
+        ("Store/requestCycle_focusRankRejectsAmbiguousSnapshots", requestCycle_focusRankRejectsAmbiguousSnapshots),
         ("Store/requestCycle_staleRefreshDoesNotShowVisiblePanelAgain", requestCycle_staleRefreshDoesNotShowVisiblePanelAgain),
         ("Store/requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit", requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit),
         ("Store/requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot", requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot),
@@ -440,6 +444,173 @@ enum SwitcherStoreTests {
             store.items.first(where: { $0.id == 1 })?.preview === preview,
             "backgrounded app should keep showing its cached preview, not blank to an icon"
         )
+    }
+
+    /// Outlook-style repro: focus moves to a sibling window while the app is
+    /// already frontmost, so macOS sends no application-activation notification.
+    /// The fresh open must still give that exact focused window a concrete rank;
+    /// otherwise it falls to snapshot fallback as soon as another app is frontmost.
+    @MainActor static func requestCycle_currentAppFocusedSiblingKeepsConcreteMRURank() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+        let initialItems = [
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser"),
+            makeItem(id: 30, pid: 300, appName: "Editor", title: "Code", bundleIdentifier: "com.example.editor")
+        ]
+        tracker.rememberSelection(10, in: initialItems)
+        tracker.rememberSelection(20, in: initialItems)
+        tracker.rememberSelection(30, in: initialItems)
+
+        catalog.visibleItems = [
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            initialItems[2],
+            initialItems[1]
+        ]
+        await openSwitcher(store)
+
+        let afterAnotherAppBecomesFrontmost = [
+            makeItem(id: 30, pid: 300, appName: "Editor", title: "Code", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", bundleIdentifier: "com.microsoft.Outlook"),
+            initialItems[1]
+        ]
+        let ordered = tracker.orderedForDisplay(from: afterAnotherAppBecomesFrontmost)
+
+        try expectEqual(ordered.map(\.id), [30, 11, 20, 10])
+    }
+
+    /// The production Outlook path normally starts with a warm multi-window
+    /// cache. That cache must force a fresh snapshot, and stabilizing its order
+    /// must not undo the focused sibling's new concrete rank.
+    @MainActor static func requestCycle_warmCurrentAppCacheTracksFocusedSibling() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(
+            mruTracker: tracker,
+            initialFrontmostAppPID: 100
+        )
+        let initialItems = [
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser"),
+            makeItem(id: 30, pid: 300, appName: "Editor", title: "Code", bundleIdentifier: "com.example.editor")
+        ]
+        tracker.rememberSelection(10, in: initialItems)
+        tracker.rememberSelection(20, in: initialItems)
+        tracker.rememberSelection(30, in: initialItems)
+
+        catalog.visibleItems = [
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 12, pid: 100, appName: "Outlook", title: "Calendar", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            initialItems[2],
+            initialItems[1]
+        ]
+        await seedOpenItemsCache(store)
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        catalog.visibleItems = [
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            initialItems[2],
+            initialItems[1]
+        ]
+
+        store.requestCycle(forward: true)
+        try expect(!store.isVisible, "warm multi-window cache must wait for the focused-window snapshot")
+        await runPendingMainTasks()
+
+        try expect(store.isVisible)
+        try expectEqual(catalog.visibleSnapshotCount, baselineSnapshots + 1)
+        try expectEqual(tracker.recentWindowIDs.first, 11)
+
+        let afterAnotherAppBecomesFrontmost = [
+            makeItem(id: 30, pid: 300, appName: "Editor", title: "Code", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", bundleIdentifier: "com.microsoft.Outlook"),
+            initialItems[1],
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", bundleIdentifier: "com.microsoft.Outlook")
+        ]
+        let ordered = tracker.orderedForDisplay(from: afterAnotherAppBecomesFrontmost)
+        try expectEqual(ordered.map(\.id), [30, 11, 10, 20])
+    }
+
+    /// A stale cache can be shown immediately while a fresh snapshot heals it.
+    /// While the switcher is still open, that authoritative snapshot must record
+    /// the focused sibling just like the direct fresh-open path does.
+    @MainActor static func requestCycle_staleCacheHealTracksFocusedSiblingWhileOpen() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(
+            mruTracker: tracker,
+            cachedOpenItemsMaxAge: -1
+        )
+        catalog.visibleItems = [
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser")
+        ]
+        await seedOpenItemsCache(store)
+
+        catalog.visibleItems = [
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser")
+        ]
+
+        store.requestCycle(forward: true)
+        try expect(store.isVisible, "stale cache should be visible while its fresh snapshot heals")
+        await runPendingMainTasks()
+
+        try expectEqual(tracker.recentWindowIDs.first, 11)
+        let ordered = tracker.orderedForDisplay(from: [
+            makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", isFrontmostApp: true, bundleIdentifier: "com.example.browser"),
+            makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", bundleIdentifier: "com.microsoft.Outlook"),
+            makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", bundleIdentifier: "com.microsoft.Outlook")
+        ])
+        try expectEqual(ordered.map(\.id), [20, 11, 10])
+    }
+
+    /// Focus rank is safe only when the snapshot names a concrete focused row
+    /// and proves that its app has more than one window. Ambiguous, single-window,
+    /// and app-fallback snapshots must leave concrete MRU history untouched.
+    @MainActor static func requestCycle_focusRankRejectsAmbiguousSnapshots() async throws {
+        do {
+            let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+            let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+            catalog.visibleItems = [
+                makeItem(id: 1, pid: 100, isFrontmostApp: true),
+                makeItem(id: 2, pid: 200)
+            ]
+            await openSwitcher(store)
+            try expectEqual(tracker.recentWindowIDs, [], "single-window app must not gain a concrete focus rank")
+            store.cancel()
+        }
+
+        do {
+            let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+            let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+            catalog.visibleItems = [
+                makeItem(id: 3, pid: 300),
+                makeItem(id: 4, pid: 300)
+            ]
+            await openSwitcher(store)
+            try expectEqual(tracker.recentWindowIDs, [], "snapshot without a frontmost row must fail closed")
+            store.cancel()
+        }
+
+        do {
+            let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+            let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+            let fallbackID = SyntheticApplicationID.make(
+                pid: 400,
+                bundleIdentifier: "com.example.fallback",
+                appName: "Fallback"
+            )
+            catalog.visibleItems = [
+                makeItem(id: fallbackID, pid: 400, appName: "Fallback", title: "", isFrontmostApp: true),
+                makeItem(id: 5, pid: 400, appName: "Fallback", isFrontmostApp: true)
+            ]
+            await openSwitcher(store)
+            try expectEqual(tracker.recentWindowIDs, [], "application fallback must not gain a concrete window rank")
+            store.cancel()
+        }
     }
 
     // Regression guard for "minimized windows do not appear in the switcher":
@@ -1164,7 +1335,9 @@ enum SwitcherStoreTests {
     }
 
     @MainActor static func requestCycle_staleCachedOpenHealsCacheEvenAfterImmediateCommit() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let (store, catalog, activator, _) = makeStore(
+            mruTracker: tracker,
             cachedOpenItemsMaxAge: -1,
             initialPanelShowDelayNanoseconds: 120_000_000
         )
@@ -1176,6 +1349,7 @@ enum SwitcherStoreTests {
 
         catalog.visibleItems = [
             makeItem(id: 3, pid: 300, isFrontmostApp: true),
+            makeItem(id: 5, pid: 300, isFrontmostApp: true),
             makeItem(id: 4, pid: 400)
         ]
         catalog.visibleSnapshotDelayNanoseconds = 100_000_000
@@ -1195,6 +1369,12 @@ enum SwitcherStoreTests {
         try? await Task.sleep(nanoseconds: 150_000_000)
         await runPendingMainTasks()
 
+        try expectEqual(tracker.recentWindowIDs.first, 2)
+        try expect(
+            !tracker.recentWindowIDs.contains(3),
+            "late stale-cache healing must not rank the old focused app after the switcher has closed"
+        )
+
         store.requestCycle(forward: true)
 
         try expect(!store.isVisible)
@@ -1202,7 +1382,7 @@ enum SwitcherStoreTests {
         await runPendingMainTasks()
 
         try expect(store.isVisible)
-        try expectEqual(store.items.map(\.id), [3, 4])
+        try expectEqual(store.items.map(\.id), [3, 5, 4])
     }
 
     @MainActor static func requestCycle_staleSameAppQuickReleaseWaitsForFreshSnapshot() async throws {

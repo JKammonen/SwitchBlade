@@ -1566,6 +1566,7 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
 
             let orderStart = Date()
+            self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
             let snapshotOrderedItems = self.orderItems(
                 self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot")
             )
@@ -1605,6 +1606,7 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             let orderStart = Date()
+            self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
             let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "stale-heal"))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             guard !orderedItems.isEmpty else { return }
@@ -1627,6 +1629,22 @@ final class SwitcherStore: ObservableObject {
                 )
             }
         }
+    }
+
+    /// `didActivateApplication` does not fire when focus moves between windows
+    /// of the already-frontmost app. A user-initiated fresh open has already
+    /// resolved that app's focused AX window to the first same-app snapshot row,
+    /// so preserve the concrete rank before another app can push an unranked
+    /// sibling to snapshot fallback. Background warmups must stay non-mutating.
+    private func rememberFrontmostWindowFocusIfNeeded(in snapshot: [WindowItem]) {
+        guard isSwitching,
+              let frontmost = snapshot.first(where: \.isFrontmostApp),
+              !frontmost.isApplicationFallback else { return }
+        let sameAppWindowCount = snapshot.reduce(0) { count, item in
+            count + (item.pid == frontmost.pid ? 1 : 0)
+        }
+        guard sameAppWindowCount > 1 else { return }
+        mruTracker.trackFocusedWindowActivation(frontmost, context: "switcher-open-focus")
     }
 
     private func applyStaleCacheRefresh(
