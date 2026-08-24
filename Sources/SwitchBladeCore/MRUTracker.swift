@@ -214,7 +214,21 @@ final class MRUTracker {
         promoteRecentBundle(bundleID)
     }
 
-    /// Moves the concrete rank for `item` to the front, creating it if needed.
+    /// Records the exact window an app left focused when it moved to the
+    /// background. The newly-frontmost app already owns rank 0, so the
+    /// backgrounded window belongs immediately behind it. This matters when a
+    /// new sibling window was created after the switcher's open-items cache:
+    /// without a concrete rank it would enter later through snapshot fallback
+    /// and appear in the middle or at the tail of the switcher.
+    func trackBackgroundedWindowFocus(_ item: WindowItem, context: String = "backgrounded-app-focus") {
+        let movedFromIndex = promoteConcreteRank(for: item, insertionIndex: 1)
+        trimRanksToCapacity()
+        logRememberSelection(item, movedFromIndex: movedFromIndex, liveItems: [item], context: context)
+    }
+
+    /// Moves the concrete rank for `item` to `insertionIndex`, creating it if
+    /// needed. Normal focus tracking uses rank 0; a just-backgrounded window
+    /// uses rank 1 behind the newly-frontmost app.
     /// ID match only: rebinding by signature would let a same-titled sibling
     /// steal the rank of a window that is merely absent from a partial list —
     /// absence never proves death. Recreated windows recover via the
@@ -222,7 +236,7 @@ final class MRUTracker {
     /// Also drops the app's identity-only rank: once the exact window is
     /// known, the coarse app-level hint would only pull an unrelated sibling
     /// forward on the next open.
-    private func promoteConcreteRank(for item: WindowItem) -> Int? {
+    private func promoteConcreteRank(for item: WindowItem, insertionIndex: Int = 0) -> Int? {
         let existingIndex = recentRanks.firstIndex(where: { $0.windowID == item.id })
         var selectedRank = existingIndex.map { recentRanks.remove(at: $0) }
             ?? RankEntry(windowID: nil, signature: nil, appIdentity: appIdentity(for: item))
@@ -230,7 +244,7 @@ final class MRUTracker {
         selectedRank.signature = signature(for: item)
         let identity = appIdentity(for: item)
         recentRanks.removeAll { $0.appIdentity == identity && isIdentityOnly($0) }
-        recentRanks.insert(selectedRank, at: 0)
+        recentRanks.insert(selectedRank, at: min(insertionIndex, recentRanks.count))
         return existingIndex
     }
 

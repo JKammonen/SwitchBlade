@@ -105,6 +105,7 @@ final class SwitcherStore: ObservableObject {
     private var panelShowScheduleID = 0
     private var previewWarmupTask: Task<Void, Never>?
     private var focusedRankUpgradeTask: Task<Void, Never>?
+    private var backgroundedFocusRankTask: Task<Void, Never>?
     private var windowActionTask: Task<Void, Never>?
     private var windowActionID: UUID?
     private var windowActionGeneration = 0
@@ -247,6 +248,7 @@ final class SwitcherStore: ObservableObject {
         let pendingSelfActivation = recordObservedActivationIfNeeded(pid: pid)
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
+                let backgroundedPID = currentAppPID
                 // Do NOT discard the backgrounded app's cached preview here.
                 // Dropping it made that app — usually the next Cmd+Tab target —
                 // flash its icon for a beat until a fresh capture landed. Keep the
@@ -255,6 +257,12 @@ final class SwitcherStore: ObservableObject {
                 previousAppPID = currentAppPID
                 currentAppPID = pid
                 cachedOpenItemsNeedResnapshot = true
+                if let backgroundedPID, backgroundedPID != switchBladePID {
+                    scheduleBackgroundedWindowRankUpgrade(
+                        pid: backgroundedPID,
+                        expectedCurrentPID: pid
+                    )
+                }
             }
             // A window-targeted self-activation was already recorded exactly by
             // rememberSelection at commit; re-tracking it would only stack an
@@ -284,6 +292,7 @@ final class SwitcherStore: ObservableObject {
         staleCacheHealTask?.cancel()
         previewWarmupTask?.cancel()
         focusedRankUpgradeTask?.cancel()
+        backgroundedFocusRankTask?.cancel()
         windowActionTask?.cancel()
         minimizedMergeTask?.cancel()
         if let activationObserver {
@@ -2099,6 +2108,25 @@ final class SwitcherStore: ObservableObject {
             guard !Task.isCancelled, let item, item.pid == pid else { return }
             guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else { return }
             self.mruTracker.trackFocusedWindowActivation(item)
+        }
+    }
+
+    /// Resolve the exact window the previous app left focused. A newly-created
+    /// sibling can be absent from the young open-items cache, so waiting for a
+    /// background warmup would discover it only as an unranked snapshot
+    /// fallback. AX retains the focused window after the app backgrounds; the
+    /// result is accepted only while the same successor app is still current.
+    private func scheduleBackgroundedWindowRankUpgrade(pid: pid_t, expectedCurrentPID: pid_t) {
+        backgroundedFocusRankTask?.cancel()
+        let catalog = self.catalog
+        backgroundedFocusRankTask = Task { @MainActor [weak self] in
+            let item = await Task.detached(priority: .utility) {
+                catalog.focusedWindowItem(pid: pid)
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            guard self.currentAppPID == expectedCurrentPID, !self.isVisible, !self.isSwitching else { return }
+            guard let item, item.pid == pid, !item.isApplicationFallback else { return }
+            self.mruTracker.trackBackgroundedWindowFocus(item)
         }
     }
 

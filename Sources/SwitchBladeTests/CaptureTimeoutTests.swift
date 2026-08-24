@@ -15,6 +15,8 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
         ("ActivationRefresh/selfInitiatedWindowSwitch_addsNoIdentityRank", activation_selfInitiatedWindowSwitchAddsNoIdentityRank),
         ("ActivationRefresh/externalActivation_upgradesToFocusedWindowRank", activation_externalActivationUpgradesToFocusedWindowRank),
+        ("ActivationRefresh/backgroundedNewSibling_getsConcreteRank", activation_backgroundedNewSiblingGetsConcreteRank),
+        ("ActivationRefresh/backgroundedFocus_isDiscardedAfterSuccessorChanges", activation_backgroundedFocusDiscardedAfterSuccessorChanges),
         ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation),
@@ -220,10 +222,14 @@ enum CaptureTimeoutTests {
 
     /// The activation notification for a window SwitchBlade itself just
     /// activated must not stack an identity-only rank on top of the concrete
-    /// rank rememberSelection recorded at commit — nor kick the AX upgrade.
+    /// rank rememberSelection recorded at commit. The previous app is still
+    /// resolved once so a newly-created sibling cannot remain unranked.
     @MainActor static func activation_selfInitiatedWindowSwitchAddsNoIdentityRank() async throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
-        let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+        let (store, catalog, _, _) = makeStore(
+            mruTracker: tracker,
+            initialFrontmostAppPID: 100
+        )
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
             makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser"),
@@ -239,7 +245,7 @@ enum CaptureTimeoutTests {
 
         try expectEqual(tracker.recentWindowIDs.first, 2)
         try expectEqual(tracker.identityOnlyRankIdentities, [])
-        try expectEqual(catalog.focusedWindowItemCallCount, 0)
+        try expectEqual(catalog.focusedWindowItemCallCount, 1)
     }
 
     /// An external activation (click, Dock) names only the app. The store
@@ -257,6 +263,116 @@ enum CaptureTimeoutTests {
         try expectEqual(tracker.recentWindowIDs.first, 31)
         try expectEqual(tracker.identityOnlyRankIdentities, [])
         try expectEqual(tracker.recentBundleIDs.first, "com.example.notes")
+    }
+
+    /// Live Outlook regression: the cache can contain only the main Outlook
+    /// window when a new calendar/meeting window is created. When Outlook is
+    /// backgrounded, resolve that focused sibling and rank it immediately;
+    /// otherwise the later cache warmup discovers it only as snapshot fallback
+    /// and it appears in the middle or at the tail of the switcher.
+    @MainActor static func activation_backgroundedNewSiblingGetsConcreteRank() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(
+            mruTracker: tracker,
+            initialFrontmostAppPID: 100
+        )
+        let outlookMain = makeItem(
+            id: 10,
+            pid: 100,
+            appName: "Outlook",
+            title: "Inbox",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.microsoft.Outlook"
+        )
+        let browser = makeItem(
+            id: 20,
+            pid: 200,
+            appName: "Browser",
+            bundleIdentifier: "com.example.browser"
+        )
+        catalog.visibleItems = [outlookMain, browser]
+        await seedOpenItemsCache(store)
+
+        let calendar = makeItem(
+            id: 11,
+            pid: 100,
+            appName: "Outlook",
+            title: "Calendar",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.microsoft.Outlook"
+        )
+        catalog.visibleItems = [calendar, outlookMain, browser]
+        catalog.focusedWindowItemsByPID[100] = calendar
+
+        let baselineSnapshots = catalog.visibleSnapshotCount
+        store.requestCycle(forward: true)
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [10, 20])
+        try expectEqual(store.selectedID, 20)
+        try expectEqual(
+            catalog.visibleSnapshotCount,
+            baselineSnapshots,
+            "a one-window Outlook cache should reproduce the live cache gap"
+        )
+        store.commitSelection()
+        await runPendingMainTasks()
+
+        store.handleAppActivation(pid: 200)
+        await runPendingMainTasks(20)
+
+        let nextSnapshot = [
+            makeItem(
+                id: 20,
+                pid: 200,
+                appName: "Browser",
+                isFrontmostApp: true,
+                bundleIdentifier: "com.example.browser"
+            ),
+            makeItem(
+                id: 10,
+                pid: 100,
+                appName: "Outlook",
+                title: "Inbox",
+                bundleIdentifier: "com.microsoft.Outlook"
+            ),
+            makeItem(
+                id: 11,
+                pid: 100,
+                appName: "Outlook",
+                title: "Calendar",
+                bundleIdentifier: "com.microsoft.Outlook"
+            )
+        ]
+        let ordered = tracker.orderedForDisplay(from: nextSnapshot)
+
+        try expectEqual(ordered.map(\.id), [20, 11, 10])
+        try expectEqual(tracker.recentWindowIDs, [20, 11])
+        try expectGreaterThan(catalog.focusedWindowItemCallCount, 0)
+    }
+
+    /// A rapid second app activation invalidates the first background-focus
+    /// lookup. Its detached catalog work may still finish, but it must not
+    /// apply a stale rank after the successor app has already changed.
+    @MainActor static func activation_backgroundedFocusDiscardedAfterSuccessorChanges() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(
+            mruTracker: tracker,
+            initialFrontmostAppPID: 100
+        )
+        let staleFocusedWindow = makeItem(
+            id: 11,
+            pid: 100,
+            appName: "Outlook",
+            title: "Calendar",
+            bundleIdentifier: "com.microsoft.Outlook"
+        )
+        catalog.focusedWindowItemsByPID[100] = staleFocusedWindow
+
+        store.handleAppActivation(pid: 200)
+        store.handleAppActivation(pid: 300)
+        await runPendingMainTasks(20)
+
+        try expect(!tracker.recentWindowIDs.contains(11))
     }
 
     /// Regression guard: the post-activation open-items warmup is a background
