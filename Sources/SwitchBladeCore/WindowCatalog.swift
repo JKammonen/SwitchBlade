@@ -469,6 +469,9 @@ enum WindowSharingPolicy {
 }
 
 enum WindowEligibilityPolicy {
+    /// Strict app-level eligibility used for app-only fallback rows and host
+    /// process selection. Accessory applications must not become app-only
+    /// tiles; they are eligible only through a concrete WindowServer/AX row.
     static func canIncludeApplication(
         processIdentifier: pid_t,
         currentProcessIdentifier: pid_t,
@@ -478,6 +481,17 @@ enum WindowEligibilityPolicy {
         isFinishedLaunching
             && processIdentifier != currentProcessIdentifier
             && activationPolicy == .regular
+    }
+
+    static func canIncludeWindowApplication(
+        processIdentifier: pid_t,
+        currentProcessIdentifier: pid_t,
+        activationPolicy: NSApplication.ActivationPolicy,
+        isFinishedLaunching: Bool
+    ) -> Bool {
+        isFinishedLaunching
+            && processIdentifier != currentProcessIdentifier
+            && (activationPolicy == .regular || activationPolicy == .accessory)
     }
 }
 
@@ -568,11 +582,12 @@ struct RunningApplicationSnapshot {
 }
 
 enum HostedWindowApplicationPolicy {
-    /// Returns the regular application process that should own app-level
-    /// actions for a WindowServer surface. Accessory processes are accepted
-    /// only when their bundle lives inside a running regular app bundle. This
-    /// is deliberately bundle-name agnostic: the process topology, not an app
-    /// allowlist, establishes ownership.
+    /// Returns the process that should own app-level actions for a concrete
+    /// WindowServer/AX surface. A nested accessory process resolves to its
+    /// running regular host. A standalone accessory app keeps its own PID so
+    /// real menu-bar-app windows remain switchable without creating app-only
+    /// fallback tiles. This is deliberately bundle-name agnostic: process
+    /// topology, not an app allowlist, establishes ownership.
     static func hostProcessIdentifier(
         for windowOwner: RunningApplicationDescriptor,
         among runningApplications: [RunningApplicationDescriptor],
@@ -587,14 +602,18 @@ enum HostedWindowApplicationPolicy {
             return windowOwner.processIdentifier
         }
 
-        guard windowOwner.processIdentifier != currentProcessIdentifier,
+        guard WindowEligibilityPolicy.canIncludeWindowApplication(
+                  processIdentifier: windowOwner.processIdentifier,
+                  currentProcessIdentifier: currentProcessIdentifier,
+                  activationPolicy: windowOwner.activationPolicy,
+                  isFinishedLaunching: windowOwner.isFinishedLaunching
+              ),
               windowOwner.activationPolicy == .accessory,
-              windowOwner.isFinishedLaunching,
               let childBundleURL = windowOwner.bundleURL else {
             return nil
         }
 
-        return runningApplications
+        let nestedRegularHost = runningApplications
             .filter { candidate in
                 WindowEligibilityPolicy.canIncludeApplication(
                     processIdentifier: candidate.processIdentifier,
@@ -608,6 +627,7 @@ enum HostedWindowApplicationPolicy {
                     < (rhs.bundleURL?.standardizedFileURL.pathComponents.count ?? 0)
             }?
             .processIdentifier
+        return nestedRegularHost ?? windowOwner.processIdentifier
     }
 
     static func isNestedBundle(_ childBundleURL: URL, inside hostBundleURL: URL?) -> Bool {
@@ -1841,7 +1861,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // a live preview. Those tiles fall back to the app-icon treatment.
         let windowApplication = applicationResolution.windowApplication
         let hostApplication = applicationResolution.hostApplication
-        guard WindowEligibilityPolicy.canIncludeApplication(
+        guard WindowEligibilityPolicy.canIncludeWindowApplication(
                   processIdentifier: hostApplication.processIdentifier,
                   currentProcessIdentifier: getpid(),
                   activationPolicy: hostApplication.activationPolicy,
@@ -2101,7 +2121,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     ) -> Bool {
         let windowApplication = applicationResolution.windowApplication
         let hostApplication = applicationResolution.hostApplication
-        guard WindowEligibilityPolicy.canIncludeApplication(
+        guard WindowEligibilityPolicy.canIncludeWindowApplication(
             processIdentifier: hostApplication.processIdentifier,
             currentProcessIdentifier: getpid(),
             activationPolicy: hostApplication.activationPolicy,

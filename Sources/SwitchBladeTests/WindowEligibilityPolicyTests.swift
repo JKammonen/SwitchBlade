@@ -6,11 +6,13 @@ enum WindowEligibilityPolicyTests {
         ("WindowEligibilityPolicy/rejectsOwnProcessUnconditionally", rejectsOwnProcess),
         ("WindowEligibilityPolicy/rejectsAccessoryAndUnfinishedApps", rejectsAccessoryAndUnfinishedApps),
         ("WindowEligibilityPolicy/allowsFinishedRegularExternalApp", allowsFinishedRegularExternalApp),
+        ("WindowEligibilityPolicy/windowRowsAllowAccessoryApps", windowRowsAllowAccessoryApps),
         ("ApplicationFallback/windowScopesExcludeAppOnlyRows", fallbackWindowScopesExcludeAppOnlyRows),
         ("ApplicationFallback/currentAppIncludesOnlyFrontmostApp", fallbackCurrentAppIncludesOnlyFrontmostApp),
+        ("ApplicationFallback/currentAppExcludesAccessoryAppOnlyRow", currentAppExcludesAccessoryAppOnlyRow),
         ("RunningApplicationSnapshot/coalescesDuplicateProcessIdentifiers", coalescesDuplicateProcessIdentifiers),
         ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
-        ("HostedWindowApplication/rejectsUnrelatedAccessory", rejectsUnrelatedAccessory),
+        ("HostedWindowApplication/resolvesStandaloneAccessoryToSelf", resolvesStandaloneAccessoryToSelf),
         ("HostedWindowApplication/prefersDeepestNestedRegularHost", prefersDeepestNestedRegularHost),
         ("HostedWindowSurface/filtersMirroredHelperSurface", filtersMirroredHelperSurface),
         ("HostedWindowSurface/keepsUniqueHelperSurface", keepsUniqueHelperSurface),
@@ -54,6 +56,33 @@ enum WindowEligibilityPolicyTests {
             currentProcessIdentifier: 42,
             activationPolicy: .regular,
             isFinishedLaunching: true
+        ))
+    }
+
+    @MainActor static func windowRowsAllowAccessoryApps() throws {
+        try expect(WindowEligibilityPolicy.canIncludeWindowApplication(
+            processIdentifier: 43,
+            currentProcessIdentifier: 42,
+            activationPolicy: .accessory,
+            isFinishedLaunching: true
+        ))
+        try expect(!WindowEligibilityPolicy.canIncludeWindowApplication(
+            processIdentifier: 42,
+            currentProcessIdentifier: 42,
+            activationPolicy: .accessory,
+            isFinishedLaunching: true
+        ))
+        try expect(!WindowEligibilityPolicy.canIncludeWindowApplication(
+            processIdentifier: 43,
+            currentProcessIdentifier: 42,
+            activationPolicy: .prohibited,
+            isFinishedLaunching: true
+        ))
+        try expect(!WindowEligibilityPolicy.canIncludeWindowApplication(
+            processIdentifier: 43,
+            currentProcessIdentifier: 42,
+            activationPolicy: .accessory,
+            isFinishedLaunching: false
         ))
     }
 
@@ -125,6 +154,27 @@ enum WindowEligibilityPolicyTests {
         )
     }
 
+    @MainActor static func currentAppExcludesAccessoryAppOnlyRow() throws {
+        let accessory = applicationDescriptor(
+            pid: 100,
+            policy: .accessory,
+            bundleIdentifier: "com.example.standalone-accessory",
+            path: "/Applications/Standalone Accessory.app"
+        )
+
+        try expectEqual(
+            ApplicationFallbackPolicy.processIdentifiers(
+                from: [accessory],
+                representedApplicationPIDs: [],
+                currentProcessIdentifier: 999,
+                frontmostPID: 100,
+                scope: .currentApp
+            ),
+            [],
+            "accessory apps require a concrete window row"
+        )
+    }
+
     @MainActor static func coalescesDuplicateProcessIdentifiers() throws {
         guard let runningApplication = NSWorkspace.shared.runningApplications.first(where: {
             $0.processIdentifier > 0
@@ -172,26 +222,27 @@ enum WindowEligibilityPolicyTests {
         )
     }
 
-    @MainActor static func rejectsUnrelatedAccessory() throws {
-        let host = applicationDescriptor(
+    @MainActor static func resolvesStandaloneAccessoryToSelf() throws {
+        let unrelatedRegularApp = applicationDescriptor(
             pid: 100,
             policy: .regular,
             bundleIdentifier: "com.example.editor",
             path: "/Applications/Editor.app"
         )
-        let helper = applicationDescriptor(
+        let standaloneAccessory = applicationDescriptor(
             pid: 101,
             policy: .accessory,
-            bundleIdentifier: "org.renderer.process",
-            path: "/Applications/Unrelated Renderer.app"
+            bundleIdentifier: "com.example.standalone-accessory",
+            path: "/Applications/Standalone Accessory.app"
         )
 
-        try expectNil(
+        try expectEqual(
             HostedWindowApplicationPolicy.hostProcessIdentifier(
-                for: helper,
-                among: [host, helper],
+                for: standaloneAccessory,
+                among: [unrelatedRegularApp, standaloneAccessory],
                 currentProcessIdentifier: 999
-            )
+            ),
+            101
         )
     }
 
