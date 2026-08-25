@@ -88,6 +88,14 @@ final class MRUTracker {
         var remainingBySignature = Dictionary(grouping: snapshot.filter { !seen.contains($0.id) },
                                                by: signature(for:))
         let itemsByAppIdentity = Dictionary(grouping: snapshot, by: appIdentity(for:))
+        // A stale concrete rank may recover only a recreated/unranked window.
+        // Reserve every live item that still has its own concrete ID rank for
+        // that rank. Identity-only activation ranks keep their coarse app-level
+        // semantics, but candidate ambiguity is always evaluated before this
+        // reservation so filtering cannot turn a multi-window app into a guess.
+        let concretelyRankedLiveIDs = Set(
+            recentRanks.compactMap(\.windowID).filter { itemsByID[$0] != nil }
+        )
         let replayRanks = replayRanksForDisplay(currentFrontmost: currentFrontmost)
         for (rankIndex, rank) in replayRanks {
             if let windowID = rank.windowID,
@@ -105,6 +113,7 @@ final class MRUTracker {
                 let unseenSignatureMatches = matches.filter { !seen.contains($0.id) }
                 if unseenSignatureMatches.count == 1,
                    let item = unseenSignatureMatches.first,
+                   !concretelyRankedLiveIDs.contains(item.id),
                    let matchIndex = matches.firstIndex(where: { $0.id == item.id }) {
                     matches.remove(at: matchIndex)
                     remainingBySignature[signature] = matches
@@ -121,7 +130,8 @@ final class MRUTracker {
                 .filter { !seen.contains($0.id) }
             guard unseenIdentityMatches.count == 1,
                   let item = unseenIdentityMatches.first,
-                  !seen.contains(item.id) else {
+                  !seen.contains(item.id),
+                  isIdentityOnly(rank) || !concretelyRankedLiveIDs.contains(item.id) else {
                 skippedRanks.append(diagnosticSkippedRank(
                     rank,
                     rankIndex: rankIndex,

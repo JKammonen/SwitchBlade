@@ -16,6 +16,7 @@ enum MRUTrackerTests {
         ("MRU/orderedForDisplay_transientMissingWindow_keepsRankWhenItReturns", transientMissingWindowKeepsRank),
         ("MRU/orderedForDisplay_recreatedWindow_keepsRankBySignature", recreatedWindowKeepsRankBySignature),
         ("MRU/orderedForDisplay_ambiguousDuplicateSignatureDoesNotGuess", ambiguousDuplicateSignatureDoesNotGuess),
+        ("MRU/orderedForDisplay_staleSameSignatureRankDoesNotStealLiveSibling", staleSameSignatureRankDoesNotStealLiveSibling),
         ("MRU/orderedForDisplay_singleWindowTitleChange_keepsRankByAppIdentity", singleWindowTitleChangeKeepsRankByAppIdentity),
         ("MRU/orderedForDisplay_sameAppSiblingSeen_recreatedOtherWindowKeepsRankByIdentity", sameAppSiblingSeenRecreatedOtherWindowKeepsRankByIdentity),
         ("MRU/orderedForDisplay_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowTitleChangeDoesNotGuessByAppIdentity),
@@ -269,6 +270,34 @@ enum MRUTrackerTests {
 
         let ordered = tracker.orderedForDisplay(from: recreatedSnapshot)
         try expectEqual(ordered.map(\.id), [1, 3, 20, 40])
+    }
+
+    /// Outlook can create several same-titled reservation windows and destroy
+    /// them again within seconds. A stale rank for a vanished sibling must not
+    /// claim the sole live signature/identity match when that live window still
+    /// has its own concrete ID rank later in the chain.
+    @MainActor static func staleSameSignatureRankDoesNotStealLiveSibling() throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let snapshot = [
+            makeItem(id: 182, pid: 2242, appName: "Outlook", title: "Inbox", isFrontmostApp: true),
+            makeItem(id: 575, pid: 2242, appName: "Outlook", title: "Reservation"),
+            makeItem(id: 599, pid: 2242, appName: "Outlook", title: "Reservation"),
+            makeItem(id: 100, pid: 927, appName: "Teams", title: "Chat")
+        ]
+        tracker.rememberSelection(575, in: snapshot)
+        tracker.rememberSelection(100, in: snapshot)
+        tracker.rememberSelection(599, in: snapshot)
+        tracker.rememberSelection(182, in: snapshot)
+        // Concrete chain: [182, stale 599, Teams 100, live sibling 575].
+
+        let afterSiblingCloses = [
+            snapshot[0],
+            snapshot[3],
+            snapshot[1]
+        ]
+        let ordered = tracker.orderedForDisplay(from: afterSiblingCloses)
+
+        try expectEqual(ordered.map(\.id), [182, 100, 575])
     }
 
     @MainActor static func singleWindowTitleChangeKeepsRankByAppIdentity() throws {
