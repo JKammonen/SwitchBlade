@@ -150,6 +150,12 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   record each selection commit. `snapshotFallback` = the window had no usable
   rank. os_log debug lines are NOT persisted — jsonl is the only retrospective
   channel.
+- **Window-targeted self-activation changes a sibling's rank** → capture the
+  backgrounded app's exact AX focus before SwitchBlade raises/focuses the target.
+  The later app-activation notification must not rescan post-transition AX focus
+  for an exact self-initiated window switch; multi-window apps can report a
+  different sibling after the programmatic transition. External activations keep
+  the delayed AX-focus upgrade path.
 - **Permission dialog reappears** → never add `CGRequest*` calls. Use `CGPreflight*` +
   NSAlert that links to System Settings.
 - **Single window jumps to switcher tail** → check whether the app recreates its

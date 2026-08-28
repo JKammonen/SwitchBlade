@@ -141,10 +141,14 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     }
 
     var focusedWindowItemsByPID: [pid_t: WindowItem] = [:]
+    var focusedWindowItemOverride: (@Sendable (pid_t) -> WindowItem?)?
     private var _focusedWindowItemCallCount = 0
     var focusedWindowItemCallCount: Int { withLock { _focusedWindowItemCallCount } }
     func focusedWindowItem(pid: pid_t) -> WindowItem? {
         withLock { _focusedWindowItemCallCount += 1 }
+        if let focusedWindowItemOverride {
+            return focusedWindowItemOverride(pid)
+        }
         return focusedWindowItemsByPID[pid]
     }
 }

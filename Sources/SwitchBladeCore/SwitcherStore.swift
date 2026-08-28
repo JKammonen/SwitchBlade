@@ -172,6 +172,7 @@ final class SwitcherStore: ObservableObject {
     }
 
     private struct PendingActivationMeasurement {
+        let id: UUID
         let requestedAt: Date
         let context: String
         let source: String
@@ -257,7 +258,14 @@ final class SwitcherStore: ObservableObject {
                 previousAppPID = currentAppPID
                 currentAppPID = pid
                 cachedOpenItemsNeedResnapshot = true
-                if let backgroundedPID, backgroundedPID != switchBladePID {
+                // An exact self-initiated window switch already moved the
+                // selected rank to the front through rememberSelection. Do not
+                // reinterpret the previous app's post-transition AX focus as a
+                // second user focus event: multi-window apps such as Outlook can
+                // report a different sibling after the programmatic raise/focus.
+                if pendingSelfActivation?.windowID == nil,
+                   let backgroundedPID,
+                   backgroundedPID != switchBladePID {
                     scheduleBackgroundedWindowRankUpgrade(
                         pid: backgroundedPID,
                         expectedCurrentPID: pid
@@ -965,12 +973,6 @@ final class SwitcherStore: ObservableObject {
                 targetPID: targetItem.pid,
                 windowID: targetItem.id
             )
-            markActivationRequest(
-                pid: targetItem.pid,
-                context: "modifier-window",
-                source: "previous-switch",
-                windowID: targetItem.id
-            )
             return
         }
 
@@ -985,7 +987,14 @@ final class SwitcherStore: ObservableObject {
             "Double modifier switching app current=\(effectiveCurrentPID ?? -1, privacy: .public) target=\(targetPID, privacy: .public)"
         )
         let activator = self.activator
+        let activationRequestID = markActivationRequest(
+            pid: targetPID,
+            context: "modifier-app",
+            source: "previous-switch",
+            windowID: nil
+        )
         guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }) else {
+            cancelActivationRequest(pid: targetPID, id: activationRequestID)
             Logger.switcher.notice(
                 "Double modifier app activation failed target=\(targetPID, privacy: .public); preserving app history"
             )
@@ -1002,12 +1011,6 @@ final class SwitcherStore: ObservableObject {
             targetPID: targetPID,
             windowID: nil
         )
-        markActivationRequest(
-            pid: targetPID,
-            context: "modifier-app",
-            source: "previous-switch",
-            windowID: nil
-        )
     }
 
     private func performFastPreviousApplicationSwitch(targetPID: pid_t, switchStart: Date) async {
@@ -1016,7 +1019,14 @@ final class SwitcherStore: ObservableObject {
             "Fast previous-app switch current=\(effectiveCurrentPID, privacy: .public) target=\(targetPID, privacy: .public)"
         )
         let activator = self.activator
+        let activationRequestID = markActivationRequest(
+            pid: targetPID,
+            context: "modifier-fast-app",
+            source: "previous-switch",
+            windowID: nil
+        )
         guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }) else {
+            cancelActivationRequest(pid: targetPID, id: activationRequestID)
             Logger.switcher.notice(
                 "Fast previous-app activation failed target=\(targetPID, privacy: .public); preserving app history"
             )
@@ -1029,12 +1039,6 @@ final class SwitcherStore: ObservableObject {
             context: "modifier-fast-app",
             switchStart: switchStart,
             targetPID: targetPID,
-            windowID: nil
-        )
-        markActivationRequest(
-            pid: targetPID,
-            context: "modifier-fast-app",
-            source: "previous-switch",
             windowID: nil
         )
     }
@@ -1129,13 +1133,31 @@ final class SwitcherStore: ObservableObject {
         let liveItems = liveItems ?? items
         let actionSource = source ?? currentOpenSource ?? "unknown"
         let activator = self.activator
+        let catalog = self.catalog
         let target = item.actionTarget
         let dismissBeforeCompletion = dismissVisiblePanelImmediately && isVisible
+        let backgroundedPID = currentAppPID.flatMap { pid in
+            pid != item.pid && pid != switchBladePID ? pid : nil
+        }
+        let backgroundedFocusBeforeActivation = LockedValue<WindowItem?>(nil)
+        let activationRequestID = item.pid != currentAppPID
+            ? markActivationRequest(
+                pid: item.pid,
+                context: "selection-\(actionName)",
+                source: actionSource,
+                windowID: item.id
+            )
+            : nil
         Logger.switcher.info(
             "Begin selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
         let started = startWindowAction(
-            operation: { action(activator, target) },
+            operation: {
+                if let backgroundedPID {
+                    backgroundedFocusBeforeActivation.value = catalog.focusedWindowItem(pid: backgroundedPID)
+                }
+                return action(activator, target)
+            },
             completion: { [weak self] didPerformAction in
                 self?.completeSelectionAction(
                     didPerformAction: didPerformAction,
@@ -1145,10 +1167,15 @@ final class SwitcherStore: ObservableObject {
                     actionSource: actionSource,
                     updateCachedSelectionState: updateCachedSelectionState,
                     dismissedBeforeCompletion: dismissBeforeCompletion,
-                    actionStart: actionStart
+                    actionStart: actionStart,
+                    activationRequestID: activationRequestID,
+                    backgroundedFocusBeforeActivation: backgroundedFocusBeforeActivation.value
                 )
             }
         )
+        if !started, let activationRequestID {
+            cancelActivationRequest(pid: item.pid, id: activationRequestID)
+        }
         if started, dismissBeforeCompletion {
             hide(cancelWindowAction: false, scheduleWarmups: false)
         }
@@ -1190,10 +1217,15 @@ final class SwitcherStore: ObservableObject {
         actionSource: String,
         updateCachedSelectionState: Bool,
         dismissedBeforeCompletion: Bool,
-        actionStart: Date
+        actionStart: Date,
+        activationRequestID: UUID?,
+        backgroundedFocusBeforeActivation: WindowItem?
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
         guard didPerformAction else {
+            if let activationRequestID {
+                cancelActivationRequest(pid: item.pid, id: activationRequestID)
+            }
             Logger.switcher.notice(
                 "Selection action failed action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); preserving state"
             )
@@ -1227,6 +1259,13 @@ final class SwitcherStore: ObservableObject {
             in: liveItems,
             context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
         )
+        if let backgroundedFocusBeforeActivation,
+           !backgroundedFocusBeforeActivation.isApplicationFallback {
+            mruTracker.trackBackgroundedWindowFocus(
+                backgroundedFocusBeforeActivation,
+                context: "pre-activation-backgrounded-focus"
+            )
+        }
         let rememberMs = Date().timeIntervalSince(rememberStart) * 1000
         let cacheSyncStart = Date()
         if updateCachedSelectionState {
@@ -1260,12 +1299,6 @@ final class SwitcherStore: ObservableObject {
         )
         Logger.switcher.info(
             "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
-        )
-        markActivationRequest(
-            pid: item.pid,
-            context: "selection-\(actionName)",
-            source: actionSource,
-            windowID: item.id
         )
     }
 
@@ -2036,18 +2069,21 @@ final class SwitcherStore: ObservableObject {
         PerformanceDiagnostics.record("previous_switch_dispatch", fields: fields)
     }
 
+    @discardableResult
     private func markActivationRequest(
         pid: pid_t,
         context: String,
         source: String,
         windowID: WindowItem.ID?
-    ) {
+    ) -> UUID {
         // A self-initiated focus change makes any pending external-activation
         // focus upgrade stale — let it die rather than have a delayed AX
         // resolve overwrite the rank the commit is about to record.
         focusedRankUpgradeTask?.cancel()
         pruneStaleActivationMeasurements(now: Date())
+        let id = UUID()
         let measurement = PendingActivationMeasurement(
+            id: id,
             requestedAt: Date(),
             context: context,
             source: source,
@@ -2063,6 +2099,13 @@ final class SwitcherStore: ObservableObject {
             fields["window_id"] = .int(Int(windowID))
         }
         PerformanceDiagnostics.record("activation_request", fields: fields)
+        return id
+    }
+
+    private func cancelActivationRequest(pid: pid_t, id: UUID) {
+        guard var measurements = pendingActivationMeasurements[pid] else { return }
+        measurements.removeAll { $0.id == id }
+        pendingActivationMeasurements[pid] = measurements.isEmpty ? nil : measurements
     }
 
     /// Consumes and returns the oldest pending self-initiated activation for

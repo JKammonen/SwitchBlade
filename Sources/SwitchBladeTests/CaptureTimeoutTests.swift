@@ -13,7 +13,7 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/handleAppActivation_triggersCatalogRefresh", activationTriggersRefresh),
         ("ActivationRefresh/handleAppActivation_rewarmsPreviewCacheAfterInvalidation", activationRewarmsPreviewCacheAfterInvalidation),
         ("ActivationRefresh/doesNotUpdateMRUFromSystemActivation", activation_doesNotUpdateMRUFromSystemActivation),
-        ("ActivationRefresh/selfInitiatedWindowSwitch_addsNoIdentityRank", activation_selfInitiatedWindowSwitchAddsNoIdentityRank),
+        ("ActivationRefresh/selfInitiatedWindowSwitch_doesNotReorderBackgroundedSiblings", activation_selfInitiatedWindowSwitchDoesNotReorderBackgroundedSiblings),
         ("ActivationRefresh/externalActivation_upgradesToFocusedWindowRank", activation_externalActivationUpgradesToFocusedWindowRank),
         ("ActivationRefresh/backgroundedNewSibling_getsConcreteRank", activation_backgroundedNewSiblingGetsConcreteRank),
         ("ActivationRefresh/backgroundedFocus_isDiscardedAfterSuccessorChanges", activation_backgroundedFocusDiscardedAfterSuccessorChanges),
@@ -220,30 +220,54 @@ enum CaptureTimeoutTests {
         try expectEqual(store.items.map(\.id), [1, 2, 3])
     }
 
-    /// The activation notification for a window SwitchBlade itself just
-    /// activated must not stack an identity-only rank on top of the concrete
-    /// rank rememberSelection recorded at commit. The previous app is still
-    /// resolved once so a newly-created sibling cannot remain unranked.
-    @MainActor static func activation_selfInitiatedWindowSwitchAddsNoIdentityRank() async throws {
+    /// A window-targeted SwitchBlade activation already records the user's
+    /// exact choice through rememberSelection. Its later app-activation
+    /// notification must not treat the backgrounded app's AX focus as a new
+    /// user focus event: Outlook can report a different sibling after the
+    /// programmatic transition and that late lookup would reorder the MRU.
+    @MainActor static func activation_selfInitiatedWindowSwitchDoesNotReorderBackgroundedSiblings() async throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
-        let (store, catalog, _, _) = makeStore(
+        let (store, catalog, activator, _) = makeStore(
             mruTracker: tracker,
             initialFrontmostAppPID: 100
         )
+        let outlookInbox = makeItem(
+            id: 1,
+            pid: 100,
+            appName: "Outlook",
+            title: "Inbox",
+            isFrontmostApp: true,
+            bundleIdentifier: "com.microsoft.Outlook"
+        )
+        let outlookCalendar = makeItem(
+            id: 4,
+            pid: 100,
+            appName: "Outlook",
+            title: "Calendar",
+            bundleIdentifier: "com.microsoft.Outlook"
+        )
         catalog.visibleItems = [
-            makeItem(id: 1, pid: 100, appName: "Editor", isFrontmostApp: true, bundleIdentifier: "com.example.editor"),
-            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser"),
-            makeItem(id: 3, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser")
+            outlookInbox,
+            outlookCalendar,
+            makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser")
         ]
+        // Before the programmatic activation, Inbox is the real user focus.
+        // After activation, simulate Outlook reporting a different sibling.
+        // Production code must sample before the activator runs, not after.
+        catalog.focusedWindowItemOverride = { pid in
+            guard pid == 100 else { return nil }
+            return activator.activatedItems.isEmpty ? outlookInbox : outlookCalendar
+        }
         await openSwitcher(store)
         store.selectedID = 2
         store.commitSelection()
         await runPendingMainTasks()
+        try expectEqual(tracker.recentWindowIDs, [2, 1])
 
         store.handleAppActivation(pid: 200)
         await runPendingMainTasks()
 
-        try expectEqual(tracker.recentWindowIDs.first, 2)
+        try expectEqual(tracker.recentWindowIDs, [2, 1])
         try expectEqual(tracker.identityOnlyRankIdentities, [])
         try expectEqual(catalog.focusedWindowItemCallCount, 1)
     }
