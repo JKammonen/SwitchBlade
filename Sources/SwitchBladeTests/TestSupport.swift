@@ -42,6 +42,7 @@ func makeItem(
 final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     var visibleItems: [WindowItem] = []
     var minimizedItems: [WindowItem] = []
+    var minimizedSnapshotIsComplete = true
     var previewsToReturn: [CGWindowID: NSImage] = [:]
     var visibleSnapshotDelayNanoseconds: UInt64 = 0
     var minimizedSnapshotDelayNanoseconds: UInt64 = 0
@@ -82,13 +83,13 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
         return snapshot
     }
 
-    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> [WindowItem] {
+    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> MinimizedWindowSnapshot {
         withLock { _minimizedSnapshotStartCount += 1 }
         var remainingDelay = minimizedSnapshotDelayNanoseconds
         while remainingDelay > 0 {
             if cancellation.isCancelled {
                 withLock { _minimizedSnapshotCancellationCount += 1 }
-                return []
+                return MinimizedWindowSnapshot(items: [], isComplete: false)
             }
             let slice = min(remainingDelay, 5_000_000)
             try? await Task.sleep(nanoseconds: slice)
@@ -96,10 +97,13 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
         }
         if cancellation.isCancelled {
             withLock { _minimizedSnapshotCancellationCount += 1 }
-            return []
+            return MinimizedWindowSnapshot(items: [], isComplete: false)
         }
         withLock { _minimizedSnapshotCount += 1 }
-        return minimizedItems
+        return MinimizedWindowSnapshot(
+            items: minimizedItems,
+            isComplete: minimizedSnapshotIsComplete
+        )
     }
 
     func capturePreviews(

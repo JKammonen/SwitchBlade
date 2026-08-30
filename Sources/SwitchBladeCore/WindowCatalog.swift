@@ -537,6 +537,61 @@ struct RunningApplicationDescriptor: Equatable {
     let bundleURL: URL?
 }
 
+struct MinimizedAXScanCandidate: Equatable {
+    let windowProcessIdentifier: pid_t
+    let hostProcessIdentifier: pid_t
+    let activationPolicy: NSApplication.ActivationPolicy
+}
+
+enum MinimizedAXScanPlan {
+    private enum Priority: Int {
+        case regularApplication
+        case nestedAccessory
+        case standaloneAccessoryWithWindowServerEvidence
+        case standaloneAccessory
+    }
+
+    /// WindowServer ordering and NSWorkspace ordering are both incidental. Keep
+    /// every eligible process in the plan, but put the processes most likely to
+    /// own user windows first so the elapsed-time safety bound cannot be consumed
+    /// by dozens of empty standalone accessory applications.
+    static func ordered(
+        _ candidates: [MinimizedAXScanCandidate],
+        windowServerProcessIdentifiers: Set<pid_t>
+    ) -> [MinimizedAXScanCandidate] {
+        candidates.enumerated().sorted { lhs, rhs in
+            let lhsPriority = priority(
+                for: lhs.element,
+                windowServerProcessIdentifiers: windowServerProcessIdentifiers
+            )
+            let rhsPriority = priority(
+                for: rhs.element,
+                windowServerProcessIdentifiers: windowServerProcessIdentifiers
+            )
+            if lhsPriority != rhsPriority {
+                return lhsPriority.rawValue < rhsPriority.rawValue
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private static func priority(
+        for candidate: MinimizedAXScanCandidate,
+        windowServerProcessIdentifiers: Set<pid_t>
+    ) -> Priority {
+        if candidate.activationPolicy == .regular {
+            return .regularApplication
+        }
+        if candidate.windowProcessIdentifier != candidate.hostProcessIdentifier {
+            return .nestedAccessory
+        }
+        if windowServerProcessIdentifiers.contains(candidate.windowProcessIdentifier) {
+            return .standaloneAccessoryWithWindowServerEvidence
+        }
+        return .standaloneAccessory
+    }
+}
+
 struct RunningApplicationSnapshot {
     let applications: [NSRunningApplication]
     let applicationsByProcessIdentifier: [pid_t: NSRunningApplication]
@@ -755,13 +810,16 @@ struct WindowSharingStateIndex {
 
     private let matchesByKey: [Key: [Match]]
     private let framedMatchesByPID: [pid_t: [FramedMatch]]
+    let windowProcessIdentifiers: Set<pid_t>
 
     private init(
         matchesByKey: [Key: [Match]],
-        framedMatchesByPID: [pid_t: [FramedMatch]]
+        framedMatchesByPID: [pid_t: [FramedMatch]],
+        windowProcessIdentifiers: Set<pid_t>
     ) {
         self.matchesByKey = matchesByKey
         self.framedMatchesByPID = framedMatchesByPID
+        self.windowProcessIdentifiers = windowProcessIdentifiers
     }
 
     static func fromCurrentWindowList() -> Self {
@@ -769,7 +827,11 @@ struct WindowSharingStateIndex {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
-            return WindowSharingStateIndex(matchesByKey: [:], framedMatchesByPID: [:])
+            return WindowSharingStateIndex(
+                matchesByKey: [:],
+                framedMatchesByPID: [:],
+                windowProcessIdentifiers: []
+            )
         }
         return WindowSharingStateIndex(rawList: rawList)
     }
@@ -777,6 +839,7 @@ struct WindowSharingStateIndex {
     init(rawList: [[String: Any]]) {
         var matchesByKey: [Key: [Match]] = [:]
         var framedMatchesByPID: [pid_t: [FramedMatch]] = [:]
+        var windowProcessIdentifiers = Set<pid_t>()
         for entry in rawList {
             guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
                   let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
@@ -784,6 +847,7 @@ struct WindowSharingStateIndex {
                   layer == 0 else {
                 continue
             }
+            windowProcessIdentifiers.insert(ownerPID)
             let sharingState = entry[kCGWindowSharingState as String] as? Int ?? 0
             let match = Match(windowID: windowID, sharingState: sharingState)
             if let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary,
@@ -801,6 +865,7 @@ struct WindowSharingStateIndex {
         }
         self.matchesByKey = matchesByKey
         self.framedMatchesByPID = framedMatchesByPID
+        self.windowProcessIdentifiers = windowProcessIdentifiers
     }
 
     func sharingStates(pid: pid_t, title: String) -> [Int]? {
@@ -901,7 +966,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     private let contentCache = SCContentCache()
     private let capturePermitPool: CapturePermitPool
-    private let minimizedSnapshotCoalescer = InFlightTaskCoalescer<MinimizedSnapshotContext, [WindowItem]>()
+    private let minimizedSnapshotCoalescer = InFlightTaskCoalescer<MinimizedSnapshotContext, MinimizedWindowSnapshot>()
     private let minimizedSnapshotEpoch = LockedValue<UInt64>(0)
 
     init() {
@@ -995,8 +1060,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// Returns minimized windows from an AX walk. ~150–500ms with many running
     /// apps — call from a background task and merge into items after the panel
     /// is already on screen. Safe to call AX read APIs off the main thread.
-    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> [WindowItem] {
-        guard !cancellation.isCancelled else { return [] }
+    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> MinimizedWindowSnapshot {
+        guard !cancellation.isCancelled else {
+            return MinimizedWindowSnapshot(items: [], isComplete: false)
+        }
         let requestEpoch = minimizedSnapshotEpoch.withValue { epoch in
             epoch &+= 1
             return epoch
@@ -1008,7 +1075,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             hiddenAppTokens: HiddenAppFilterState.normalizedTokens
         )
         return await minimizedSnapshotCoalescer.value(for: context) { [self] in
-            guard !cancellation.isCancelled else { return [] }
+            guard !cancellation.isCancelled else {
+                return MinimizedWindowSnapshot(items: [], isComplete: false)
+            }
             return minimizedItems(
                 excluding: Set(),
                 frontmostPID: context.frontmostPID,
@@ -1017,7 +1086,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 hiddenAppTokens: context.hiddenAppTokens,
                 cancellation: cancellation
             )
-        } ?? []
+        } ?? MinimizedWindowSnapshot(items: [], isComplete: false)
     }
 
     func snapshot() -> [WindowItem] {
@@ -1153,7 +1222,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             scope: windowScope,
             hiddenAppTokens: HiddenAppFilterState.normalizedTokens
         )
-        let minimized = includeMinimized
+        let minimizedSnapshot = includeMinimized
             ? minimizedItems(
                 excluding: visibleWindowIDs,
                 frontmostPID: frontmostPID,
@@ -1162,7 +1231,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 hiddenAppTokens: HiddenAppFilterState.normalizedTokens,
                 cancellation: CooperativeCancellationToken()
             )
-            : []
+            : MinimizedWindowSnapshot(items: [], isComplete: true)
+        let minimized = minimizedSnapshot.items
         let minimizedApplicationPIDs = Set(minimized.map(\.pid))
         let visibleAndApplicationFallbacks = (filteredVisibleItems + applicationFallbacks)
             .filter { item in
@@ -1966,7 +2036,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         scope: SBWindowScope,
         hiddenAppTokens: Set<HiddenAppToken>,
         cancellation: CooperativeCancellationToken
-    ) -> [WindowItem] {
+    ) -> MinimizedWindowSnapshot {
         // Soft bound on AX IPC. Per Apple's AXUIElement header, a timeout set
         // on a specific element only governs calls to *that* element — it does
         // not propagate to children — so we set it on the app element (for
@@ -1975,28 +2045,17 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // framework returns; this only bounds new IPC, same as the
         // capture soft-timeout pattern.
         let axTimeoutSeconds: Float = 0.25
-        // Real local telemetry: 9,977 activation samples, p95=3 candidate
-        // windows and max=11. These ceilings are deliberately above that
-        // observed scale while preventing a pathological app from running an
-        // abandoned AX sweep without an aggregate bound.
-        var budget = AXScanBudget(
-            maximumApplications: 32,
-            maximumWindows: 128,
-            maximumElapsedSeconds: 2.0,
-            startedAt: ProcessInfo.processInfo.systemUptime
-        )
+        let startedAt = ProcessInfo.processInfo.systemUptime
         var result: [WindowItem] = []
         var exactTitleMatchCount = 0
         var frameMatchCount = 0
+        var applicationsWithoutWindows = 0
+        var applicationsWithUnavailableAX = 0
         let runningApplicationSnapshot = Self.runningApplicationSnapshot()
         let runningApplications = runningApplicationSnapshot.applications
         let runningApplicationsByPID = runningApplicationSnapshot.applicationsByProcessIdentifier
         let runningApplicationDescriptors = runningApplications.map(Self.applicationDescriptor)
-        applicationLoop: for windowApplication in runningApplications {
-            // Bypass the rest of the sweep if the merge consumer already lost
-            // interest (panel hidden, generation bumped). Won't unstick an
-            // already-blocked AX call; only stops *new* per-app iterations.
-            if cancellation.isCancelled { break }
+        let unorderedApplicationResolutions: [WindowApplicationResolution] = runningApplications.compactMap { windowApplication in
             guard let applicationResolution = resolveWindowApplication(
                 windowApplication,
                 runningApplicationsByPID: runningApplicationsByPID,
@@ -2006,18 +2065,58 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                       applicationResolution,
                       hiddenAppTokens: hiddenAppTokens
                   ) else {
-                continue
+                return nil
             }
             if scope == .currentApp,
                applicationResolution.hostProcessIdentifier != frontmostPID,
                applicationResolution.windowProcessIdentifier != frontmostPID {
-                continue
+                return nil
             }
+            return applicationResolution
+        }
+        let unorderedScanCandidates = unorderedApplicationResolutions.map { resolution in
+            MinimizedAXScanCandidate(
+                windowProcessIdentifier: resolution.windowProcessIdentifier,
+                hostProcessIdentifier: resolution.hostProcessIdentifier,
+                activationPolicy: resolution.windowApplication.activationPolicy
+            )
+        }
+        let orderedScanCandidates = MinimizedAXScanPlan.ordered(
+            unorderedScanCandidates,
+            windowServerProcessIdentifiers: sharingStateIndex.windowProcessIdentifiers
+        )
+        let applicationResolutionsByPID: [pid_t: WindowApplicationResolution] = Dictionary(uniqueKeysWithValues:
+            unorderedApplicationResolutions.map { ($0.windowProcessIdentifier, $0) }
+        )
+
+        // The application ceiling must describe this complete candidate snapshot,
+        // not an arbitrary prefix of NSWorkspace order. The window and elapsed
+        // ceilings remain soft safety bounds for pathological AX implementations.
+        var budget = AXScanBudget(
+            maximumApplications: orderedScanCandidates.count,
+            maximumWindows: 128,
+            maximumElapsedSeconds: 2.0,
+            startedAt: startedAt
+        )
+        applicationLoop: for scanCandidate in orderedScanCandidates {
+            // Bypass the rest of the sweep if the merge consumer already lost
+            // interest (panel hidden, generation bumped). Won't unstick an
+            // already-blocked AX call; only stops *new* per-app iterations.
+            if cancellation.isCancelled { break }
             guard budget.beginApplication(now: ProcessInfo.processInfo.systemUptime) else { break }
+            guard let applicationResolution = applicationResolutionsByPID[
+                scanCandidate.windowProcessIdentifier
+            ] else { continue }
 
             let appElement = AXUIElementCreateApplication(applicationResolution.windowProcessIdentifier)
             _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
-            guard let windows = axWindows(for: appElement) else { continue }
+            guard let windows = axWindows(for: appElement) else {
+                applicationsWithUnavailableAX += 1
+                continue
+            }
+            if windows.isEmpty {
+                applicationsWithoutWindows += 1
+            }
 
             let appName = applicationResolution.appName
             for (index, window) in windows.enumerated() {
@@ -2095,9 +2194,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 ))
             }
         }
-        if budget.isExhausted {
+        let isComplete = !cancellation.isCancelled
+            && !budget.isExhausted
+            && budget.scannedApplications == orderedScanCandidates.count
+        if !isComplete {
             Logger.capture.notice(
-                "Minimized AX scan stopped at budget apps=\(budget.scannedApplications, privacy: .public) windows=\(budget.scannedWindows, privacy: .public)"
+                "Minimized AX scan incomplete candidates=\(orderedScanCandidates.count, privacy: .public) apps=\(budget.scannedApplications, privacy: .public) windows=\(budget.scannedWindows, privacy: .public) budgetExhausted=\(budget.isExhausted, privacy: .public) cancelled=\(cancellation.isCancelled, privacy: .public)"
             )
         }
         let filteredResult = HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
@@ -2106,13 +2208,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             fields: [
                 "count": .int(filteredResult.count),
                 "capturable": .int(filteredResult.filter(\.canCapturePreview).count),
+                "candidate_apps": .int(orderedScanCandidates.count),
+                "complete": .bool(isComplete),
                 "frame_matches": .int(frameMatchCount),
+                "milliseconds": .double(
+                    (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+                ),
                 "redacted_titles": .int(filteredResult.filter(\.isTitleRedacted).count),
+                "scanned_apps": .int(budget.scannedApplications),
+                "scanned_windows": .int(budget.scannedWindows),
                 "synthetic_ids": .int(filteredResult.filter { SyntheticWindowID.isSynthetic($0.id) }.count),
-                "title_matches": .int(exactTitleMatchCount)
+                "title_matches": .int(exactTitleMatchCount),
+                "unavailable_ax_apps": .int(applicationsWithUnavailableAX),
+                "zero_window_apps": .int(applicationsWithoutWindows)
             ]
         )
-        return filteredResult
+        return MinimizedWindowSnapshot(items: filteredResult, isComplete: isComplete)
     }
 
     private func shouldIncludeApplication(

@@ -17,7 +17,8 @@ enum WindowSharingPolicyTests {
         ("WindowSharingStateIndex/uniqueExactTitleReturnsWindowServerID", uniqueExactTitleReturnsWindowServerID),
         ("WindowSharingStateIndex/duplicateExactTitleDoesNotGuessID", duplicateExactTitleDoesNotGuessID),
         ("WindowSharingStateIndex/uniqueFrameReturnsWindowServerIDWhenTitlesDiffer", uniqueFrameReturnsWindowServerIDWhenTitlesDiffer),
-        ("WindowSharingStateIndex/duplicateFrameDoesNotGuessID", duplicateFrameDoesNotGuessID)
+        ("WindowSharingStateIndex/duplicateFrameDoesNotGuessID", duplicateFrameDoesNotGuessID),
+        ("WindowSharingStateIndex/collectsLayerZeroOwnerProcesses", collectsLayerZeroOwnerProcesses)
     ]
 
     @MainActor static func listsShareableWindows() async throws {
@@ -223,17 +224,28 @@ enum WindowSharingPolicyTests {
         try expectNil(index.uniqueWindow(pid: 100, bounds: duplicateFrame))
     }
 
+    @MainActor static func collectsLayerZeroOwnerProcesses() async throws {
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(windowID: 1, pid: 100, title: "Visible", sharingState: 1),
+            sharingRow(windowID: 2, pid: 200, title: "Minimized", sharingState: 1),
+            sharingRow(windowID: 3, pid: 300, title: "Overlay", sharingState: 1, layer: 8)
+        ])
+
+        try expectEqual(index.windowProcessIdentifiers, [100, 200])
+    }
+
     private static func sharingRow(
         windowID: CGWindowID,
         pid: pid_t,
         title: String,
         sharingState: Int,
-        bounds: CGRect? = nil
+        bounds: CGRect? = nil,
+        layer: Int = 0
     ) -> [String: Any] {
         var row: [String: Any] = [
             kCGWindowNumber as String: windowID,
             kCGWindowOwnerPID as String: pid,
-            kCGWindowLayer as String: 0,
+            kCGWindowLayer as String: layer,
             kCGWindowName as String: title,
             kCGWindowSharingState as String: sharingState
         ]

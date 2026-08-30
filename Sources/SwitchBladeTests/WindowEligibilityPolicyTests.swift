@@ -14,6 +14,8 @@ enum WindowEligibilityPolicyTests {
         ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
         ("HostedWindowApplication/resolvesStandaloneAccessoryToSelf", resolvesStandaloneAccessoryToSelf),
         ("HostedWindowApplication/prefersDeepestNestedRegularHost", prefersDeepestNestedRegularHost),
+        ("MinimizedAXScanPlan/keepsRegularAppBeyondAccessoryPrefix", minimizedScanPlanKeepsRegularAppBeyondAccessoryPrefix),
+        ("MinimizedAXScanPlan/prioritizesHelperAndWindowServerEvidence", minimizedScanPlanPrioritizesHelperAndWindowServerEvidence),
         ("HostedWindowSurface/filtersMirroredHelperSurface", filtersMirroredHelperSurface),
         ("HostedWindowSurface/keepsUniqueHelperSurface", keepsUniqueHelperSurface),
         ("AXWindowEligibility/filtersUnmatchedAuxiliarySurface", filtersUnmatchedAuxiliarySurface),
@@ -274,6 +276,68 @@ enum WindowEligibilityPolicyTests {
             ),
             101
         )
+    }
+
+    @MainActor static func minimizedScanPlanKeepsRegularAppBeyondAccessoryPrefix() throws {
+        let accessoryCandidates = (0 ..< 40).map { offset in
+            MinimizedAXScanCandidate(
+                windowProcessIdentifier: pid_t(1_000 + offset),
+                hostProcessIdentifier: pid_t(1_000 + offset),
+                activationPolicy: .accessory
+            )
+        }
+        let regularCandidate = MinimizedAXScanCandidate(
+            windowProcessIdentifier: 42,
+            hostProcessIdentifier: 42,
+            activationPolicy: .regular
+        )
+
+        let ordered = MinimizedAXScanPlan.ordered(
+            accessoryCandidates + [regularCandidate],
+            windowServerProcessIdentifiers: []
+        )
+
+        try expectEqual(ordered.count, 41)
+        try expectEqual(ordered.first, regularCandidate)
+        try expectEqual(
+            Array(ordered.dropFirst()),
+            accessoryCandidates,
+            "every accessory candidate should remain in stable order after the regular app is prioritized"
+        )
+    }
+
+    @MainActor static func minimizedScanPlanPrioritizesHelperAndWindowServerEvidence() throws {
+        let standaloneAccessory = MinimizedAXScanCandidate(
+            windowProcessIdentifier: 201,
+            hostProcessIdentifier: 201,
+            activationPolicy: .accessory
+        )
+        let evidencedAccessory = MinimizedAXScanCandidate(
+            windowProcessIdentifier: 202,
+            hostProcessIdentifier: 202,
+            activationPolicy: .accessory
+        )
+        let nestedHelper = MinimizedAXScanCandidate(
+            windowProcessIdentifier: 203,
+            hostProcessIdentifier: 100,
+            activationPolicy: .accessory
+        )
+        let regularApplication = MinimizedAXScanCandidate(
+            windowProcessIdentifier: 100,
+            hostProcessIdentifier: 100,
+            activationPolicy: .regular
+        )
+
+        let ordered = MinimizedAXScanPlan.ordered(
+            [standaloneAccessory, evidencedAccessory, nestedHelper, regularApplication],
+            windowServerProcessIdentifiers: [202]
+        )
+
+        try expectEqual(
+            ordered.map(\.windowProcessIdentifier),
+            [100, 203, 202, 201]
+        )
+        try expectEqual(ordered[1].hostProcessIdentifier, 100)
     }
 
     @MainActor static func filtersMirroredHelperSurface() throws {

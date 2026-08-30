@@ -2413,10 +2413,11 @@ final class SwitcherStore: ObservableObject {
         minimizedMergeTask?.cancel()
         minimizedMergeTask = Task(priority: .userInitiated) { [weak self] in
             await withTaskCancellationHandler {
-                let minimized = await catalog.snapshotMinimized(cancellation: cancellation)
+                let minimizedSnapshot = await catalog.snapshotMinimized(cancellation: cancellation)
                 guard !Task.isCancelled, !cancellation.isCancelled else { return }
+                guard minimizedSnapshot.isComplete else { return }
                 let previewWindowIDs = self?.mergeMinimizedItems(
-                    minimized,
+                    minimizedSnapshot.items,
                     generation: mergeGeneration
                 ) ?? []
                 guard !Task.isCancelled,

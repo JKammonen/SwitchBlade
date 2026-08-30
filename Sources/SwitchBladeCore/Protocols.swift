@@ -18,12 +18,17 @@ final class CooperativeCancellationToken: @unchecked Sendable {
     }
 }
 
+struct MinimizedWindowSnapshot {
+    let items: [WindowItem]
+    let isComplete: Bool
+}
+
 /// Window-listing dependency for SwitcherStore. Concrete WindowCatalog conforms;
 /// tests inject a mock to drive snapshot contents without touching real CGWindow
 /// or ScreenCaptureKit APIs.
 protocol WindowSnapshotProviding: Sendable {
     func snapshotVisibleOnly() -> [WindowItem]
-    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> [WindowItem]
+    func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> MinimizedWindowSnapshot
     /// Resolves the AX-focused window of `pid` against a fresh visible
     /// snapshot. nil when AX fails or the match is ambiguous.
     func focusedWindowItem(pid: pid_t) -> WindowItem?

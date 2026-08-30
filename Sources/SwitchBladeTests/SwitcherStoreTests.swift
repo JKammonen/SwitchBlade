@@ -39,6 +39,7 @@ enum SwitcherStoreTests {
         ("Store/cachedDelayPath_mergesMinimizedAfterPanelShow", cachedDelayPath_mergesMinimized),
         ("Store/requestCycle_cachedOpenIncludesRememberedMinimizedBeforeAXMerge", requestCycle_cachedOpenIncludesRememberedMinimizedBeforeAXMerge),
         ("Store/minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty", minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty),
+        ("Store/minimizedMerge_incompleteSnapshotKeepsRememberedMinimized", minimizedMergeIncompleteSnapshotKeepsRememberedMinimized),
         ("Store/minimizedMerge_keepsSyntheticWindowAtMRURank", minimizedMerge_keepsSyntheticWindowAtMRURank),
         ("Store/minimizedMerge_redactedTitleShowsAppOnly", minimizedMerge_redactedTitleShowsAppOnly),
         ("Store/minimizedMerge_windowServerIDReplacesTransitioningVisibleRowAndKeepsPreview", minimizedMergeWindowServerIDReplacesTransitioningVisibleRowAndKeepsPreview),
@@ -741,6 +742,46 @@ enum SwitcherStoreTests {
         try expect(
             !store.items.contains(where: { $0.id == minimizedID }),
             "empty AX minimized snapshot should remove the remembered minimized row instead of keeping a ghost tile"
+        )
+    }
+
+    @MainActor static func minimizedMergeIncompleteSnapshotKeepsRememberedMinimized() async throws {
+        let (store, catalog, _, _) = makeStore()
+        let frontmost = makeItem(id: 1, pid: 100, isFrontmostApp: true)
+        let second = makeItem(id: 2, pid: 200)
+        let minimizedID = SyntheticWindowID.make(pid: 300, index: 0, title: "Today")
+        let minimized = makeItem(
+            id: minimizedID,
+            pid: 300,
+            appName: "Reminders",
+            title: "Today",
+            isMinimized: true,
+            canCapturePreview: false,
+            bundleIdentifier: "com.apple.reminders"
+        )
+        catalog.visibleItems = [frontmost, second]
+        catalog.minimizedItems = [minimized]
+
+        await openSwitcher(store)
+        for _ in 0 ..< 60 where !store.items.contains(where: { $0.id == minimizedID }) {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(store.items.contains(where: { $0.id == minimizedID }))
+
+        store.cancel()
+        await runPendingMainTasks()
+
+        catalog.minimizedItems = []
+        catalog.minimizedSnapshotIsComplete = false
+        catalog.minimizedSnapshotDelayNanoseconds = 120_000_000
+        store.requestCycle(forward: true)
+        try? await Task.sleep(nanoseconds: 180_000_000)
+        await runPendingMainTasks()
+
+        try expect(
+            store.items.contains(where: { $0.id == minimizedID }),
+            "an incomplete AX scan must not replace the last complete minimized snapshot"
         )
     }
 
