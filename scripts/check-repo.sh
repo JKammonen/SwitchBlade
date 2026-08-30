@@ -7,11 +7,22 @@ cd "${ROOT}"
 
 git diff --check
 
-if ! git diff --quiet -- Sources/SwitchBladeCore Sources/SwitchBlade Sources/SwitchBladeTests .quality/test-obligations.json; then
+proof_relevant_paths=(
+    Sources/SwitchBladeCore
+    Sources/SwitchBlade
+    Sources/SwitchBladeTests
+    .quality/test-obligations.json
+    scripts/build-app.sh
+    scripts/check-repo.sh
+    scripts/run-deterministic-tests.sh
+    scripts/test_minimized_runtime_proof.py
+    scripts/verify_minimized_runtime_proof.py
+)
+if ! git diff --quiet -- "${proof_relevant_paths[@]}"; then
     echo "ERROR: check-repo requires relevant tracked changes to be staged so every gate verifies one tree." >&2
     exit 1
 fi
-untracked_relevant="$(git ls-files --others --exclude-standard -- Sources/SwitchBladeCore Sources/SwitchBlade Sources/SwitchBladeTests .quality/test-obligations.json)"
+untracked_relevant="$(git ls-files --others --exclude-standard -- "${proof_relevant_paths[@]}")"
 if [[ -n "${untracked_relevant}" ]]; then
     echo "ERROR: check-repo found untracked behavior/test/policy files:" >&2
     echo "${untracked_relevant}" >&2
@@ -39,7 +50,10 @@ if [[ ! -x "${test_obligation_engine}" ]]; then
     echo "ERROR: test-obligation engine missing or not executable: ${test_obligation_engine}" >&2
     exit 1
 fi
-/usr/bin/python3 "${test_obligation_engine}" --repo "${ROOT}" --all-canaries
+/usr/bin/python3 "${test_obligation_engine}" \
+    --repo "${ROOT}" \
+    --all-canaries \
+    --defer-runtime-proofs
 
 if rg -n 'title=.*privacy: \.public|item\.title.*privacy: \.public|displayName.*privacy: \.public|appName.*privacy: \.public|bundleIdentifier.*privacy: \.public|appIdentity.*privacy: \.public' Sources/SwitchBladeCore; then
     echo "ERROR: sensitive window/process display text is logged as public." >&2
@@ -47,7 +61,7 @@ if rg -n 'title=.*privacy: \.public|item\.title.*privacy: \.public|displayName.*
 fi
 
 zsh scripts/test-signing-safety.sh
-swift run SwitchBladeTests
+bash scripts/run-deterministic-tests.sh
 bash scripts/build-app.sh
 
 if plutil -extract NSAppleEventsUsageDescription raw dist/SwitchBlade.app/Contents/Info.plist >/dev/null 2>&1; then

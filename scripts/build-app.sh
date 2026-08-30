@@ -13,6 +13,32 @@ bundle_id="${BUNDLE_ID:-com.jannekammonen.SwitchBlade}"
 version="${APP_VERSION:-0.1.0}"
 build_number="${APP_BUILD_NUMBER:-1}"
 build_timestamp="${APP_BUILD_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+source_head="$(git -C "$repo_root" rev-parse HEAD)"
+source_tree="$(git -C "$repo_root" write-tree)"
+source_state="staged"
+source_paths=(
+    Package.swift
+    Package.resolved
+    Sources/SwitchBlade
+    Sources/SwitchBladeCore
+    scripts/build-app.sh
+    scripts/signing-config.sh
+    scripts/signing-safety.sh
+    scripts/setup-local-codesign.sh
+    scripts/sign-app-with-keychain.c
+    scripts/atomic-replace.c
+    scripts/generate-icon.swift
+    scripts/verify_minimized_runtime_proof.py
+)
+if ! git -C "$repo_root" diff --quiet -- "${source_paths[@]}"; then
+    source_state="working-copy"
+fi
+untracked_source_paths="$(
+    git -C "$repo_root" ls-files --others --exclude-standard -- "${source_paths[@]}"
+)"
+if [[ -n "$untracked_source_paths" ]]; then
+    source_state="working-copy"
+fi
 
 source "$repo_root/scripts/signing-config.sh"
 source "$repo_root/scripts/signing-safety.sh"
@@ -234,6 +260,12 @@ cat > "$plist_path" <<EOF
     <string>$build_number</string>
     <key>SwitchBladeBuildTimestamp</key>
     <string>$build_timestamp</string>
+    <key>SwitchBladeSourceHead</key>
+    <string>$source_head</string>
+    <key>SwitchBladeSourceState</key>
+    <string>$source_state</string>
+    <key>SwitchBladeSourceTree</key>
+    <string>$source_tree</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

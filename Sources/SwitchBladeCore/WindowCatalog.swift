@@ -537,61 +537,6 @@ struct RunningApplicationDescriptor: Equatable {
     let bundleURL: URL?
 }
 
-struct MinimizedAXScanCandidate: Equatable {
-    let windowProcessIdentifier: pid_t
-    let hostProcessIdentifier: pid_t
-    let activationPolicy: NSApplication.ActivationPolicy
-}
-
-enum MinimizedAXScanPlan {
-    private enum Priority: Int {
-        case regularApplication
-        case nestedAccessory
-        case standaloneAccessoryWithWindowServerEvidence
-        case standaloneAccessory
-    }
-
-    /// WindowServer ordering and NSWorkspace ordering are both incidental. Keep
-    /// every eligible process in the plan, but put the processes most likely to
-    /// own user windows first so the elapsed-time safety bound cannot be consumed
-    /// by dozens of empty standalone accessory applications.
-    static func ordered(
-        _ candidates: [MinimizedAXScanCandidate],
-        windowServerProcessIdentifiers: Set<pid_t>
-    ) -> [MinimizedAXScanCandidate] {
-        candidates.enumerated().sorted { lhs, rhs in
-            let lhsPriority = priority(
-                for: lhs.element,
-                windowServerProcessIdentifiers: windowServerProcessIdentifiers
-            )
-            let rhsPriority = priority(
-                for: rhs.element,
-                windowServerProcessIdentifiers: windowServerProcessIdentifiers
-            )
-            if lhsPriority != rhsPriority {
-                return lhsPriority.rawValue < rhsPriority.rawValue
-            }
-            return lhs.offset < rhs.offset
-        }.map(\.element)
-    }
-
-    private static func priority(
-        for candidate: MinimizedAXScanCandidate,
-        windowServerProcessIdentifiers: Set<pid_t>
-    ) -> Priority {
-        if candidate.activationPolicy == .regular {
-            return .regularApplication
-        }
-        if candidate.windowProcessIdentifier != candidate.hostProcessIdentifier {
-            return .nestedAccessory
-        }
-        if windowServerProcessIdentifiers.contains(candidate.windowProcessIdentifier) {
-            return .standaloneAccessoryWithWindowServerEvidence
-        }
-        return .standaloneAccessory
-    }
-}
-
 struct RunningApplicationSnapshot {
     let applications: [NSRunningApplication]
     let applicationsByProcessIdentifier: [pid_t: NSRunningApplication]
@@ -2046,11 +1991,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // capture soft-timeout pattern.
         let axTimeoutSeconds: Float = 0.25
         let startedAt = ProcessInfo.processInfo.systemUptime
-        var result: [WindowItem] = []
         var exactTitleMatchCount = 0
         var frameMatchCount = 0
-        var applicationsWithoutWindows = 0
-        var applicationsWithUnavailableAX = 0
         let runningApplicationSnapshot = Self.runningApplicationSnapshot()
         let runningApplications = runningApplicationSnapshot.applications
         let runningApplicationsByPID = runningApplicationSnapshot.applicationsByProcessIdentifier
@@ -2089,44 +2031,29 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             unorderedApplicationResolutions.map { ($0.windowProcessIdentifier, $0) }
         )
 
-        // The application ceiling must describe this complete candidate snapshot,
-        // not an arbitrary prefix of NSWorkspace order. The window and elapsed
-        // ceilings remain soft safety bounds for pathological AX implementations.
-        var budget = AXScanBudget(
-            maximumApplications: orderedScanCandidates.count,
+        let execution: MinimizedAXScanExecutionResult<WindowItem> = MinimizedAXScanExecution.run(
+            candidates: orderedScanCandidates,
             maximumWindows: 128,
             maximumElapsedSeconds: 2.0,
-            startedAt: startedAt
-        )
-        applicationLoop: for scanCandidate in orderedScanCandidates {
-            // Bypass the rest of the sweep if the merge consumer already lost
-            // interest (panel hidden, generation bumped). Won't unstick an
-            // already-blocked AX call; only stops *new* per-app iterations.
-            if cancellation.isCancelled { break }
-            guard budget.beginApplication(now: ProcessInfo.processInfo.systemUptime) else { break }
-            guard let applicationResolution = applicationResolutionsByPID[
-                scanCandidate.windowProcessIdentifier
-            ] else { continue }
-
-            let appElement = AXUIElementCreateApplication(applicationResolution.windowProcessIdentifier)
-            _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
-            guard let windows = axWindows(for: appElement) else {
-                applicationsWithUnavailableAX += 1
-                continue
-            }
-            if windows.isEmpty {
-                applicationsWithoutWindows += 1
-            }
-
-            let appName = applicationResolution.appName
-            for (index, window) in windows.enumerated() {
-                guard !cancellation.isCancelled else { break applicationLoop }
-                guard budget.beginWindow(now: ProcessInfo.processInfo.systemUptime) else {
-                    break applicationLoop
-                }
+            startedAt: startedAt,
+            now: { ProcessInfo.processInfo.systemUptime },
+            isCancelled: { cancellation.isCancelled },
+            windowsForCandidate: { scanCandidate -> [AXUIElement]? in
+                guard let applicationResolution = applicationResolutionsByPID[
+                    scanCandidate.windowProcessIdentifier
+                ] else { return nil }
+                let appElement = AXUIElementCreateApplication(applicationResolution.windowProcessIdentifier)
+                _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
+                return axWindows(for: appElement)
+            },
+            itemForWindow: { scanCandidate, index, window -> WindowItem? in
+                guard let applicationResolution = applicationResolutionsByPID[
+                    scanCandidate.windowProcessIdentifier
+                ] else { return nil }
                 _ = AXUIElementSetMessagingTimeout(window, axTimeoutSeconds)
-                guard axBool(kAXMinimizedAttribute, on: window) == true else { continue }
+                guard axBool(kAXMinimizedAttribute, on: window) == true else { return nil }
 
+                let appName = applicationResolution.appName
                 let title = axString(kAXTitleAttribute, on: window) ?? ""
                 let frame = axFrame(on: window)
                 let exactTitleMatch = sharingStateIndex.uniqueWindow(
@@ -2158,7 +2085,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         )
                 )
                 if titleDecision == .exclude {
-                    continue
+                    return nil
                 }
                 let canCapturePreview = WindowSharingPolicy.canCaptureMinimizedPreview(
                     matchedSharingState: matchedWindow?.sharingState,
@@ -2170,9 +2097,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     index: index,
                     title: title
                 )
-                guard !visibleWindowIDs.contains(windowID) else { continue }
+                guard !visibleWindowIDs.contains(windowID) else { return nil }
 
-                result.append(WindowItem(
+                return WindowItem(
                     windowID: windowID,
                     pid: applicationResolution.hostProcessIdentifier,
                     appName: appName,
@@ -2191,15 +2118,14 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     ),
                     bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
                     windowOwnerPID: applicationResolution.windowOwnerPID
-                ))
+                )
             }
-        }
-        let isComplete = !cancellation.isCancelled
-            && !budget.isExhausted
-            && budget.scannedApplications == orderedScanCandidates.count
+        )
+        let result = execution.items
+        let isComplete = execution.isComplete
         if !isComplete {
             Logger.capture.notice(
-                "Minimized AX scan incomplete candidates=\(orderedScanCandidates.count, privacy: .public) apps=\(budget.scannedApplications, privacy: .public) windows=\(budget.scannedWindows, privacy: .public) budgetExhausted=\(budget.isExhausted, privacy: .public) cancelled=\(cancellation.isCancelled, privacy: .public)"
+                "Minimized AX scan incomplete candidates=\(orderedScanCandidates.count, privacy: .public) apps=\(execution.scannedApplications, privacy: .public) windows=\(execution.scannedWindows, privacy: .public) budgetExhausted=\(execution.isBudgetExhausted, privacy: .public) cancelled=\(cancellation.isCancelled, privacy: .public)"
             )
         }
         let filteredResult = HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
@@ -2215,12 +2141,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
                 ),
                 "redacted_titles": .int(filteredResult.filter(\.isTitleRedacted).count),
-                "scanned_apps": .int(budget.scannedApplications),
-                "scanned_windows": .int(budget.scannedWindows),
+                "scanned_apps": .int(execution.scannedApplications),
+                "scanned_windows": .int(execution.scannedWindows),
                 "synthetic_ids": .int(filteredResult.filter { SyntheticWindowID.isSynthetic($0.id) }.count),
                 "title_matches": .int(exactTitleMatchCount),
-                "unavailable_ax_apps": .int(applicationsWithUnavailableAX),
-                "zero_window_apps": .int(applicationsWithoutWindows)
+                "unavailable_ax_apps": .int(execution.applicationsWithUnavailableAX),
+                "zero_window_apps": .int(execution.applicationsWithoutWindows)
             ]
         )
         return MinimizedWindowSnapshot(items: filteredResult, isComplete: isComplete)

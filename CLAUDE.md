@@ -89,6 +89,14 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 - No CI: there is no `.github/` workflow. Tests run only locally via
   `swift run SwitchBladeTests`. Run them yourself before handing off; nothing
   runs them on push.
+- Minimized/AX risk-surface changes require two separate proofs. The staged-tree
+  gate owns deterministic red/green tests and the legacy-limit canary. After the
+  signed app is rebuilt and relaunched, use Cmd+Tab once with a safe minimized
+  window present, then run `python3 scripts/verify_minimized_runtime_proof.py`.
+  The resulting Git-private receipt is bound to HEAD, the staged tree, signed
+  bundle source metadata, the versioned producer, and the retained aggregate
+  `minimized_window_snapshot` log line. `check-repo.sh` may defer this interactive
+  receipt while building, but the shared Git pre-commit gate does not.
 
 ## Conventions
 

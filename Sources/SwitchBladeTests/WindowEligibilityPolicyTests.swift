@@ -16,6 +16,7 @@ enum WindowEligibilityPolicyTests {
         ("HostedWindowApplication/prefersDeepestNestedRegularHost", prefersDeepestNestedRegularHost),
         ("MinimizedAXScanPlan/keepsRegularAppBeyondAccessoryPrefix", minimizedScanPlanKeepsRegularAppBeyondAccessoryPrefix),
         ("MinimizedAXScanPlan/prioritizesHelperAndWindowServerEvidence", minimizedScanPlanPrioritizesHelperAndWindowServerEvidence),
+        ("MinimizedAXScanExecution/scansCandidateBeyondLegacyApplicationLimit", minimizedScanExecutionScansCandidateBeyondLegacyApplicationLimit),
         ("HostedWindowSurface/filtersMirroredHelperSurface", filtersMirroredHelperSurface),
         ("HostedWindowSurface/keepsUniqueHelperSurface", keepsUniqueHelperSurface),
         ("AXWindowEligibility/filtersUnmatchedAuxiliarySurface", filtersUnmatchedAuxiliarySurface),
@@ -338,6 +339,47 @@ enum WindowEligibilityPolicyTests {
             [100, 203, 202, 201]
         )
         try expectEqual(ordered[1].hostProcessIdentifier, 100)
+    }
+
+    @MainActor static func minimizedScanExecutionScansCandidateBeyondLegacyApplicationLimit() throws {
+        let candidates = (0 ..< 53).map { offset in
+            MinimizedAXScanCandidate(
+                windowProcessIdentifier: pid_t(1_000 + offset),
+                hostProcessIdentifier: pid_t(1_000 + offset),
+                activationPolicy: .accessory
+            )
+        }
+        let ordered = MinimizedAXScanPlan.ordered(
+            candidates,
+            windowServerProcessIdentifiers: []
+        )
+        let targetPID = candidates.last!.windowProcessIdentifier
+
+        let execution: MinimizedAXScanExecutionResult<pid_t> = MinimizedAXScanExecution.run(
+            candidates: ordered,
+            maximumWindows: 128,
+            maximumElapsedSeconds: 2.0,
+            startedAt: 0,
+            now: { 0.5 },
+            isCancelled: { false },
+            windowsForCandidate: { candidate in
+                let offset = Int(candidate.windowProcessIdentifier - 1_000)
+                if offset < 49 { return [] }
+                if candidate.windowProcessIdentifier == targetPID { return [true] }
+                return nil
+            },
+            itemForWindow: { candidate, _, isMinimized in
+                isMinimized ? candidate.windowProcessIdentifier : nil
+            }
+        )
+
+        try expectEqual(execution.items, [targetPID])
+        try expectEqual(execution.scannedApplications, 53)
+        try expectEqual(execution.scannedWindows, 1)
+        try expectEqual(execution.applicationsWithoutWindows, 49)
+        try expectEqual(execution.applicationsWithUnavailableAX, 3)
+        try expect(!execution.isBudgetExhausted)
+        try expect(execution.isComplete)
     }
 
     @MainActor static func filtersMirroredHelperSurface() throws {

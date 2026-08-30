@@ -5,3 +5,5 @@ output.txt
 *.o
 *.d
 *.swp
+__pycache__/
+*.pyc

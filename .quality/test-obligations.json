@@ -2,19 +2,21 @@
   "schema_version": 1,
   "behavior_paths": [
     "Sources/SwitchBladeCore/*.swift",
-    "Sources/SwitchBlade/*.swift"
+    "Sources/SwitchBlade/*.swift",
+    "scripts/build-app.sh",
+    "scripts/verify_minimized_runtime_proof.py"
   ],
   "test_paths": [
-    "Sources/SwitchBladeTests/*.swift"
+    "Sources/SwitchBladeTests/*.swift",
+    "scripts/run-deterministic-tests.sh",
+    "scripts/test_minimized_runtime_proof.py"
   ],
   "verification": [
     {
       "name": "SwitchBlade full test suite",
       "command": [
-        "swift",
-        "run",
-        "--disable-sandbox",
-        "SwitchBladeTests"
+        "bash",
+        "scripts/run-deterministic-tests.sh"
       ],
       "timeout_seconds": 600
     }
@@ -22,10 +24,8 @@
   "red_verification": {
     "name": "SwitchBlade tests against HEAD behavior",
     "command": [
-      "swift",
-      "run",
-      "--disable-sandbox",
-      "SwitchBladeTests"
+      "bash",
+      "scripts/run-deterministic-tests.sh"
     ],
     "timeout_seconds": 600
   },
@@ -77,6 +77,70 @@
       "failure_output_contains": [
         "✗ UIRender/settingsView_wiresObjectSelectorBinding"
       ]
+    },
+    {
+      "name": "minimized AX scan must not restore the legacy application limit",
+      "trigger_paths": [
+        "Sources/SwitchBladeCore/MinimizedAXScan.swift",
+        "Sources/SwitchBladeCore/WindowCatalog.swift"
+      ],
+      "file": "Sources/SwitchBladeCore/MinimizedAXScan.swift",
+      "find": "maximumApplications: candidates.count",
+      "replace": "maximumApplications: min(candidates.count, 32)",
+      "command": [
+        "swift",
+        "run",
+        "--disable-sandbox",
+        "SwitchBladeTests"
+      ],
+      "timeout_seconds": 600,
+      "failure_output_contains": [
+        "✗ MinimizedAXScanExecution/scansCandidateBeyondLegacyApplicationLimit"
+      ]
+    }
+  ],
+  "runtime_proofs": [
+    {
+      "name": "signed minimized AX scan",
+      "trigger_paths": [
+        "Sources/SwitchBladeCore/MinimizedAXScan.swift",
+        "Sources/SwitchBladeCore/Protocols.swift",
+        "Sources/SwitchBladeCore/SwitcherStore.swift",
+        "Sources/SwitchBladeCore/WindowCatalog.swift",
+        "scripts/build-app.sh",
+        "scripts/verify_minimized_runtime_proof.py"
+      ],
+      "diff_contains_any": [
+        "AXScan",
+        "MinimizedWindowSnapshot",
+        "SwitchBladeSourceTree",
+        "minimized",
+        "snapshotMinimized"
+      ],
+      "receipt_file": "switchblade-minimized-window-live.json",
+      "producer_path": "scripts/verify_minimized_runtime_proof.py",
+      "command": [
+        "python3",
+        "scripts/verify_minimized_runtime_proof.py"
+      ],
+      "max_age_seconds": 7200,
+      "required_measurements": {
+        "candidate_apps": {
+          "minimum": 1
+        },
+        "complete": {
+          "equals": true
+        },
+        "count": {
+          "minimum": 1
+        },
+        "scanned_apps": {
+          "equals_field": "candidate_apps"
+        },
+        "scanned_windows": {
+          "minimum": 1
+        }
+      }
     }
   ]
 }
