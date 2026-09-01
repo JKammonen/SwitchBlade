@@ -529,6 +529,39 @@ enum ApplicationFallbackPolicy {
     }
 }
 
+enum RememberedWindowFallbackPolicy {
+    /// Some apps remove their minimized window from AXWindows even though the
+    /// same concrete, shareable WindowServer row still exists off-screen. Only
+    /// restore an icon-only app row when every independent signal agrees; a
+    /// generic running-app fallback would pull unrelated background apps into
+    /// the window-scoped selector.
+    static func shouldInclude(
+        scope: SBWindowScope,
+        activationPolicy: NSApplication.ActivationPolicy,
+        isFinishedLaunching: Bool,
+        isHidden: Bool,
+        isAlreadyRepresented: Bool,
+        axWindowListIsEmpty: Bool,
+        hasRetainedOffscreenWindow: Bool
+    ) -> Bool {
+        scope == .currentSpace
+            && activationPolicy == .regular
+            && isFinishedLaunching
+            && !isHidden
+            && !isAlreadyRepresented
+            && axWindowListIsEmpty
+            && hasRetainedOffscreenWindow
+    }
+}
+
+private struct RememberedConcreteWindow: Equatable, Sendable {
+    let windowID: CGWindowID
+    let hostProcessIdentifier: pid_t
+    let windowProcessIdentifier: pid_t
+    let appName: String
+    let bundleIdentifier: String?
+}
+
 struct RunningApplicationDescriptor: Equatable {
     let processIdentifier: pid_t
     let activationPolicy: NSApplication.ActivationPolicy
@@ -753,17 +786,28 @@ struct WindowSharingStateIndex {
         let bounds: CGRect
     }
 
+    private struct RetainedWindowEvidence {
+        let ownerPID: pid_t
+        let sharingState: Int
+        let bounds: CGRect
+        let isOnScreen: Bool?
+        let alpha: Double
+    }
+
     private let matchesByKey: [Key: [Match]]
     private let framedMatchesByPID: [pid_t: [FramedMatch]]
+    private let retainedWindowsByID: [CGWindowID: RetainedWindowEvidence]
     let windowProcessIdentifiers: Set<pid_t>
 
     private init(
         matchesByKey: [Key: [Match]],
         framedMatchesByPID: [pid_t: [FramedMatch]],
+        retainedWindowsByID: [CGWindowID: RetainedWindowEvidence],
         windowProcessIdentifiers: Set<pid_t>
     ) {
         self.matchesByKey = matchesByKey
         self.framedMatchesByPID = framedMatchesByPID
+        self.retainedWindowsByID = retainedWindowsByID
         self.windowProcessIdentifiers = windowProcessIdentifiers
     }
 
@@ -775,6 +819,7 @@ struct WindowSharingStateIndex {
             return WindowSharingStateIndex(
                 matchesByKey: [:],
                 framedMatchesByPID: [:],
+                retainedWindowsByID: [:],
                 windowProcessIdentifiers: []
             )
         }
@@ -784,6 +829,7 @@ struct WindowSharingStateIndex {
     init(rawList: [[String: Any]]) {
         var matchesByKey: [Key: [Match]] = [:]
         var framedMatchesByPID: [pid_t: [FramedMatch]] = [:]
+        var retainedWindowsByID: [CGWindowID: RetainedWindowEvidence] = [:]
         var windowProcessIdentifiers = Set<pid_t>()
         for entry in rawList {
             guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
@@ -800,6 +846,15 @@ struct WindowSharingStateIndex {
                 framedMatchesByPID[ownerPID, default: []].append(
                     FramedMatch(match: match, bounds: bounds)
                 )
+                if let alpha = entry[kCGWindowAlpha as String] as? Double {
+                    retainedWindowsByID[windowID] = RetainedWindowEvidence(
+                        ownerPID: ownerPID,
+                        sharingState: sharingState,
+                        bounds: bounds,
+                        isOnScreen: entry[kCGWindowIsOnscreen as String] as? Bool,
+                        alpha: alpha
+                    )
+                }
             }
             let title = (entry[kCGWindowName as String] as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -810,6 +865,7 @@ struct WindowSharingStateIndex {
         }
         self.matchesByKey = matchesByKey
         self.framedMatchesByPID = framedMatchesByPID
+        self.retainedWindowsByID = retainedWindowsByID
         self.windowProcessIdentifiers = windowProcessIdentifiers
     }
 
@@ -841,6 +897,22 @@ struct WindowSharingStateIndex {
             Self.framesAreClose($0.bounds, bounds)
         }
         return matches.count == 1 ? matches[0].match : nil
+    }
+
+    /// Exact WindowServer identity is required because an off-screen row alone
+    /// cannot distinguish a minimized window from unrelated app surfaces. The
+    /// caller must also have observed an empty AXWindows list for this owner.
+    func hasSafeRetainedOffscreenWindow(windowID: CGWindowID, ownerPID: pid_t) -> Bool {
+        guard let evidence = retainedWindowsByID[windowID],
+              evidence.ownerPID == ownerPID,
+              evidence.sharingState != 0,
+              evidence.alpha > 0,
+              evidence.isOnScreen != true,
+              evidence.bounds.width >= 120,
+              evidence.bounds.height >= 80 else {
+            return false
+        }
+        return true
     }
 
     private static func framesAreClose(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
@@ -913,6 +985,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let capturePermitPool: CapturePermitPool
     private let minimizedSnapshotCoalescer = InFlightTaskCoalescer<MinimizedSnapshotContext, MinimizedWindowSnapshot>()
     private let minimizedSnapshotEpoch = LockedValue<UInt64>(0)
+    private let rememberedConcreteWindows = LockedValue<[pid_t: [RememberedConcreteWindow]]>([:])
 
     init() {
         capturePermitPool = Self.processCapturePermitPool
@@ -990,10 +1063,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         await contentCache.refreshIfAllowed(successContext: context)
     }
 
-    /// Fast path used on the Cmd+Tab critical path. Includes one icon-only
-    /// fallback for each running regular app that has no eligible window in the
-    /// selected scope. Skips the AX walk for minimized windows entirely; merge
-    /// concrete minimized rows in lazily via `snapshotMinimized`.
+    /// Fast path used on the Cmd+Tab critical path. The current-app scope may
+    /// include one icon-only empty-state fallback. Current-Space fallbacks that
+    /// require minimized/AX evidence arrive lazily via `snapshotMinimized`.
+    /// Skips the AX walk for minimized windows entirely; merge concrete
+    /// minimized rows in lazily via `snapshotMinimized`.
     /// One AX cost remains: the frontmost app's focused-window probe in
     /// `normalizeFrontmostWindowOrder`, only when that app has several visible
     /// windows, bounded by the 0.25 s messaging timeout and reported as
@@ -1159,6 +1233,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
         let filteredVisibleItems = filterAuxiliaryWindowSurfaces(
             HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems)
+        )
+        rememberConcreteWindows(
+            filteredVisibleItems,
+            runningApplicationsByPID: runningApplicationsByPID
         )
         let applicationFallbacks = applicationFallbackItems(
             representedApplicationPIDs: Set(filteredVisibleItems.map(\.pid)),
@@ -1948,28 +2026,129 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 return nil
             }
 
-            return WindowItem(
-                windowID: SyntheticApplicationID.make(
-                    pid: pid,
-                    bundleIdentifier: bundleIdentifier,
-                    appName: appName
-                ),
-                pid: pid,
+            return applicationFallbackItem(
+                application: application,
                 appName: appName,
-                title: "",
-                bounds: CGRect(x: 0, y: 0, width: 640, height: 400),
-                isFrontmostApp: pid == frontmostPID,
-                isMinimized: false,
-                canCapturePreview: false,
-                isTitleRedacted: false,
-                preview: nil,
-                icon: IconNaming.named(
-                    application.icon,
-                    bundleIdentifier: bundleIdentifier,
-                    appName: appName
-                ),
+                frontmostPID: frontmostPID
+            )
+        }
+    }
+
+    private func applicationFallbackItem(
+        application: NSRunningApplication,
+        appName: String,
+        frontmostPID: pid_t?
+    ) -> WindowItem {
+        let pid = application.processIdentifier
+        let bundleIdentifier = application.bundleIdentifier
+        return WindowItem(
+            windowID: SyntheticApplicationID.make(
+                pid: pid,
                 bundleIdentifier: bundleIdentifier,
-                windowOwnerPID: nil
+                appName: appName
+            ),
+            pid: pid,
+            appName: appName,
+            title: "",
+            bounds: CGRect(x: 0, y: 0, width: 640, height: 400),
+            isFrontmostApp: pid == frontmostPID,
+            isMinimized: false,
+            canCapturePreview: false,
+            isTitleRedacted: false,
+            preview: nil,
+            icon: IconNaming.named(
+                application.icon,
+                bundleIdentifier: bundleIdentifier,
+                appName: appName
+            ),
+            bundleIdentifier: bundleIdentifier,
+            windowOwnerPID: nil
+        )
+    }
+
+    private func rememberConcreteWindows(
+        _ items: [WindowItem],
+        runningApplicationsByPID: [pid_t: NSRunningApplication]
+    ) {
+        let rememberedByPID = Dictionary(grouping: items, by: \.pid).mapValues { appItems in
+            appItems.prefix(32).map { item in
+                RememberedConcreteWindow(
+                    windowID: item.windowID,
+                    hostProcessIdentifier: item.pid,
+                    windowProcessIdentifier: item.windowProcessIdentifier,
+                    appName: item.appName,
+                    bundleIdentifier: item.bundleIdentifier
+                )
+            }
+        }
+
+        rememberedConcreteWindows.withValue { remembered in
+            remembered = remembered.filter { pid, windows in
+                guard let application = runningApplicationsByPID[pid],
+                      !application.isTerminated else {
+                    return false
+                }
+                return windows.contains { window in
+                    if let bundleIdentifier = window.bundleIdentifier {
+                        return application.bundleIdentifier == bundleIdentifier
+                    }
+                    return application.localizedName == window.appName
+                }
+            }
+            for (pid, windows) in rememberedByPID {
+                remembered[pid] = windows
+            }
+        }
+    }
+
+    private func rememberedWindowFallbackItems(
+        representedApplicationPIDs: Set<pid_t>,
+        axEmptyWindowProcessIdentifiers: Set<pid_t>,
+        applicationResolutionsByPID: [pid_t: WindowApplicationResolution],
+        sharingStateIndex: WindowSharingStateIndex,
+        scope: SBWindowScope,
+        frontmostPID: pid_t?,
+        hiddenAppTokens: Set<HiddenAppToken>
+    ) -> [WindowItem] {
+        let remembered = rememberedConcreteWindows.value.values.flatMap { $0 }
+        var addedHostPIDs = Set<pid_t>()
+
+        return remembered.compactMap { window in
+            guard axEmptyWindowProcessIdentifiers.contains(window.windowProcessIdentifier),
+                  let resolution = applicationResolutionsByPID[window.windowProcessIdentifier],
+                  resolution.hostProcessIdentifier == window.hostProcessIdentifier,
+                  shouldIncludeApplication(resolution, hiddenAppTokens: hiddenAppTokens) else {
+                return nil
+            }
+
+            let hostApplication = resolution.hostApplication
+            if let rememberedBundleIdentifier = window.bundleIdentifier {
+                guard hostApplication.bundleIdentifier == rememberedBundleIdentifier else { return nil }
+            } else {
+                guard resolution.appName == window.appName else { return nil }
+            }
+
+            let hasRetainedOffscreenWindow = sharingStateIndex.hasSafeRetainedOffscreenWindow(
+                windowID: window.windowID,
+                ownerPID: window.windowProcessIdentifier
+            )
+            guard RememberedWindowFallbackPolicy.shouldInclude(
+                scope: scope,
+                activationPolicy: hostApplication.activationPolicy,
+                isFinishedLaunching: hostApplication.isFinishedLaunching,
+                isHidden: hostApplication.isHidden,
+                isAlreadyRepresented: representedApplicationPIDs.contains(window.hostProcessIdentifier),
+                axWindowListIsEmpty: true,
+                hasRetainedOffscreenWindow: hasRetainedOffscreenWindow
+            ),
+                  addedHostPIDs.insert(window.hostProcessIdentifier).inserted else {
+                return nil
+            }
+
+            return applicationFallbackItem(
+                application: hostApplication,
+                appName: resolution.appName,
+                frontmostPID: frontmostPID
             )
         }
     }
@@ -2030,6 +2209,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let applicationResolutionsByPID: [pid_t: WindowApplicationResolution] = Dictionary(uniqueKeysWithValues:
             unorderedApplicationResolutions.map { ($0.windowProcessIdentifier, $0) }
         )
+        var axEmptyWindowProcessIdentifiers = Set<pid_t>()
 
         let execution: MinimizedAXScanExecutionResult<WindowItem> = MinimizedAXScanExecution.run(
             candidates: orderedScanCandidates,
@@ -2044,7 +2224,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 ] else { return nil }
                 let appElement = AXUIElementCreateApplication(applicationResolution.windowProcessIdentifier)
                 _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
-                return axWindows(for: appElement)
+                let windows = axWindows(for: appElement)
+                if windows?.isEmpty == true {
+                    axEmptyWindowProcessIdentifiers.insert(scanCandidate.windowProcessIdentifier)
+                }
+                return windows
             },
             itemForWindow: { scanCandidate, index, window -> WindowItem? in
                 guard let applicationResolution = applicationResolutionsByPID[
@@ -2128,10 +2312,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "Minimized AX scan incomplete candidates=\(orderedScanCandidates.count, privacy: .public) apps=\(execution.scannedApplications, privacy: .public) windows=\(execution.scannedWindows, privacy: .public) budgetExhausted=\(execution.isBudgetExhausted, privacy: .public) cancelled=\(cancellation.isCancelled, privacy: .public)"
             )
         }
-        let filteredResult = HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
+        let concreteMinimizedResult = HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(result)
+        let applicationFallbacks = rememberedWindowFallbackItems(
+            representedApplicationPIDs: Set(concreteMinimizedResult.map(\.pid)),
+            axEmptyWindowProcessIdentifiers: axEmptyWindowProcessIdentifiers,
+            applicationResolutionsByPID: applicationResolutionsByPID,
+            sharingStateIndex: sharingStateIndex,
+            scope: scope,
+            frontmostPID: frontmostPID,
+            hiddenAppTokens: hiddenAppTokens
+        )
+        let filteredResult = concreteMinimizedResult + applicationFallbacks
         PerformanceDiagnostics.record(
             "minimized_window_snapshot",
             fields: [
+                "application_fallbacks": .int(applicationFallbacks.count),
+                "ax_empty_apps": .int(axEmptyWindowProcessIdentifiers.count),
                 "count": .int(filteredResult.count),
                 "capturable": .int(filteredResult.filter(\.canCapturePreview).count),
                 "candidate_apps": .int(orderedScanCandidates.count),

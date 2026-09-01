@@ -10,6 +10,8 @@ enum WindowEligibilityPolicyTests {
         ("ApplicationFallback/windowScopesExcludeAppOnlyRows", fallbackWindowScopesExcludeAppOnlyRows),
         ("ApplicationFallback/currentAppIncludesOnlyFrontmostApp", fallbackCurrentAppIncludesOnlyFrontmostApp),
         ("ApplicationFallback/currentAppExcludesAccessoryAppOnlyRow", currentAppExcludesAccessoryAppOnlyRow),
+        ("ApplicationFallback/currentSpaceRestoresRememberedAXEmptyApp", currentSpaceRestoresRememberedAXEmptyApp),
+        ("ApplicationFallback/rememberedWindowRejectsUnsafeStates", rememberedWindowRejectsUnsafeStates),
         ("RunningApplicationSnapshot/coalescesDuplicateProcessIdentifiers", coalescesDuplicateProcessIdentifiers),
         ("HostedWindowApplication/resolvesNestedAccessoryToRegularHost", resolvesNestedAccessoryToRegularHost),
         ("HostedWindowApplication/resolvesStandaloneAccessoryToSelf", resolvesStandaloneAccessoryToSelf),
@@ -176,6 +178,85 @@ enum WindowEligibilityPolicyTests {
             [],
             "accessory apps require a concrete window row"
         )
+    }
+
+    @MainActor static func currentSpaceRestoresRememberedAXEmptyApp() throws {
+        try expect(RememberedWindowFallbackPolicy.shouldInclude(
+            scope: .currentSpace,
+            activationPolicy: .regular,
+            isFinishedLaunching: true,
+            isHidden: false,
+            isAlreadyRepresented: false,
+            axWindowListIsEmpty: true,
+            hasRetainedOffscreenWindow: true
+        ))
+    }
+
+    @MainActor static func rememberedWindowRejectsUnsafeStates() throws {
+        let base = (
+            scope: SBWindowScope.currentSpace,
+            activationPolicy: NSApplication.ActivationPolicy.regular,
+            isFinishedLaunching: true,
+            isHidden: false,
+            isAlreadyRepresented: false,
+            axWindowListIsEmpty: true,
+            hasRetainedOffscreenWindow: true
+        )
+
+        try expect(!RememberedWindowFallbackPolicy.shouldInclude(
+            scope: .allSpaces,
+            activationPolicy: base.activationPolicy,
+            isFinishedLaunching: base.isFinishedLaunching,
+            isHidden: base.isHidden,
+            isAlreadyRepresented: base.isAlreadyRepresented,
+            axWindowListIsEmpty: base.axWindowListIsEmpty,
+            hasRetainedOffscreenWindow: base.hasRetainedOffscreenWindow
+        ))
+        try expect(!RememberedWindowFallbackPolicy.shouldInclude(
+            scope: base.scope,
+            activationPolicy: .accessory,
+            isFinishedLaunching: base.isFinishedLaunching,
+            isHidden: base.isHidden,
+            isAlreadyRepresented: base.isAlreadyRepresented,
+            axWindowListIsEmpty: base.axWindowListIsEmpty,
+            hasRetainedOffscreenWindow: base.hasRetainedOffscreenWindow
+        ))
+        try expect(!RememberedWindowFallbackPolicy.shouldInclude(
+            scope: base.scope,
+            activationPolicy: base.activationPolicy,
+            isFinishedLaunching: base.isFinishedLaunching,
+            isHidden: true,
+            isAlreadyRepresented: base.isAlreadyRepresented,
+            axWindowListIsEmpty: base.axWindowListIsEmpty,
+            hasRetainedOffscreenWindow: base.hasRetainedOffscreenWindow
+        ))
+        try expect(!RememberedWindowFallbackPolicy.shouldInclude(
+            scope: base.scope,
+            activationPolicy: base.activationPolicy,
+            isFinishedLaunching: base.isFinishedLaunching,
+            isHidden: base.isHidden,
+            isAlreadyRepresented: true,
+            axWindowListIsEmpty: base.axWindowListIsEmpty,
+            hasRetainedOffscreenWindow: base.hasRetainedOffscreenWindow
+        ))
+        try expect(!RememberedWindowFallbackPolicy.shouldInclude(
+            scope: base.scope,
+            activationPolicy: base.activationPolicy,
+            isFinishedLaunching: base.isFinishedLaunching,
+            isHidden: base.isHidden,
+            isAlreadyRepresented: base.isAlreadyRepresented,
+            axWindowListIsEmpty: false,
+            hasRetainedOffscreenWindow: base.hasRetainedOffscreenWindow
+        ))
+        try expect(!RememberedWindowFallbackPolicy.shouldInclude(
+            scope: base.scope,
+            activationPolicy: base.activationPolicy,
+            isFinishedLaunching: base.isFinishedLaunching,
+            isHidden: base.isHidden,
+            isAlreadyRepresented: base.isAlreadyRepresented,
+            axWindowListIsEmpty: base.axWindowListIsEmpty,
+            hasRetainedOffscreenWindow: false
+        ))
     }
 
     @MainActor static func coalescesDuplicateProcessIdentifiers() throws {

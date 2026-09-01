@@ -18,7 +18,9 @@ enum WindowSharingPolicyTests {
         ("WindowSharingStateIndex/duplicateExactTitleDoesNotGuessID", duplicateExactTitleDoesNotGuessID),
         ("WindowSharingStateIndex/uniqueFrameReturnsWindowServerIDWhenTitlesDiffer", uniqueFrameReturnsWindowServerIDWhenTitlesDiffer),
         ("WindowSharingStateIndex/duplicateFrameDoesNotGuessID", duplicateFrameDoesNotGuessID),
-        ("WindowSharingStateIndex/collectsLayerZeroOwnerProcesses", collectsLayerZeroOwnerProcesses)
+        ("WindowSharingStateIndex/collectsLayerZeroOwnerProcesses", collectsLayerZeroOwnerProcesses),
+        ("WindowSharingStateIndex/retainedOffscreenShareableWindowProvidesFallbackEvidence", retainedOffscreenShareableWindowProvidesFallbackEvidence),
+        ("WindowSharingStateIndex/rejectsUnsafeRetainedFallbackEvidence", rejectsUnsafeRetainedFallbackEvidence)
     ]
 
     @MainActor static func listsShareableWindows() async throws {
@@ -234,13 +236,51 @@ enum WindowSharingPolicyTests {
         try expectEqual(index.windowProcessIdentifiers, [100, 200])
     }
 
+    @MainActor static func retainedOffscreenShareableWindowProvidesFallbackEvidence() async throws {
+        let bounds = CGRect(x: 617, y: 386, width: 1656, height: 1005)
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(
+                windowID: 21419,
+                pid: 27308,
+                title: "",
+                sharingState: 1,
+                bounds: bounds,
+                alpha: 1
+            )
+        ])
+
+        try expect(index.hasSafeRetainedOffscreenWindow(
+            windowID: 21419,
+            ownerPID: 27308
+        ))
+    }
+
+    @MainActor static func rejectsUnsafeRetainedFallbackEvidence() async throws {
+        let normalBounds = CGRect(x: 100, y: 80, width: 1200, height: 800)
+        let index = WindowSharingStateIndex(rawList: [
+            sharingRow(windowID: 1, pid: 100, title: "", sharingState: 1, bounds: normalBounds, isOnScreen: true, alpha: 1),
+            sharingRow(windowID: 2, pid: 100, title: "", sharingState: 0, bounds: normalBounds, alpha: 1),
+            sharingRow(windowID: 3, pid: 100, title: "", sharingState: 1, bounds: CGRect(x: 0, y: 0, width: 30, height: 30), alpha: 1),
+            sharingRow(windowID: 4, pid: 100, title: "", sharingState: 1, bounds: normalBounds, alpha: 0)
+        ])
+
+        try expect(!index.hasSafeRetainedOffscreenWindow(windowID: 1, ownerPID: 100))
+        try expect(!index.hasSafeRetainedOffscreenWindow(windowID: 2, ownerPID: 100))
+        try expect(!index.hasSafeRetainedOffscreenWindow(windowID: 3, ownerPID: 100))
+        try expect(!index.hasSafeRetainedOffscreenWindow(windowID: 4, ownerPID: 100))
+        try expect(!index.hasSafeRetainedOffscreenWindow(windowID: 21419, ownerPID: 27308))
+        try expect(!index.hasSafeRetainedOffscreenWindow(windowID: 1, ownerPID: 999))
+    }
+
     private static func sharingRow(
         windowID: CGWindowID,
         pid: pid_t,
         title: String,
         sharingState: Int,
         bounds: CGRect? = nil,
-        layer: Int = 0
+        layer: Int = 0,
+        isOnScreen: Bool? = nil,
+        alpha: Double? = nil
     ) -> [String: Any] {
         var row: [String: Any] = [
             kCGWindowNumber as String: windowID,
@@ -251,6 +291,12 @@ enum WindowSharingPolicyTests {
         ]
         if let bounds {
             row[kCGWindowBounds as String] = bounds.dictionaryRepresentation
+        }
+        if let isOnScreen {
+            row[kCGWindowIsOnscreen as String] = isOnScreen
+        }
+        if let alpha {
+            row[kCGWindowAlpha as String] = alpha
         }
         return row
     }
