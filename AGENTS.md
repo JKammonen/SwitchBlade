@@ -49,8 +49,10 @@ Routing:
 ```bash
 bash scripts/build-app.sh
 swift run SwitchBladeTests
-log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
+/usr/bin/log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
 ```
+
+- Always call `/usr/bin/log`; `log` alone resolves to the zsh builtin.
 
 - `swift build` is not enough for user-tested behavior. Rebuild the signed app bundle with `bash scripts/build-app.sh`.
 - If the user will test the app, quit any old process and relaunch the rebuilt `dist/SwitchBlade.app`.

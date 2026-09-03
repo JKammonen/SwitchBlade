@@ -17,7 +17,9 @@ enum HotkeyMonitorTests {
         ("HotkeyMonitor/modifierMouseSwitch_rejectsCompanionModifiers", modifierMouseSwitchRejectsCompanionModifiers),
         ("HotkeyMonitor/hotkeyDirection_allowsModifierAndShiftOnly", hotkeyDirectionAllowsModifierAndShiftOnly),
         ("HotkeyMonitor/hotkeyDirection_rejectsSupersetModifiers", hotkeyDirectionRejectsSupersetModifiers),
-        ("HotkeyMonitor/machDelta_clampsFutureTimestamp", machDeltaClampsFutureTimestamp)
+        ("HotkeyMonitor/machDelta_clampsFutureTimestamp", machDeltaClampsFutureTimestamp),
+        ("HotkeyMonitor/passthroughReason_reportsSupersetModifiersOnly", passthroughReasonReportsSupersetModifiersOnly),
+        ("HotkeyMonitor/secureInputProbe_throttlesToModifierDownInterval", secureInputProbeThrottlesToModifierDownInterval)
     ]
 
     @MainActor static func commandReleaseFiresOnTransition() throws {
@@ -159,6 +161,81 @@ enum HotkeyMonitorTests {
             flags: [.maskCommand, .maskAlternate, .maskShift],
             configuredKey: Int(kVK_Tab),
             hotkeyModifier: .maskCommand
+        ))
+    }
+
+    /// Proves: a trigger-key press with the hotkey modifier plus extra Ctrl or
+    /// Option flags is reported as a superset pass-through, while an exact
+    /// match, a different key, or a modifier-less press stays silent.
+    @MainActor static func passthroughReasonReportsSupersetModifiersOnly() throws {
+        try expectEqual(
+            HotkeyMonitor.passthroughReason(
+                keyCode: Int64(kVK_Tab),
+                flags: [.maskCommand, .maskControl],
+                configuredKey: Int(kVK_Tab),
+                hotkeyModifier: .maskCommand
+            ),
+            .supersetModifiers
+        )
+        try expectEqual(
+            HotkeyMonitor.passthroughReason(
+                keyCode: Int64(kVK_Tab),
+                flags: [.maskCommand, .maskAlternate, .maskShift],
+                configuredKey: Int(kVK_Tab),
+                hotkeyModifier: .maskCommand
+            ),
+            .supersetModifiers
+        )
+        try expectNil(HotkeyMonitor.passthroughReason(
+            keyCode: Int64(kVK_Tab),
+            flags: [.maskCommand],
+            configuredKey: Int(kVK_Tab),
+            hotkeyModifier: .maskCommand
+        ))
+        try expectNil(HotkeyMonitor.passthroughReason(
+            keyCode: Int64(kVK_Tab),
+            flags: [.maskCommand, .maskShift],
+            configuredKey: Int(kVK_Tab),
+            hotkeyModifier: .maskCommand
+        ))
+        try expectNil(HotkeyMonitor.passthroughReason(
+            keyCode: Int64(kVK_Space),
+            flags: [.maskCommand, .maskControl],
+            configuredKey: Int(kVK_Tab),
+            hotkeyModifier: .maskCommand
+        ))
+        try expectNil(HotkeyMonitor.passthroughReason(
+            keyCode: Int64(kVK_Tab),
+            flags: [.maskControl],
+            configuredKey: Int(kVK_Tab),
+            hotkeyModifier: .maskCommand
+        ))
+    }
+
+    /// Proves: the probe throttle predicate answers true only while the hotkey
+    /// modifier is down and at least one interval after the last probe. The
+    /// wiring that stores the probe time lives in `probeSecureInputIfNeeded`
+    /// and is not exercised here.
+    @MainActor static func secureInputProbeThrottlesToModifierDownInterval() throws {
+        try expect(HotkeyMonitor.shouldProbeSecureInput(
+            isHotkeyModifierDown: true,
+            lastProbeAt: -.infinity,
+            now: 100
+        ))
+        try expect(!HotkeyMonitor.shouldProbeSecureInput(
+            isHotkeyModifierDown: false,
+            lastProbeAt: -.infinity,
+            now: 100
+        ))
+        try expect(!HotkeyMonitor.shouldProbeSecureInput(
+            isHotkeyModifierDown: true,
+            lastProbeAt: 100,
+            now: 100 + HotkeyMonitor.secureInputProbeInterval / 2
+        ))
+        try expect(HotkeyMonitor.shouldProbeSecureInput(
+            isHotkeyModifierDown: true,
+            lastProbeAt: 100,
+            now: 100 + HotkeyMonitor.secureInputProbeInterval
         ))
     }
 

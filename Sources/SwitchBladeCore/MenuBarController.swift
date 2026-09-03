@@ -602,6 +602,17 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
             Logger.secureInput.notice(
                 "Secure Input state changed at \(reason, privacy: .public): \(Self.logDescription(for: current), privacy: .public)"
             )
+            // Mirror the transition into performance.jsonl so a missed Cmd+Tab
+            // can be correlated with Secure Input after the fact.
+            PerformanceDiagnostics.record(
+                "secure_input_state",
+                fields: [
+                    "active": .bool(current.isActive),
+                    "pid": .int(Int(current.pid ?? 0)),
+                    "executable": .string(current.process?.executableName ?? (current.isActive ? "unknown" : "")),
+                    "reason": .string(reason)
+                ]
+            )
         }
 
         applyMenuBarVisibility(SwitchBladeSettings.shared.showMenuBarIcon)

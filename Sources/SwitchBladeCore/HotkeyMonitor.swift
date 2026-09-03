@@ -15,6 +15,16 @@ final class HotkeyMonitor {
         case backward
     }
 
+    /// Why the tap saw the configured trigger key but had to forward it
+    /// untouched. Logged so a Cmd+Tab that reaches macOS's own switcher leaves
+    /// a trace instead of a silent gap in the diagnostics.
+    enum PassthroughReason: String, Equatable {
+        /// The hotkey modifier was held together with extra Ctrl or Option
+        /// flags (Shift alone is the backward direction), for example a stuck
+        /// modifier, so the exact-match rule refused it.
+        case supersetModifiers = "superset_modifiers"
+    }
+
     var onHotkey: ((Direction) -> Void)?
     var onCommandReleased: (() -> Void)?
     var onModifierDoubleTap: (() -> Void)?
@@ -35,6 +45,14 @@ final class HotkeyMonitor {
     private var lastTapModifierPressTimestamp: TimeInterval?
     private var tapWatchdogTask: Task<Void, Never>?
     private var wasHotkeyModifierDown = false
+    private var lastSecureInputProbeAt: TimeInterval = -.infinity
+
+    /// Secure Input hides every keyDown from event taps, so a Cmd+Tab pressed
+    /// while it is active falls through to macOS's own switcher without any
+    /// tap callback. The 5 s menu-bar watchdog can miss short episodes; probing
+    /// on the (asynchronous) NSEvent modifier notification catches the exact
+    /// moment the user reached for the hotkey.
+    static let secureInputProbeInterval: TimeInterval = 1.0
 
     private static let modifierDoubleTapThreshold: TimeInterval = 0.35
     private static let relevantShortcutFlags: CGEventFlags = [
@@ -194,12 +212,28 @@ final class HotkeyMonitor {
             CGEvent.tapEnable(tap: eventTap, enable: true)
             if !CGEvent.tapIsEnabled(tap: eventTap) {
                 Logger.hotkey.notice("Tap stayed disabled after re-enable at \(reason, privacy: .public) — rebuilding")
+                recordTapRecovery(action: "rebuild_after_reenable", reason: reason)
                 rebuildEventTap()
+            } else {
+                recordTapRecovery(action: "reenable", reason: reason)
             }
         case .rebuild:
             Logger.hotkey.notice("Tap was invalid at \(reason, privacy: .public) — rebuilding")
+            recordTapRecovery(action: "rebuild", reason: reason)
             rebuildEventTap()
         }
+    }
+
+    /// os_log notices are not always retained; performance.jsonl is the
+    /// retrospective channel, so tap recovery must land there too.
+    private func recordTapRecovery(action: String, reason: String) {
+        PerformanceDiagnostics.record(
+            "event_tap_recovery",
+            fields: [
+                "action": .string(action),
+                "reason": .string(reason)
+            ]
+        )
     }
 
     static func tapRecoveryAction(isPortValid: Bool, isEnabled: Bool) -> TapRecoveryAction {
@@ -264,6 +298,25 @@ final class HotkeyMonitor {
             configuredKey: configuredKey,
             hotkeyModifier: hotkeyModifier
         ) else {
+            if let reason = Self.passthroughReason(
+                keyCode: keyCode,
+                flags: event.flags,
+                configuredKey: configuredKey,
+                hotkeyModifier: hotkeyModifier
+            ) {
+                let relevantFlags = event.flags.intersection(Self.relevantShortcutFlags)
+                Logger.hotkey.notice(
+                    "Trigger key passed through: \(reason.rawValue, privacy: .public) flags=0x\(String(relevantFlags.rawValue, radix: 16), privacy: .public)"
+                )
+                PerformanceDiagnostics.record(
+                    "hotkey_passthrough",
+                    fields: [
+                        "reason": .string(reason.rawValue),
+                        "flags": .int(Int(relevantFlags.rawValue)),
+                        "key_code": .int(Int(keyCode))
+                    ]
+                )
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -342,6 +395,36 @@ final class HotkeyMonitor {
         return nil
     }
 
+    /// Non-nil only when the user clearly reached for the hotkey (trigger key
+    /// plus the hotkey modifier) and the exact-modifier rule still refused it.
+    /// Unrelated keys and modifier-less trigger presses stay silent.
+    static func passthroughReason(
+        keyCode: Int64,
+        flags: CGEventFlags,
+        configuredKey: Int,
+        hotkeyModifier: CGEventFlags
+    ) -> PassthroughReason? {
+        guard keyCode == Int64(configuredKey) else { return nil }
+        let relevantFlags = flags.intersection(relevantShortcutFlags)
+        guard relevantFlags.contains(hotkeyModifier) else { return nil }
+        guard hotkeyDirection(
+            keyCode: keyCode,
+            flags: flags,
+            configuredKey: configuredKey,
+            hotkeyModifier: hotkeyModifier
+        ) == nil else { return nil }
+        return .supersetModifiers
+    }
+
+    static func shouldProbeSecureInput(
+        isHotkeyModifierDown: Bool,
+        lastProbeAt: TimeInterval,
+        now: TimeInterval,
+        interval: TimeInterval = secureInputProbeInterval
+    ) -> Bool {
+        isHotkeyModifierDown && now - lastProbeAt >= interval
+    }
+
     private func installEventMonitors() {
         guard !didInstallEventMonitors else {
             return
@@ -374,10 +457,44 @@ final class HotkeyMonitor {
         // upcoming Tab key event reaches the system, otherwise macOS's own
         // Cmd+Tab switcher takes over until the 5s watchdog catches up.
         reenableTapIfDisabled(reason: "flagsChanged")
+        let timestamp = Date.timeIntervalSinceReferenceDate
+        probeSecureInputIfNeeded(flags: event.modifierFlags, now: timestamp)
         handleModifierFlagsChanged(
             flags: event.modifierFlags,
-            timestamp: Date.timeIntervalSinceReferenceDate,
+            timestamp: timestamp,
             shouldHandleConfiguredRelease: true
+        )
+    }
+
+    /// Runs only on the NSEvent monitor path, not inside the tap callback, and
+    /// at most once per second. The tap source shares the main run loop, so a
+    /// sub-millisecond IORegistry read is the accepted cost. Gated on debug
+    /// performance logging like every other jsonl diagnostic, so the default
+    /// mode pays nothing.
+    private func probeSecureInputIfNeeded(flags rawFlags: NSEvent.ModifierFlags, now: TimeInterval) {
+        guard PerformanceLoggingState.mode == .debug else { return }
+        let hotkeyModifier = SwitchBladeSettings.shared.modifier.nsFlag
+        let isHotkeyModifierDown = rawFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .contains(hotkeyModifier)
+        guard Self.shouldProbeSecureInput(
+            isHotkeyModifierDown: isHotkeyModifierDown,
+            lastProbeAt: lastSecureInputProbeAt,
+            now: now
+        ) else { return }
+        lastSecureInputProbeAt = now
+
+        guard let pid = SecureInputMonitor.readSecureInputPIDFromIORegistry() else { return }
+        let executable = SecureInputMonitor.processInfo(pid: pid)?.executableName ?? "unknown"
+        Logger.hotkey.notice(
+            "Hotkey modifier pressed while Secure Input is active: pid=\(pid, privacy: .public) exe=\(executable, privacy: .public) — keyDown events will not reach the tap"
+        )
+        PerformanceDiagnostics.record(
+            "hotkey_modifier_secure_input",
+            fields: [
+                "pid": .int(Int(pid)),
+                "executable": .string(executable)
+            ]
         )
     }
 

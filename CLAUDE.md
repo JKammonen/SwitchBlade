@@ -13,10 +13,11 @@ For user-tested behavior changes, `swift build` is not enough. Rebuild/sign with
 rebuilt `dist/SwitchBlade.app`; `.build/debug/SwitchBlade` does not update the app
 bundle the user is running.
 
-Streaming logs:
+Streaming logs (use the full path: `log` is a zsh builtin, so a bare `log show`
+or `log stream` fails with "too many arguments" or returns nothing):
 
 ```bash
-log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
+/usr/bin/log stream --predicate 'subsystem == "com.jannekammonen.SwitchBlade"'
 ```
 
 ## Architecture
@@ -144,6 +145,19 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `scripts/setup-local-codesign.sh` output. Should not happen with current setup.
 - **Blank previews after idle** → first-batch capture cold-starts. Has retry + soft
   timeout. Check rolling p95/p99 in cold-open log.
+- **Cmd+Tab falls through to the macOS switcher, then SwitchBlade works again** →
+  with performance logging on debug, read `performance.jsonl` around the gap
+  before touching tap heuristics. Rows to look for: `hotkey_passthrough` (tap saw
+  Cmd+Tab but extra Ctrl or Option flags made the exact-match rule forward it),
+  `hotkey_modifier_secure_input` (Cmd pressed while another process held Secure
+  Input, so keyDown never reached the tap; carries pid + executable name),
+  `event_tap_recovery` (tap was found disabled/invalid and healed),
+  `secure_input_state` (Secure Input transitions; `reason` = setup/menu/watchdog).
+  With debug logging on, no `hotkey_event` and none of those rows means the
+  keyDown never reached the process at all. Known pattern (2026-09-03): tap
+  enabled throughout, main thread alive, watchdog quiet, and the blind window
+  matched the lifetime of a short-lived foreground process. Details in
+  `project_switchblade.md`.
 - **Switcher feels slow when changing apps** → inspect
   `~/Library/Logs/SwitchBlade/performance.jsonl` first. Compare `hotkey_event`,
   `selection_action_dispatch` / `previous_switch_dispatch`, `panel_show`,

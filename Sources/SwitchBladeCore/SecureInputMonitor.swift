@@ -264,7 +264,7 @@ final class SecureInputMonitor {
         )
     ]
 
-    nonisolated private static func readSecureInputPIDFromIORegistry() -> pid_t? {
+    nonisolated static func readSecureInputPIDFromIORegistry() -> pid_t? {
         let root = IORegistryGetRootEntry(kIOMainPortDefault)
         guard root != 0 else { return nil }
         defer { IOObjectRelease(root) }
@@ -298,7 +298,7 @@ final class SecureInputMonitor {
         }
     }
 
-    nonisolated private static func processInfo(pid: pid_t) -> SecureInputProcess? {
+    nonisolated static func processInfo(pid: pid_t) -> SecureInputProcess? {
         guard pid > 0 else { return nil }
         if Darwin.kill(pid, 0) == -1 && errno == ESRCH {
             return nil
