@@ -11,7 +11,10 @@ enum PerformanceDiagnosticsTests {
         ("PerformanceDiagnostics/panelHideMetric_containsTimingBreakdown", panelHideMetricContainsTimingBreakdown),
         ("PerformanceDiagnostics/stringFields_areLengthBounded", stringFieldsAreLengthBounded),
         ("PerformanceDiagnostics/fieldCountAndKeys_areLengthBounded", fieldCountAndKeysAreLengthBounded),
-        ("PerformanceDiagnostics/logRotation_isSizeBounded", logRotationIsSizeBounded)
+        ("PerformanceDiagnostics/logRotation_isSizeBounded", logRotationIsSizeBounded),
+        ("PerformanceDiagnostics/largeMRU_roundTripsEveryWindowAndReason", largeMRURoundTripsEveryWindowAndReason),
+        ("PerformanceDiagnostics/displayOrder_tracksStaleRefreshAndMinimizedMerge", displayOrderTracksStaleRefreshAndMinimizedMerge),
+        ("PerformanceDiagnostics/cacheStabilization_recordsBothOrders", cacheStabilizationRecordsBothOrders)
     ]
 
     private static func decode(
@@ -146,5 +149,138 @@ enum PerformanceDiagnosticsTests {
         try expect(!PerformanceDiagnostics.shouldRotateLog(existingBytes: 0, incomingBytes: max + 1))
         try expect(!PerformanceDiagnostics.shouldRotateLog(existingBytes: max - 10, incomingBytes: 10))
         try expect(PerformanceDiagnostics.shouldRotateLog(existingBytes: max - 10, incomingBytes: 11))
+    }
+
+    private final class Recording: @unchecked Sendable {
+        let entries = LockedValue<[(String, [String: PerformanceMetricValue])]>([])
+
+        init() {
+            let entries = self.entries
+            PerformanceDiagnostics.testObserver.value = { event, fields in
+                entries.withValue { $0.append((event, fields)) }
+            }
+        }
+
+        func stop() { PerformanceDiagnostics.testObserver.value = nil }
+
+        func payloads(event: String, context: String? = nil) throws -> [[String: Any]] {
+            try entries.value.filter { $0.0 == event }.map { name, fields in
+                try decode(PerformanceDiagnostics.metricLine(event: name, fields: fields, timestamp: "test"))
+            }.filter { context == nil || $0["context"] as? String == context }
+        }
+    }
+
+    private static func rows(_ chunks: [[String: Any]]) -> [String] {
+        chunks.sorted { ($0["chunk_index"] as? Int ?? 0) < ($1["chunk_index"] as? Int ?? 0) }
+            .flatMap { chunk in
+                chunk.keys.filter { $0.hasPrefix("row_") && $0 != "row_count" }.sorted()
+                    .compactMap { chunk[$0] as? String }
+            }
+    }
+
+    private static func windowIDs(_ chunks: [[String: Any]]) -> [UInt32] {
+        rows(chunks).compactMap { row in
+            guard let start = row.range(of: ":id=")?.upperBound else { return nil }
+            return UInt32(row[start...].prefix(while: { $0 != "," }))
+        }
+    }
+
+    @MainActor static func largeMRURoundTripsEveryWindowAndReason() throws {
+        let recording = Recording()
+        defer { recording.stop() }
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        // Above the observed 25-window desktop AND two chunk boundaries.
+        let items: [WindowItem] = (0..<65).map { (index: Int) -> WindowItem in
+            let windowID = UInt32(42_000 + index)
+            let pid = Int32(60_000 + index)
+            return makeItem(id: windowID, pid: pid,
+                     appName: "PRIVATE_APP_SENTINEL", title: "PRIVATE_TITLE_SENTINEL",
+                     isFrontmostApp: index == 0)
+        }
+        for item in items { tracker.rememberSelection(item.id, in: items) }
+        let ordered = tracker.orderedForDisplay(from: items, context: "large-roundtrip", snapshotDiagnosticID: "snapshot-test")
+        let chunks = try recording.payloads(event: "mru_order")
+        try expectEqual(chunks.count, 3)
+        try expectEqual(windowIDs(chunks), ordered.map(\.id))
+        try expectEqual(windowIDs(try recording.payloads(event: "mru_snapshot")), items.map(\.id))
+        try expectEqual(Set(chunks.compactMap { $0["event_sequence"] as? Int }).count, 1)
+        for chunk in chunks {
+            try expectEqual(chunk["chunk_count"] as? Int, 3)
+            try expectEqual(chunk["row_count"] as? Int, 65)
+            try expectEqual(chunk["correlation_id"] as? String, "snapshot-test")
+            try expectLessThanOrEqual(chunk.count, PerformanceDiagnostics.maximumFieldCount + 2)
+            let data = try JSONSerialization.data(withJSONObject: chunk)
+            let text = String(decoding: data, as: UTF8.self)
+            try expect(!text.contains("PRIVATE_"), "order diagnostics must not expose window/app text")
+        }
+        for row in rows(chunks) {
+            try expect(row.contains("reason="))
+            try expectLessThanOrEqual(row.count, 256)
+        }
+        try expect(rows(chunks).last?.contains("reason=rankID:") == true, "tail reason must survive serialization")
+    }
+
+    @MainActor static func displayOrderTracksStaleRefreshAndMinimizedMerge() async throws {
+        let recording = Recording()
+        defer { recording.stop() }
+        let (store, catalog, _, _) = makeStore(cachedOpenItemsMaxAge: -1)
+        defer { store.cancel() }
+        catalog.visibleItems = (0..<28).map { (index: Int) -> WindowItem in
+            let windowID = UInt32(43_000 + index)
+            let pid = Int32(61_000 + index)
+            return makeItem(id: windowID, pid: pid, isFrontmostApp: index == 0)
+        }
+        await seedOpenItemsCache(store)
+        recording.entries.value = []
+        let newWindow = makeItem(id: 44_000, pid: 62_000)
+        catalog.visibleItems.append(newWindow)
+        catalog.minimizedItems = [makeItem(id: 45_000, pid: 63_000, isMinimized: true)]
+        catalog.minimizedSnapshotDelayNanoseconds = 100_000_000
+        store.requestCycle(forward: true)
+        for _ in 0..<100 where !store.items.contains(where: { $0.id == 45_000 }) {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(store.isVisible)
+        let stale = try recording.payloads(event: "display_order", context: "stale-cache-refresh")
+        try expect(!stale.isEmpty, "fresh replacement of the displayed stale cache must be logged")
+        try expect(windowIDs(stale).contains(44_000))
+        let merged = try recording.payloads(event: "display_order", context: "minimized-merge")
+        try expectEqual(windowIDs(merged), store.items.map(\.id))
+        try expectEqual(merged.last?["selected_id"] as? Int, Int(store.selectedID ?? 0))
+        try expectEqual(merged.last?["row_count"] as? Int, 30)
+        try expect(!recording.payloads(event: "display_order", context: "panel-show").isEmpty)
+        let sequences = try recording.payloads(event: "display_order").compactMap { $0["event_sequence"] as? Int }
+        try expectEqual(sequences, sequences.sorted())
+    }
+
+    @MainActor static func cacheStabilizationRecordsBothOrders() async throws {
+        let recording = Recording()
+        defer { recording.stop() }
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker, initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        catalog.visibleItems = [
+            makeItem(id: 10, pid: 100, isFrontmostApp: true),
+            makeItem(id: 11, pid: 100, isFrontmostApp: true),
+            makeItem(id: 20, pid: 200),
+            makeItem(id: 30, pid: 300)
+        ]
+        await seedOpenItemsCache(store)
+        // History changes while the cached order remains fixed. The real
+        // multi-window open must report both sides of that disagreement.
+        tracker.rememberSelection(20, in: catalog.visibleItems)
+        tracker.rememberSelection(30, in: catalog.visibleItems)
+        await openSwitcher(store)
+        let changes = try recording.payloads(event: "cache_stabilization")
+        let before = changes.filter { $0["phase"] as? String == "before" }
+        let after = changes.filter { $0["phase"] as? String == "after" }
+        try expect(!before.isEmpty, "the production cache stabilization must emit its input and output")
+        try expectEqual(before.count, after.count)
+        try expectEqual(before.last?["correlation_id"] as? String, after.last?["correlation_id"] as? String)
+        try expect(windowIDs(before) != windowIDs(after))
+        let decisions = try recording.payloads(event: "focus_rank_decision", context: "switcher-open-focus")
+        let returned = try recording.payloads(event: "snapshot_returned")
+        try expectNotNil(decisions.last?["correlation_id"])
+        try expectEqual(decisions.last?["correlation_id"] as? String, returned.last?["correlation_id"] as? String)
     }
 }

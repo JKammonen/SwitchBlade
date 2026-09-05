@@ -63,7 +63,7 @@ final class MRUTracker {
     /// windows are treated like any other windows: if a switch does not involve
     /// them, their relative positions do not change. Missing IDs are skipped for
     /// this snapshot only; a transient CGWindowList miss must not erase rank.
-    func orderedForDisplay(from snapshot: [WindowItem], context: String = "unknown") -> [WindowItem] {
+    func orderedForDisplay(from snapshot: [WindowItem], context: String = "unknown", snapshotDiagnosticID: String? = nil) -> [WindowItem] {
         guard !snapshot.isEmpty else { return [] }
 
         // isFrontmostApp comes from NSWorkspace at snapshot time and is more
@@ -172,14 +172,16 @@ final class MRUTracker {
             diagnostics: diagnostics,
             skippedRanks: skippedRanks
         )
-        recordOrderingDiagnostics(
-            context: context,
-            snapshot: snapshot,
-            frontmost: currentFrontmost,
-            diagnostics: diagnostics,
-            skippedRanks: skippedRanks,
-            reasonCounts: reasonCounts
-        )
+        PerformanceDiagnostics.$correlationID.withValue(snapshotDiagnosticID ?? UUID().uuidString) {
+            recordOrderingDiagnostics(
+                context: context,
+                snapshot: snapshot,
+                frontmost: currentFrontmost,
+                diagnostics: diagnostics,
+                skippedRanks: skippedRanks,
+                reasonCounts: reasonCounts
+            )
+        }
         return ordered
     }
 
@@ -516,7 +518,8 @@ final class MRUTracker {
         skippedRanks: [String],
         reasonCounts: [String: Int]
     ) {
-        guard PerformanceLoggingState.mode == .debug else { return }
+        guard PerformanceDiagnostics.isEnabled else { return }
+        PerformanceDiagnostics.recordWindowOrder("mru_snapshot", items: snapshot, fields: ["context": .string(context)])
         let frontmostSamePidCount = snapshot.reduce(0) { $0 + ($1.pid == frontmost.pid ? 1 : 0) }
         var fields: [String: PerformanceMetricValue] = [
             "bundle_count": .int(recentBundleIDs.count),
@@ -524,7 +527,6 @@ final class MRUTracker {
             "frontmost_pid": .int(Int(frontmost.pid)),
             "frontmost_same_pid_count": .int(frontmostSamePidCount),
             "frontmost_window_id": .int(Int(frontmost.id)),
-            "order": .string(diagnostics.prefix(16).joined(separator: ";")),
             "rank_count": .int(recentRanks.count),
             "skipped_rank_count": .int(skippedRanks.count),
             "snapshot_count": .int(snapshot.count)
@@ -535,7 +537,7 @@ final class MRUTracker {
         if !skippedRanks.isEmpty {
             fields["skipped"] = .string(skippedRanks.prefix(8).joined(separator: ";"))
         }
-        PerformanceDiagnostics.record("mru_order", fields: fields)
+        PerformanceDiagnostics.recordRows("mru_order", fields: fields, rows: diagnostics)
     }
 
     private func logRememberSelection(_ item: WindowItem, movedFromIndex: Int?, liveItems: [WindowItem], context: String) {

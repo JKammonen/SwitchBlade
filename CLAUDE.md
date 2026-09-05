@@ -172,6 +172,23 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   record each selection commit. `snapshotFallback` = the window had no usable
   rank. os_log debug lines are NOT persisted — jsonl is the only retrospective
   channel.
+  Full orders use `row_000000` etc., with at most 32 windows per JSONL chunk.
+  Reassemble by `(session_id, event_sequence)` and `chunk_index`; require all
+  `chunk_count` chunks and exactly `row_count` rows. The old concatenated
+  `order` field was truncated at 256 characters and cannot prove tail order.
+  `mru_snapshot` / `mru_order` record input and ranked output; `cache_stabilization`
+  records both sides of a cache override; `cache_order` records the resulting
+  cache; `display_order` records actual panel show and subsequent list changes
+  after selection reconciliation. `open_order` and `prepared_order` alone do not
+  prove a visible panel. Follow `open_id` across an open and `correlation_id`
+  across a snapshot/focus probe, including coalesced snapshot consumers.
+  `frontmost_focus_normalize` reports matched/chosen IDs and unresolved/skipped
+  outcomes; `focus_rank_decision` says whether the result was accepted or discarded.
+  Sequence and monotonic emission time are captured before asynchronous writes;
+  file order and wall-clock write timestamps alone are not causal order.
+  Rows contain IDs/state/reasons only. Logging remains debug-only, size-bounded,
+  and best-effort: sequence gaps or missing chunks must not be interpreted as
+  proof that a window vanished. These diagnostics do not change MRU behavior.
 - **Window-targeted self-activation changes a sibling's rank** → capture the
   backgrounded app's exact AX focus before SwitchBlade raises/focuses the target.
   The later app-activation notification must not rescan post-transition AX focus

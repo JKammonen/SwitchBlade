@@ -152,12 +152,17 @@ final class SwitcherStore: ObservableObject {
     private let focusedRankUpgradeDelayNanoseconds: UInt64
 
     private final class InFlightVisibleSnapshot {
+        let diagnosticID: String
         let task: Task<[WindowItem], Never>
 
-        init(task: Task<[WindowItem], Never>) {
+        init(diagnosticID: String, task: Task<[WindowItem], Never>) {
+            self.diagnosticID = diagnosticID
             self.task = task
         }
     }
+
+    private var openDiagnosticID = UUID().uuidString
+    private var lastReturnedSnapshotDiagnosticID: String?
 
     private final class PanelShowTimer: @unchecked Sendable {
         let workItem: DispatchWorkItem
@@ -330,7 +335,7 @@ final class SwitcherStore: ObservableObject {
               settingsGeneration == generation,
               !isVisible,
               !isSwitching else { return }
-        let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview"))
+        let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview", snapshotDiagnosticID: lastReturnedSnapshotDiagnosticID))
         let stabilizedItems = stabilizeBackgroundWarmupOrder(
             orderedItems,
             context: context,
@@ -425,6 +430,16 @@ final class SwitcherStore: ObservableObject {
         pendingOpenCycleDelta = forward ? 1 : -1
         activeOpenRequestedAt = pendingOpenRequestedAt
         enterResolving(commitWhenReady: false)
+
+        openDiagnosticID = UUID().uuidString
+        PerformanceDiagnostics.record("open_cache_decision", fields: [
+            "open_id": .string(openDiagnosticID),
+            "cached_count": .int(cachedOpenItems.count),
+            "current_pid": .int(Int(currentAppPID ?? -1)),
+            "cached_current_app_count": .int(cachedOpenItems.filter { $0.pid == currentAppPID }.count),
+            "cache_fresh": .bool(isCachedOpenItemsFresh()),
+            "needs_resnapshot": .bool(cachedOpenItemsNeedResnapshot)
+        ])
 
         if !cachedOpenItems.isEmpty {
             if cachedOpenItemsNeedResnapshot {
@@ -793,6 +808,7 @@ final class SwitcherStore: ObservableObject {
                     forAppIdentity: selected.bundleIdentifier ?? selected.appName,
                     bundleIdentifier: selected.bundleIdentifier
                 )
+                self.recordDisplayOrder(context: "quit")
                 self.items.isEmpty ? self.cancel() : self.hide()
             }
         )
@@ -1064,7 +1080,7 @@ final class SwitcherStore: ObservableObject {
 
     private func itemsForPreviousSwitchTarget() async -> [WindowItem] {
         let snapshot = await snapshotVisibleOnlyOffMain(priority: .userInitiated)
-        return mruTracker.orderedForDisplay(from: snapshot, context: "previous-switch-target")
+        return mruTracker.orderedForDisplay(from: snapshot, context: "previous-switch-target", snapshotDiagnosticID: lastReturnedSnapshotDiagnosticID)
     }
 
     private func previousApplicationPID(currentPID: pid_t?, orderedItems: [WindowItem]) -> pid_t? {
@@ -1140,6 +1156,7 @@ final class SwitcherStore: ObservableObject {
             pid != item.pid && pid != switchBladePID ? pid : nil
         }
         let backgroundedFocusBeforeActivation = LockedValue<WindowItem?>(nil)
+        let focusDiagnosticID = UUID().uuidString
         let activationRequestID = item.pid != currentAppPID
             ? markActivationRequest(
                 pid: item.pid,
@@ -1154,7 +1171,10 @@ final class SwitcherStore: ObservableObject {
         let started = startWindowAction(
             operation: {
                 if let backgroundedPID {
-                    backgroundedFocusBeforeActivation.value = catalog.focusedWindowItem(pid: backgroundedPID)
+                    backgroundedFocusBeforeActivation.value = Self.diagnosticFocusedWindow(
+                        catalog: catalog, pid: backgroundedPID,
+                        diagnosticID: focusDiagnosticID, context: "pre-activation-backgrounded-focus"
+                    )
                 }
                 return action(activator, target)
             },
@@ -1169,7 +1189,9 @@ final class SwitcherStore: ObservableObject {
                     dismissedBeforeCompletion: dismissBeforeCompletion,
                     actionStart: actionStart,
                     activationRequestID: activationRequestID,
-                    backgroundedFocusBeforeActivation: backgroundedFocusBeforeActivation.value
+                    backgroundedFocusBeforeActivation: backgroundedFocusBeforeActivation.value,
+                    focusDiagnosticID: focusDiagnosticID,
+                    backgroundedFocusWasRequested: backgroundedPID != nil
                 )
             }
         )
@@ -1219,10 +1241,14 @@ final class SwitcherStore: ObservableObject {
         dismissedBeforeCompletion: Bool,
         actionStart: Date,
         activationRequestID: UUID?,
-        backgroundedFocusBeforeActivation: WindowItem?
+        backgroundedFocusBeforeActivation: WindowItem?,
+        focusDiagnosticID: String,
+        backgroundedFocusWasRequested: Bool
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
         guard didPerformAction else {
+            recordFocusRankDecision(item: backgroundedFocusBeforeActivation, diagnosticID: focusDiagnosticID,
+                                    context: "pre-activation-backgrounded-focus", outcome: "discarded-action-failed")
             if let activationRequestID {
                 cancelActivationRequest(pid: item.pid, id: activationRequestID)
             }
@@ -1261,10 +1287,15 @@ final class SwitcherStore: ObservableObject {
         )
         if let backgroundedFocusBeforeActivation,
            !backgroundedFocusBeforeActivation.isApplicationFallback {
+            recordFocusRankDecision(item: backgroundedFocusBeforeActivation, diagnosticID: focusDiagnosticID,
+                                    context: "pre-activation-backgrounded-focus", outcome: "accepted")
             mruTracker.trackBackgroundedWindowFocus(
                 backgroundedFocusBeforeActivation,
                 context: "pre-activation-backgrounded-focus"
             )
+        } else if backgroundedFocusWasRequested {
+            recordFocusRankDecision(item: backgroundedFocusBeforeActivation, diagnosticID: focusDiagnosticID,
+                                    context: "pre-activation-backgrounded-focus", outcome: "discarded-unresolved-or-fallback")
         }
         let rememberMs = Date().timeIntervalSince(rememberStart) * 1000
         let cacheSyncStart = Date()
@@ -1610,7 +1641,7 @@ final class SwitcherStore: ObservableObject {
             let orderStart = Date()
             self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
             let snapshotOrderedItems = self.orderItems(
-                self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot")
+                self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot", snapshotDiagnosticID: self.lastReturnedSnapshotDiagnosticID)
             )
             let orderedItems = stabilizeWithCachedOrder
                 ? self.stabilizeBackgroundWarmupOrder(
@@ -1649,7 +1680,7 @@ final class SwitcherStore: ObservableObject {
 
             let orderStart = Date()
             self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
-            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "stale-heal"))
+            let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "stale-heal", snapshotDiagnosticID: self.lastReturnedSnapshotDiagnosticID))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             guard !orderedItems.isEmpty else { return }
 
@@ -1686,7 +1717,16 @@ final class SwitcherStore: ObservableObject {
             count + (item.pid == frontmost.pid ? 1 : 0)
         }
         guard sameAppWindowCount > 1 else { return }
-        mruTracker.trackFocusedWindowActivation(frontmost, context: "switcher-open-focus")
+        PerformanceDiagnostics.$correlationID.withValue(lastReturnedSnapshotDiagnosticID) {
+            PerformanceDiagnostics.record("focus_rank_decision", fields: [
+                "open_id": .string(openDiagnosticID),
+                "context": .string("switcher-open-focus"),
+                "outcome": .string("accepted-first-frontmost-row"),
+                "window_id": .int(Int(frontmost.id)),
+                "pid": .int(Int(frontmost.pid))
+            ])
+            mruTracker.trackFocusedWindowActivation(frontmost, context: "switcher-open-focus")
+        }
     }
 
     private func applyStaleCacheRefresh(
@@ -1709,6 +1749,8 @@ final class SwitcherStore: ObservableObject {
                 selectedID = hydratedItems.indices.contains(1) ? hydratedItems[1].id : hydratedItems.first?.id
             }
         }
+
+        recordDisplayOrder(context: "stale-cache-refresh")
 
         previewLoadTask?.cancel()
         if showAfterRefresh {
@@ -1847,7 +1889,8 @@ final class SwitcherStore: ObservableObject {
             let orderedItems = self.orderItems(
                 self.mruTracker.orderedForDisplay(
                     from: visibleSnapshot,
-                    context: "open-items-warmup:\(context)"
+                    context: "open-items-warmup:\(context)",
+                    snapshotDiagnosticID: self.lastReturnedSnapshotDiagnosticID
                 )
             )
             guard !Task.isCancelled, !orderedItems.isEmpty else { return }
@@ -1902,6 +1945,17 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func logWarmupStabilization(context: String, original: [WindowItem], stabilized: [WindowItem]) {
+        if PerformanceDiagnostics.isEnabled, original.map(\.id) != stabilized.map(\.id) {
+            let changeID = UUID().uuidString
+            PerformanceDiagnostics.$correlationID.withValue(changeID) {
+                PerformanceDiagnostics.recordWindowOrder("cache_stabilization", items: original, fields: [
+                    "context": .string(context), "phase": .string("before")
+                ])
+                PerformanceDiagnostics.recordWindowOrder("cache_stabilization", items: stabilized, fields: [
+                    "context": .string(context), "phase": .string("after")
+                ])
+            }
+        }
         guard PerformanceLoggingState.mode == .debug, original != stabilized else { return }
 
         let originalSummary = original.prefix(16)
@@ -1922,6 +1976,9 @@ final class SwitcherStore: ObservableObject {
             context: "cached-open-update"
         )
         cachedOpenItems = cacheItems
+        PerformanceDiagnostics.recordWindowOrder("cache_order", items: cacheItems, fields: [
+            "open_id": .string(openDiagnosticID)
+        ])
         cachedOpenItemsUpdatedAt = cacheItems.isEmpty ? nil : Date()
         cachedOpenItemsNeedResnapshot = false
         primeHiddenDisplayItems(cacheItems)
@@ -1991,6 +2048,7 @@ final class SwitcherStore: ObservableObject {
             items = newItems
             selectedID = newSelectedID
         }
+        recordDisplayOrder(context: "apply-items")
     }
 
     private func hiddenStaleCommitNeedsFreshSnapshot(for item: WindowItem) -> Bool {
@@ -2011,6 +2069,12 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func logOpenOrdering(source: String, orderedItems: [WindowItem], selectedID: WindowItem.ID?) {
+        PerformanceDiagnostics.recordWindowOrder("open_order", items: orderedItems, fields: [
+            "open_id": .string(openDiagnosticID),
+            "source": .string(source),
+            "selected_id": .int(Int(selectedID ?? 0)),
+            "stale": .bool(currentShowingStale)
+        ])
         guard PerformanceLoggingState.mode == .debug else { return }
         let orderSummary = orderedItems.prefix(16)
             .enumerated()
@@ -2023,6 +2087,16 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.debug(
             "Open order source=\(source, privacy: .public) count=\(orderedItems.count, privacy: .public) selectedID=\(selectedID ?? 0, privacy: .public) staleVisible=\(self.currentShowingStale, privacy: .public) order=[\(orderSummary, privacy: .public)]"
         )
+    }
+
+    private func recordDisplayOrder(context: String) {
+        PerformanceDiagnostics.recordWindowOrder(isVisible ? "display_order" : "prepared_order", items: items, fields: [
+            "open_id": .string(openDiagnosticID),
+            "context": .string(context),
+            "source": .string(currentOpenSource ?? "unknown"),
+            "selected_id": .int(Int(selectedID ?? 0)),
+            "stale": .bool(currentShowingStale)
+        ])
     }
 
     private func isCachedOpenItemsFresh(now: Date = Date()) -> Bool {
@@ -2139,17 +2213,46 @@ final class SwitcherStore: ObservableObject {
         focusedRankUpgradeTask?.cancel()
         let catalog = self.catalog
         let delayNanoseconds = focusedRankUpgradeDelayNanoseconds
+        let diagnosticID = UUID().uuidString
+        PerformanceDiagnostics.$correlationID.withValue(diagnosticID) {
+            PerformanceDiagnostics.record("focus_rank_scheduled", fields: [
+                "pid": .int(Int(pid)), "context": .string("system-activation-focus")
+            ])
+        }
         focusedRankUpgradeTask = Task { @MainActor [weak self] in
             if delayNanoseconds > 0 {
                 try? await Task.sleep(nanoseconds: delayNanoseconds)
             }
-            guard let self, !Task.isCancelled else { return }
-            guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else { return }
+            guard let self, !Task.isCancelled else {
+                PerformanceDiagnostics.$correlationID.withValue(diagnosticID) {
+                    PerformanceDiagnostics.record("focus_rank_decision", fields: [
+                        "pid": .int(Int(pid)), "context": .string("system-activation-focus"),
+                        "outcome": .string("discarded-before-probe")
+                    ])
+                }
+                return
+            }
+            guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else {
+                self.recordFocusRankDecision(item: nil, diagnosticID: diagnosticID,
+                    context: "system-activation-focus", outcome: "discarded-state-before-probe")
+                return
+            }
             let item = await Task.detached(priority: .utility) {
-                catalog.focusedWindowItem(pid: pid)
+                Self.diagnosticFocusedWindow(catalog: catalog, pid: pid, diagnosticID: diagnosticID,
+                                             context: "system-activation-focus")
             }.value
-            guard !Task.isCancelled, let item, item.pid == pid else { return }
-            guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else { return }
+            guard !Task.isCancelled, let item, item.pid == pid else {
+                self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
+                    context: "system-activation-focus", outcome: Task.isCancelled ? "discarded-cancelled" : "discarded-unresolved")
+                return
+            }
+            guard self.currentAppPID == pid, !self.isVisible, !self.isSwitching else {
+                self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
+                    context: "system-activation-focus", outcome: "discarded-state-changed")
+                return
+            }
+            self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
+                context: "system-activation-focus", outcome: "accepted")
             self.mruTracker.trackFocusedWindowActivation(item)
         }
     }
@@ -2162,14 +2265,51 @@ final class SwitcherStore: ObservableObject {
     private func scheduleBackgroundedWindowRankUpgrade(pid: pid_t, expectedCurrentPID: pid_t) {
         backgroundedFocusRankTask?.cancel()
         let catalog = self.catalog
+        let diagnosticID = UUID().uuidString
         backgroundedFocusRankTask = Task { @MainActor [weak self] in
             let item = await Task.detached(priority: .utility) {
-                catalog.focusedWindowItem(pid: pid)
+                Self.diagnosticFocusedWindow(catalog: catalog, pid: pid, diagnosticID: diagnosticID,
+                                             context: "backgrounded-app-focus")
             }.value
-            guard let self, !Task.isCancelled else { return }
-            guard self.currentAppPID == expectedCurrentPID, !self.isVisible, !self.isSwitching else { return }
-            guard let item, item.pid == pid, !item.isApplicationFallback else { return }
+            guard let self else { return }
+            guard !Task.isCancelled, self.currentAppPID == expectedCurrentPID, !self.isVisible, !self.isSwitching else {
+                self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
+                    context: "backgrounded-app-focus", outcome: Task.isCancelled ? "discarded-cancelled" : "discarded-state-changed")
+                return
+            }
+            guard let item, item.pid == pid, !item.isApplicationFallback else {
+                self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
+                    context: "backgrounded-app-focus", outcome: "discarded-unresolved")
+                return
+            }
+            self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
+                context: "backgrounded-app-focus", outcome: "accepted")
             self.mruTracker.trackBackgroundedWindowFocus(item)
+        }
+    }
+
+    private nonisolated static func diagnosticFocusedWindow(
+        catalog: WindowSnapshotProviding, pid: pid_t, diagnosticID: String, context: String
+    ) -> WindowItem? {
+        PerformanceDiagnostics.$correlationID.withValue(diagnosticID) {
+            PerformanceDiagnostics.$context.withValue(context) {
+                let item = catalog.focusedWindowItem(pid: pid)
+                PerformanceDiagnostics.record("focus_probe_result", fields: [
+                    "pid": .int(Int(pid)), "window_id": .int(Int(item?.id ?? 0)),
+                    "resolved": .bool(item != nil)
+                ])
+                return item
+            }
+        }
+    }
+
+    private func recordFocusRankDecision(item: WindowItem?, diagnosticID: String, context: String, outcome: String) {
+        PerformanceDiagnostics.$correlationID.withValue(diagnosticID) {
+            PerformanceDiagnostics.record("focus_rank_decision", fields: [
+                "open_id": .string(openDiagnosticID), "context": .string(context),
+                "outcome": .string(outcome), "window_id": .int(Int(item?.id ?? 0)),
+                "pid": .int(Int(item?.pid ?? -1)), "current_pid": .int(Int(currentAppPID ?? -1))
+            ])
         }
     }
 
@@ -2204,13 +2344,19 @@ final class SwitcherStore: ObservableObject {
         priority: TaskPriority = .utility
     ) async -> [WindowItem] {
         if let inFlightVisibleSnapshot {
-            return await inFlightVisibleSnapshot.task.value
+            let items = await inFlightVisibleSnapshot.task.value
+            recordReturnedSnapshot(inFlightVisibleSnapshot, coalesced: true)
+            return items
         }
 
         let catalog = self.catalog
+        let diagnosticID = UUID().uuidString
         let inFlightVisibleSnapshot = InFlightVisibleSnapshot(
+            diagnosticID: diagnosticID,
             task: Task.detached(priority: priority) {
-                catalog.snapshotVisibleOnly()
+                PerformanceDiagnostics.$correlationID.withValue(diagnosticID) {
+                    catalog.snapshotVisibleOnly()
+                }
             }
         )
         self.inFlightVisibleSnapshot = inFlightVisibleSnapshot
@@ -2218,7 +2364,22 @@ final class SwitcherStore: ObservableObject {
         if self.inFlightVisibleSnapshot === inFlightVisibleSnapshot {
             self.inFlightVisibleSnapshot = nil
         }
+        recordReturnedSnapshot(inFlightVisibleSnapshot, coalesced: false)
         return visibleItems
+    }
+
+    private func recordReturnedSnapshot(_ snapshot: InFlightVisibleSnapshot, coalesced: Bool) {
+        // Main-actor callers inspect/rank the returned array synchronously
+        // before their next suspension, including coalesced consumers.
+        lastReturnedSnapshotDiagnosticID = snapshot.diagnosticID
+        PerformanceDiagnostics.$correlationID.withValue(snapshot.diagnosticID) {
+            PerformanceDiagnostics.record("snapshot_returned", fields: [
+                "open_id": .string(openDiagnosticID),
+                "coalesced": .bool(coalesced),
+                "switching": .bool(isSwitching),
+                "visible": .bool(isVisible)
+            ])
+        }
     }
 
     private func showWithPreviews() {
@@ -2498,6 +2659,7 @@ final class SwitcherStore: ObservableObject {
         } else {
             selectedID = defaultSelectedID(in: orderedItems)
         }
+        recordDisplayOrder(context: "minimized-merge")
         return minimizedPreviewWindowIDs
     }
 
@@ -2513,10 +2675,12 @@ final class SwitcherStore: ObservableObject {
         guard isVisible, previewGeneration == generation else { return }
         guard shouldShowPanel else { return }
         onShow?()
+        recordDisplayOrder(context: "panel-show")
         recordPanelVisibleMetric(itemCount: items.count)
     }
 
     private func removeItem(withID id: WindowItem.ID) {
+        defer { recordDisplayOrder(context: "close") }
         let removedIndex = items.firstIndex(where: { $0.id == id })
         items.removeAll { $0.id == id }
         mruTracker.dropRank(forID: id)

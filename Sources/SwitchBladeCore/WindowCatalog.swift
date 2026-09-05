@@ -1073,7 +1073,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// windows, bounded by the 0.25 s messaging timeout and reported as
     /// `ax_ms` in the `frontmost_focus_normalize` metric.
     func snapshotVisibleOnly() -> [WindowItem] {
-        snapshotInternal(includeMinimized: false).visible
+        PerformanceDiagnostics.$correlationID.withValue(PerformanceDiagnostics.correlationID ?? UUID().uuidString) {
+            let items = snapshotInternal(includeMinimized: false).visible
+            PerformanceDiagnostics.recordWindowOrder("catalog_visible_order", items: items, fields: [:])
+            return items
+        }
     }
 
     /// Returns minimized windows from an AX walk. ~150–500ms with many running
@@ -1411,13 +1415,25 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// window that actually has focus. Hosted helper windows keep their helper
     /// PID for AX while `WindowItem.pid` identifies the regular app.
     private func normalizeFrontmostWindowOrder(_ items: [WindowItem], frontmostPID: pid_t?) -> [WindowItem] {
-        guard let frontmostPID else { return items }
-        guard let frontmostItem = items.first(where: { $0.isFrontmostApp }) else { return items }
+        guard let frontmostPID, let frontmostItem = items.first(where: { $0.isFrontmostApp }) else {
+            PerformanceDiagnostics.record("frontmost_focus_normalize", fields: [
+                "outcome": .string("skipped-no-frontmost"), "snapshot_count": .int(items.count)
+            ])
+            return items
+        }
         let windowPID = frontmostItem.windowProcessIdentifier
         let siblingCount = items.reduce(0) {
             $0 + ($1.windowProcessIdentifier == windowPID ? 1 : 0)
         }
-        guard siblingCount > 1 else { return items }
+        guard siblingCount > 1 else {
+            PerformanceDiagnostics.record("frontmost_focus_normalize", fields: [
+                "outcome": .string("skipped-single-window"),
+                "pid": .int(Int(frontmostPID)),
+                "chosen_window_id": .int(Int(frontmostItem.id)),
+                "sibling_count": .int(siblingCount)
+            ])
+            return items
+        }
 
         let axStart = Date()
         let focusInfo = focusedAXWindowInfo(pid: windowPID)
@@ -1439,6 +1455,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "ax_ms": .double(axMs),
                 "ax_resolved": .bool(focusInfo != nil),
                 "matched": .bool(focused != nil),
+                "outcome": .string(focused != nil ? "matched" : (focusInfo == nil ? "ax-unresolved" : "no-unambiguous-match")),
+                "previous_window_id": .int(Int(frontmostItem.id)),
+                "matched_window_id": .int(Int(focused?.id ?? 0)),
+                "chosen_window_id": .int(Int(normalized.first(where: { $0.isFrontmostApp })?.id ?? 0)),
                 "moved": .bool(normalized.map(\.id) != items.map(\.id)),
                 "pid": .int(Int(frontmostPID)),
                 "sibling_count": .int(siblingCount)
@@ -1500,21 +1520,39 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// from a fresh visible snapshot. Used to upgrade an identity-only
     /// activation rank to a concrete per-window rank.
     func focusedWindowItem(pid: pid_t) -> WindowItem? {
+        PerformanceDiagnostics.$correlationID.withValue(PerformanceDiagnostics.correlationID ?? UUID().uuidString) {
+            resolveFocusedWindowItem(pid: pid)
+        }
+    }
+
+    private func resolveFocusedWindowItem(pid: pid_t) -> WindowItem? {
         let items = snapshotVisibleOnly()
         var seenWindowPIDs = Set<pid_t>()
         for item in items where item.pid == pid {
             let windowPID = item.windowProcessIdentifier
-            guard seenWindowPIDs.insert(windowPID).inserted,
-                  let info = focusedAXWindowInfo(pid: windowPID),
-                  let match = Self.focusedWindowMatch(
+            guard seenWindowPIDs.insert(windowPID).inserted else { continue }
+            let info = focusedAXWindowInfo(pid: windowPID)
+            let match = info.flatMap {
+                Self.focusedWindowMatch(
                       in: items,
                       pid: windowPID,
-                      focusedTitle: info.title,
-                      focusedFrame: info.frame
-                  ) else {
-                continue
+                      focusedTitle: $0.title,
+                      focusedFrame: $0.frame
+                )
             }
+            PerformanceDiagnostics.record("focused_window_probe", fields: [
+                "pid": .int(Int(pid)), "window_pid": .int(Int(windowPID)),
+                "ax_resolved": .bool(info != nil), "matched": .bool(match != nil),
+                "matched_window_id": .int(Int(match?.id ?? 0)),
+                "outcome": .string(match != nil ? "matched" : (info == nil ? "ax-unresolved" : "no-unambiguous-match"))
+            ])
+            guard let match else { continue }
             return match
+        }
+        if seenWindowPIDs.isEmpty {
+            PerformanceDiagnostics.record("focused_window_probe", fields: [
+                "pid": .int(Int(pid)), "outcome": .string("no-visible-candidates")
+            ])
         }
         return nil
     }
