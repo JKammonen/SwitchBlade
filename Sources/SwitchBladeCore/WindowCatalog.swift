@@ -971,7 +971,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let excludedBundleIdentifiers: Set<String> = [
         "com.apple.PasswordsUIAgent",
         "com.apple.PasskeysUIService",
-        "com.apple.Safari.PasswordBreachAgent"
+        "com.apple.Safari.PasswordBreachAgent",
+        "com.openai.sky.CUAService" // Software cursor overlays, not user windows.
     ]
 
     private static let processCapturePermitPool = CapturePermitPool(limit: 6)
