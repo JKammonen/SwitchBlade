@@ -18,6 +18,7 @@ enum SwitcherLayoutCalculatorTests {
         ("Layout/malformedNumericInputs_stayFiniteAndContained", malformedNumericInputs),
         ("Layout/previewWidth_doesNotJumpAtColumnThreshold", previewWidthDoesNotJumpAtColumnThreshold),
         ("Layout/selectorWidth_capsDensePanelAndAllowsBalancedCompaction", selectorWidthCapsDensePanelAndAllowsBalancedCompaction),
+        ("Layout/builtInDisplay_seventeenItemsFitWithoutScrolling", builtInDisplaySeventeenItemsFitWithoutScrolling),
         ("Layout/permissionFooter_reservesExactHeightAndStaysContained", permissionFooterReservesHeight)
     ]
 
@@ -196,6 +197,32 @@ enum SwitcherLayoutCalculatorTests {
         try expectLessThan(wide.panelFrame.width, screen.width * 0.8)
         try expectGreaterThan(wide.panelFrame.width, narrow.panelFrame.width)
         try expect(abs(narrow.tileWidth - wide.tileWidth) < 0.5)
+    }
+
+    static func builtInDisplaySeventeenItemsFitWithoutScrolling() throws {
+        let visibleFrame = CGRect(x: 0, y: 0, width: 1_728, height: 1_084)
+        let result = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: visibleFrame,
+            tileMinWidth: 320,
+            itemCount: 17,
+            tileAspectRatio: aspect,
+            selectorWidthFraction: 0.9
+        ))
+
+        try expectEqual(result.columns, 5)
+        try expectEqual(result.rows, 4)
+        try expectLessThan(result.tileWidth, 320)
+        try expectGreaterThanOrEqual(result.tileWidth, 140)
+
+        let renderedGridHeight = CGFloat(result.rows) * (result.tileWidth / aspect)
+            + CGFloat(result.rows - 1) * SwitcherLayoutCalculator.gap
+            + SwitcherLayoutCalculator.gridPadY * 2
+        let requiredCardHeight = SwitcherLayoutCalculator.headerHeight + renderedGridHeight
+        let actualCardHeight = result.panelFrame.height
+            - SwitcherLayoutCalculator.cardMarginY * 2
+            - SwitcherLayoutCalculator.verticalSafety
+        try expectLessThanOrEqual(requiredCardHeight, actualCardHeight + 0.5)
+        try expectContains(rect: visibleFrame, contains: result.panelFrame)
     }
 
     static func permissionFooterReservesHeight() throws {

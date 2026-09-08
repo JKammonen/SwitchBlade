@@ -16,6 +16,7 @@ enum UIRenderSmokeTests {
         ("UIRender/applicationFallback_rendersAsIconOnlyTile", applicationFallbackRendersAsIconOnlyTile),
         ("UIRender/minimizedMerge_reflowsAndRendersThirteenthItem", minimizedMergeReflowsAndRendersThirteenthItem),
         ("UIRender/fifteenItems_renderAsBalancedThreeRows", fifteenItemsRenderAsBalancedThreeRows),
+        ("UIRender/seventeenItems_fitBuiltInDisplayWithoutFifthRow", seventeenItemsFitBuiltInDisplayWithoutFifthRow),
         ("UIRender/switcherColumns_remainFixedAtPanelTileWidth", switcherColumnsRemainFixedAtPanelTileWidth),
         ("UIRender/switcherView_wiresFixedColumnContract", switcherViewWiresFixedColumnContract),
         ("UIRender/switcherView_compactPermissionFooterRendersNarrow", compactPermissionFooterRendersNarrow),
@@ -237,6 +238,49 @@ enum UIRenderSmokeTests {
         try expectGreaterThan(host.fittingSize.width, CGFloat(0))
         try expectGreaterThan(host.fittingSize.height, CGFloat(0))
         try writeRenderArtifactIfRequested(host, name: "switcher-fifteen-balanced")
+    }
+
+    @MainActor
+    static func seventeenItemsFitBuiltInDisplayWithoutFifthRow() async throws {
+        let previousLanguage = LocalizationState.selection
+        LocalizationState.selection = .english
+        defer { LocalizationState.selection = previousLanguage }
+
+        let colors: [NSColor] = [
+            .systemIndigo, .systemTeal, .systemOrange, .systemPink,
+            .systemBlue, .systemGreen, .systemPurple
+        ]
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...17).map { index in
+            makeItem(
+                id: CGWindowID(index),
+                appName: "App \(index)",
+                title: "Window \(index)"
+            ).withPreview(makeRenderPreview(
+                color: colors[(index - 1) % colors.count],
+                label: "\(index)"
+            ))
+        }
+        await openSwitcher(store)
+
+        let layout = SwitcherLayoutCalculator.calculate(.init(
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_728, height: 1_084),
+            tileMinWidth: 320,
+            itemCount: store.items.count,
+            tileAspectRatio: SwitcherLayout.tileAspectRatio,
+            selectorWidthFraction: 0.9
+        ))
+        try expectEqual(layout.columns, 5)
+        try expectEqual(layout.rows, 4)
+        store.updatePanelLayout(columns: layout.columns, tileWidth: layout.tileWidth)
+
+        let host = NSHostingView(rootView: SwitcherView(store: store))
+        host.frame = CGRect(origin: .zero, size: layout.panelFrame.size)
+        host.layoutSubtreeIfNeeded()
+
+        try expectGreaterThan(host.fittingSize.width, CGFloat(0))
+        try expectGreaterThan(host.fittingSize.height, CGFloat(0))
+        try writeRenderArtifactIfRequested(host, name: "switcher-seventeen-built-in-display")
     }
 
     @MainActor

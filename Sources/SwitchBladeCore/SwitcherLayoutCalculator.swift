@@ -30,6 +30,7 @@ enum SwitcherLayoutCalculator {
     /// Exact vertical space reserved by SwitcherView for its permission row.
     static let permissionFooterHeight: CGFloat = 42
     static let screenMargin: CGFloat = 20
+    private static let minimumAdaptiveTileWidth: CGFloat = 140
 
     static func calculate(_ input: Input) -> Output {
         let frame = input.visibleFrame
@@ -56,15 +57,31 @@ enum SwitcherLayoutCalculator {
         // Shrink and balance to actual item count so small sets don't reserve
         // awkward empty slots (e.g. 5 items as 4+1). Prefer 3+2 or 4+4 style
         // packing until the list is large enough that max-width scanning wins.
-        let columns = balancedColumnCount(itemCount: itemCount, maxColumns: maxColumns)
-        let rows = max(1, Int(ceil(Double(max(1, itemCount)) / Double(columns))))
+        let preferredColumns = balancedColumnCount(itemCount: itemCount, maxColumns: maxColumns)
+
+        let verticalChrome = cardMarginY * 2 + verticalSafety
+        let maxCardHeight = max(1, min(frame.height * 0.80, frame.height - verticalChrome))
+        let footerHeight = input.showsPermissionFooter ? permissionFooterHeight : 0
+        let fittedGrid = gridFittingHeight(
+            itemCount: itemCount,
+            preferredColumns: preferredColumns,
+            requestedTileWidth: tileW,
+            maxGridWidth: maxGridWidth,
+            tileAspectRatio: tileAspectRatio,
+            maxCardHeight: maxCardHeight,
+            footerHeight: footerHeight
+        )
+        let columns = fittedGrid.columns
+        let rows = fittedGrid.rows
 
         // Keep the rendered tile width tied to the setting. Previously the grid
         // redistributed all available width after a column-count threshold, so
-        // 250 -> 260 pt could render as 250 -> 316 pt.
-        let tileH = tileW / tileAspectRatio
+        // 250 -> 260 pt could render as 250 -> 316 pt. The only exception is a
+        // height overflow: reduce tiles just enough to keep every row visible.
+        let renderedTileWidth = fittedGrid.tileWidth
+        let tileH = renderedTileWidth / tileAspectRatio
 
-        let contentGridWidth = CGFloat(columns) * tileW + CGFloat(columns - 1) * gap
+        let contentGridWidth = CGFloat(columns) * renderedTileWidth + CGFloat(columns - 1) * gap
         // The selector setting is a maximum width. Keep dense, max-column grids
         // stable across tile-width thresholds, but when balancing deliberately
         // removes columns, shrink the panel around the resulting grid instead of
@@ -72,9 +89,6 @@ enum SwitcherLayoutCalculator {
         let fillsSelectorWidth = itemCount > maxColumns * 2 && columns == maxColumns
         let gridWidth = fillsSelectorWidth ? maxGridWidth : contentGridWidth
         let gridH = CGFloat(rows) * tileH + CGFloat(rows - 1) * gap + gridPadY * 2
-        let verticalChrome = cardMarginY * 2 + verticalSafety
-        let maxCardHeight = max(1, min(frame.height * 0.80, frame.height - verticalChrome))
-        let footerHeight = input.showsPermissionFooter ? permissionFooterHeight : 0
         let cardH = min(headerHeight + gridH + footerHeight, maxCardHeight)
         let height = min(frame.height, cardH + verticalChrome)
         let width = min(frame.width, gridWidth + horizontalChrome)
@@ -84,7 +98,59 @@ enum SwitcherLayoutCalculator {
         let panelFrame = CGRect(origin: origin,
                                 size: CGSize(width: width, height: height))
 
-        return Output(panelFrame: panelFrame, columns: columns, rows: rows, tileWidth: tileW)
+        return Output(panelFrame: panelFrame, columns: columns, rows: rows, tileWidth: renderedTileWidth)
+    }
+
+    private static func gridFittingHeight(
+        itemCount: Int,
+        preferredColumns: Int,
+        requestedTileWidth: CGFloat,
+        maxGridWidth: CGFloat,
+        tileAspectRatio: CGFloat,
+        maxCardHeight: CGFloat,
+        footerHeight: CGFloat
+    ) -> (columns: Int, rows: Int, tileWidth: CGFloat) {
+        let count = max(1, itemCount)
+        let preferredRows = Int(ceil(Double(count) / Double(preferredColumns)))
+        let preferredHeight = headerHeight
+            + CGFloat(preferredRows) * (requestedTileWidth / tileAspectRatio)
+            + CGFloat(preferredRows - 1) * gap
+            + gridPadY * 2
+            + footerHeight
+        guard preferredHeight > maxCardHeight else {
+            return (preferredColumns, preferredRows, requestedTileWidth)
+        }
+
+        // A wider grid often preserves much larger previews than squeezing an
+        // extra row vertically. Never shrink below the settings slider's real
+        // lower bound; very large result sets remain scrollable instead.
+        let adaptiveFloor = min(requestedTileWidth, minimumAdaptiveTileWidth)
+        let maxAdaptiveColumns = min(
+            count,
+            max(preferredColumns, Int((maxGridWidth + gap) / (adaptiveFloor + gap)))
+        )
+        var best: (columns: Int, rows: Int, tileWidth: CGFloat)?
+
+        for columns in preferredColumns...maxAdaptiveColumns {
+            let rows = Int(ceil(Double(count) / Double(columns)))
+            let horizontalLimit = (maxGridWidth - CGFloat(columns - 1) * gap) / CGFloat(columns)
+            let verticalSpace = maxCardHeight
+                - headerHeight
+                - footerHeight
+                - gridPadY * 2
+                - CGFloat(rows - 1) * gap
+            let verticalLimit = (verticalSpace / CGFloat(rows)) * tileAspectRatio
+            let candidateWidth = min(requestedTileWidth, horizontalLimit, verticalLimit)
+            guard candidateWidth.isFinite, candidateWidth + 0.5 >= adaptiveFloor else { continue }
+
+            if let best, candidateWidth <= best.tileWidth + 0.5 {
+                continue
+            } else {
+                best = (columns, rows, candidateWidth)
+            }
+        }
+
+        return best ?? (preferredColumns, preferredRows, requestedTileWidth)
     }
 
     static func balancedColumnCount(itemCount: Int, maxColumns: Int) -> Int {
