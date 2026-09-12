@@ -21,12 +21,18 @@ enum WindowEligibilityPolicyTests {
         ("MinimizedAXScanExecution/scansCandidateBeyondLegacyApplicationLimit", minimizedScanExecutionScansCandidateBeyondLegacyApplicationLimit),
         ("HostedWindowSurface/filtersMirroredHelperSurface", filtersMirroredHelperSurface),
         ("HostedWindowSurface/keepsUniqueHelperSurface", keepsUniqueHelperSurface),
+        ("WindowLayerEligibility/acceptsOnlyNamedFloatingCandidates", acceptsOnlyNamedFloatingCandidates),
+        ("WindowLayerEligibility/retainsBackgroundedPluginWithVisibleHost", retainsBackgroundedPluginWithVisibleHost),
         ("AXWindowEligibility/filtersUnmatchedAuxiliarySurface", filtersUnmatchedAuxiliarySurface),
         ("AXWindowEligibility/filtersDuplicateSystemDialogSurfaces", filtersDuplicateSystemDialogSurfaces),
         ("AXWindowEligibility/keepsMatchedUntitledWindow", keepsMatchedUntitledWindow),
         ("AXWindowEligibility/titledSurfaceWithoutAXFrameIsFiltered", titledSurfaceWithoutAXFrameIsFiltered),
         ("AXWindowEligibility/unavailableAXFailsOpen", unavailableAXFailsOpen),
-        ("AXWindowEligibility/ambiguousCandidateReuseFailsOpen", ambiguousCandidateReuseFailsOpen)
+        ("AXWindowEligibility/ambiguousCandidateReuseFailsOpen", ambiguousCandidateReuseFailsOpen),
+        ("AXWindowEligibility/keepsAXMatchedFloatingWindow", keepsAXMatchedFloatingWindow),
+        ("AXWindowEligibility/keepsRememberedFloatingWindowWhileAXHidden", keepsRememberedFloatingWindowWhileAXHidden),
+        ("AXWindowEligibility/floatingWindowFailsClosedWithoutAX", floatingWindowFailsClosedWithoutAX),
+        ("AXWindowEligibility/rejectsStandardAXMatchForFloatingLayer", rejectsStandardAXMatchForFloatingLayer)
     ]
 
     @MainActor static func rejectsOwnProcess() throws {
@@ -504,6 +510,46 @@ enum WindowEligibilityPolicyTests {
         )
     }
 
+    @MainActor static func acceptsOnlyNamedFloatingCandidates() throws {
+        let normalLayer = Int(CGWindowLevelForKey(.normalWindow))
+        let floatingLayer = Int(CGWindowLevelForKey(.floatingWindow))
+
+        try expect(WindowLayerEligibilityPolicy.canConsider(layer: normalLayer, title: ""))
+        try expect(WindowLayerEligibilityPolicy.canConsider(layer: floatingLayer, title: "Pigments/1-Pigments"))
+        try expect(!WindowLayerEligibilityPolicy.canConsider(layer: floatingLayer, title: ""))
+        try expect(!WindowLayerEligibilityPolicy.canConsider(layer: 8, title: "Overlay"))
+        try expect(WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: floatingLayer))
+        try expect(!WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: normalLayer))
+        try expect(WindowLayerEligibilityPolicy.canCaptureState(layer: floatingLayer))
+        try expect(!WindowLayerEligibilityPolicy.canCaptureState(layer: 8))
+    }
+
+    @MainActor static func retainsBackgroundedPluginWithVisibleHost() throws {
+        let normalLayer = Int(CGWindowLevelForKey(.normalWindow))
+        let floatingLayer = Int(CGWindowLevelForKey(.floatingWindow))
+
+        try expect(WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
+            layer: normalLayer,
+            isOnScreen: true,
+            hostHasOnScreenWindow: true
+        ))
+        try expect(!WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
+            layer: normalLayer,
+            isOnScreen: false,
+            hostHasOnScreenWindow: true
+        ))
+        try expect(WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
+            layer: floatingLayer,
+            isOnScreen: false,
+            hostHasOnScreenWindow: true
+        ))
+        try expect(!WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
+            layer: floatingLayer,
+            isOnScreen: false,
+            hostHasOnScreenWindow: false
+        ))
+    }
+
     @MainActor static func filtersUnmatchedAuxiliarySurface() throws {
         let main = makeItem(
             id: 1,
@@ -654,6 +700,87 @@ enum WindowEligibilityPolicyTests {
         )
 
         try expectEqual(filtered.map(\.id), [1, 2])
+    }
+
+    @MainActor static func keepsAXMatchedFloatingWindow() throws {
+        let main = makeItem(
+            id: 1,
+            pid: 100,
+            title: "Untitled",
+            bounds: CGRect(x: 687, y: 30, width: 1763, height: 1410)
+        )
+        let floating = makeItem(
+            id: 2,
+            pid: 100,
+            title: "Pigments/1-Pigments",
+            bounds: CGRect(x: 364, y: 133, width: 1920, height: 1222)
+        )
+        let candidates = [
+            AXTopLevelWindowCandidate(title: main.title, frame: main.bounds),
+            AXTopLevelWindowCandidate(
+                title: floating.title,
+                frame: floating.bounds,
+                isFloatingWindow: true
+            )
+        ]
+
+        let filtered = AXWindowEligibilityPolicy.filteredItems(
+            [main, floating],
+            candidates: candidates,
+            requiredFloatingWindowIDs: [floating.id]
+        )
+
+        try expectEqual(filtered.map(\.id), [1, 2])
+    }
+
+    @MainActor static func floatingWindowFailsClosedWithoutAX() throws {
+        let main = makeItem(id: 1, pid: 100, title: "Untitled")
+        let floating = makeItem(id: 2, pid: 100, title: "Pigments/1-Pigments")
+
+        try expectEqual(
+            AXWindowEligibilityPolicy.filteredItems(
+                [main, floating],
+                candidates: nil,
+                requiredFloatingWindowIDs: [floating.id]
+            ).map(\.id),
+            [main.id]
+        )
+    }
+
+    @MainActor static func keepsRememberedFloatingWindowWhileAXHidden() throws {
+        let main = makeItem(id: 1, pid: 100, title: "Untitled")
+        let floating = makeItem(id: 2, pid: 100, title: "Kontakt 8/5-Kontakt 8")
+
+        try expectEqual(
+            AXWindowEligibilityPolicy.filteredItems(
+                [main, floating],
+                candidates: [AXTopLevelWindowCandidate(title: main.title, frame: main.bounds)],
+                requiredFloatingWindowIDs: [floating.id],
+                trustedFloatingWindowIDs: [floating.id]
+            ).map(\.id),
+            [main.id, floating.id]
+        )
+    }
+
+    @MainActor static func rejectsStandardAXMatchForFloatingLayer() throws {
+        let main = makeItem(id: 1, pid: 100, title: "Untitled")
+        let floating = makeItem(
+            id: 2,
+            pid: 100,
+            title: "Pigments/1-Pigments",
+            bounds: CGRect(x: 364, y: 133, width: 1920, height: 1222)
+        )
+        let candidates = [
+            AXTopLevelWindowCandidate(title: floating.title, frame: floating.bounds)
+        ]
+
+        let filtered = AXWindowEligibilityPolicy.filteredItems(
+            [main, floating],
+            candidates: candidates,
+            requiredFloatingWindowIDs: [floating.id]
+        )
+
+        try expectEqual(filtered.map(\.id), [main.id])
     }
 
     private static func applicationDescriptor(

@@ -710,11 +710,66 @@ struct AXTopLevelWindowCandidate: Equatable, Sendable {
     let title: String?
     let frame: CGRect
     let isSwitcherWindow: Bool
+    let isFloatingWindow: Bool
 
-    init(title: String?, frame: CGRect, isSwitcherWindow: Bool = true) {
+    init(
+        title: String?,
+        frame: CGRect,
+        isSwitcherWindow: Bool = true,
+        isFloatingWindow: Bool = false
+    ) {
         self.title = title
         self.frame = frame
         self.isSwitcherWindow = isSwitcherWindow
+        self.isFloatingWindow = isFloatingWindow
+    }
+}
+
+private struct ValidatedFloatingWindowSignature: Hashable, Sendable {
+    let windowProcessIdentifier: pid_t
+    let bundleIdentifier: String?
+    let title: String
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+
+    init(_ item: WindowItem) {
+        windowProcessIdentifier = item.windowProcessIdentifier
+        bundleIdentifier = item.bundleIdentifier
+        title = item.title
+        x = Int(item.bounds.origin.x.rounded())
+        y = Int(item.bounds.origin.y.rounded())
+        width = Int(item.bounds.width.rounded())
+        height = Int(item.bounds.height.rounded())
+    }
+}
+
+enum WindowLayerEligibilityPolicy {
+    private static let normalLayer = Int(CGWindowLevelForKey(.normalWindow))
+    private static let floatingLayer = Int(CGWindowLevelForKey(.floatingWindow))
+
+    static func canConsider(layer: Int, title: String) -> Bool {
+        if layer == normalLayer { return true }
+        guard layer == floatingLayer else { return false }
+        return !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func requiresFloatingAXMatch(layer: Int) -> Bool {
+        layer == floatingLayer
+    }
+
+    static func canCaptureState(layer: Int) -> Bool {
+        layer == normalLayer || layer == floatingLayer
+    }
+
+    static func canIncludeInCurrentSpace(
+        layer: Int,
+        isOnScreen: Bool,
+        hostHasOnScreenWindow: Bool
+    ) -> Bool {
+        if isOnScreen { return true }
+        return layer == floatingLayer && hostHasOnScreenWindow
     }
 }
 
@@ -722,33 +777,91 @@ enum AXWindowEligibilityPolicy {
     /// Single-surface apps stay on the fast CGWindowList path. Apps exposing
     /// several WindowServer surfaces get a semantic top-level-window check so
     /// named and unnamed Chromium-style child surfaces are treated alike.
-    static func requiresValidation(_ items: [WindowItem]) -> Bool {
-        items.count > 1
+    static func requiresValidation(
+        _ items: [WindowItem],
+        requiredFloatingWindowIDs: Set<CGWindowID> = []
+    ) -> Bool {
+        let requiredIDs = requiredFloatingWindowIDs.intersection(items.map(\.id))
+        let ordinaryItemCount = items.reduce(into: 0) { count, item in
+            if !requiredIDs.contains(item.id) { count += 1 }
+        }
+        return ordinaryItemCount > 1 || !requiredIDs.isEmpty
     }
 
     /// Keep only CGWindow rows that map one-to-one to the app's AXWindows list.
-    /// Any unavailable or ambiguous AX evidence fails open so SwitchBlade does
-    /// not hide legitimate windows from apps with incomplete Accessibility data.
+    /// Ordinary layer-0 rows fail open on unavailable or ambiguous AX evidence.
+    /// Floating-layer rows fail closed because that layer also contains app UI
+    /// surfaces which are not independent switcher windows.
     static func filteredItems(
         _ items: [WindowItem],
-        candidates: [AXTopLevelWindowCandidate]?
+        candidates: [AXTopLevelWindowCandidate]?,
+        requiredFloatingWindowIDs: Set<CGWindowID> = [],
+        trustedFloatingWindowIDs: Set<CGWindowID> = []
     ) -> [WindowItem] {
-        guard requiresValidation(items), let candidates else {
+        let requiredIDs = requiredFloatingWindowIDs.intersection(items.map(\.id))
+        let trustedRequiredIDs = trustedFloatingWindowIDs.intersection(requiredIDs)
+        let ordinaryItems = items.filter { !requiredIDs.contains($0.id) }
+        let shouldValidateOrdinaryItems = ordinaryItems.count > 1
+        guard shouldValidateOrdinaryItems || !requiredIDs.isEmpty else {
             return items
         }
+        guard let candidates else {
+            return items.filter {
+                !requiredIDs.contains($0.id) || trustedRequiredIDs.contains($0.id)
+            }
+        }
         let switcherCandidates = candidates.filter(\.isSwitcherWindow)
-        guard !switcherCandidates.isEmpty else { return items }
+        guard !switcherCandidates.isEmpty else {
+            return items.filter {
+                !requiredIDs.contains($0.id) || trustedRequiredIDs.contains($0.id)
+            }
+        }
 
-        let matches = items.map { matchIndex(for: $0, candidates: switcherCandidates) }
+        let floatingCandidates = switcherCandidates.filter(\.isFloatingWindow)
+        let requiredItems = items.filter { requiredIDs.contains($0.id) }
+        let requiredMatches = requiredItems.map {
+            exactMatchIndex(for: $0, candidates: floatingCandidates)
+        }
+        let requiredMatchCounts = Dictionary(
+            requiredMatches.compactMap { $0 }.map { ($0, 1) },
+            uniquingKeysWith: +
+        )
+        let axMatchedRequiredIDs = Set<CGWindowID>(zip(requiredItems, requiredMatches).compactMap { item, matchIndex in
+            guard let matchIndex, requiredMatchCounts[matchIndex] == 1 else { return nil }
+            return item.id
+        })
+        let safeRequiredIDs = axMatchedRequiredIDs.union(trustedRequiredIDs)
+        let strictlyFilteredItems = items.filter {
+            !requiredIDs.contains($0.id) || safeRequiredIDs.contains($0.id)
+        }
+        guard shouldValidateOrdinaryItems else { return strictlyFilteredItems }
+
+        let matches = ordinaryItems.map { matchIndex(for: $0, candidates: switcherCandidates) }
         let matchedIndices = matches.compactMap { $0 }
         guard !matchedIndices.isEmpty,
               Set(matchedIndices).count == matchedIndices.count else {
-            return items
+            return strictlyFilteredItems
         }
 
-        return zip(items, matches).compactMap { item, matchIndex in
-            matchIndex == nil ? nil : item
+        let allowedOrdinaryIDs = Set(zip(ordinaryItems, matches).compactMap { item, matchIndex in
+            matchIndex == nil ? nil : item.id
+        })
+        return strictlyFilteredItems.filter { item in
+            requiredIDs.contains(item.id) || allowedOrdinaryIDs.contains(item.id)
         }
+    }
+
+    private static func exactMatchIndex(
+        for item: WindowItem,
+        candidates: [AXTopLevelWindowCandidate]
+    ) -> Int? {
+        let trimmedTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return nil }
+        let matches = candidates.indices.filter {
+            candidates[$0].title == item.title
+                && WindowActivator.framesAreClose(candidates[$0].frame, item.bounds)
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
 
     private static func matchIndex(
@@ -987,6 +1100,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let minimizedSnapshotCoalescer = InFlightTaskCoalescer<MinimizedSnapshotContext, MinimizedWindowSnapshot>()
     private let minimizedSnapshotEpoch = LockedValue<UInt64>(0)
     private let rememberedConcreteWindows = LockedValue<[pid_t: [RememberedConcreteWindow]]>([:])
+    private let validatedFloatingWindowSignatures = LockedValue<
+        [pid_t: Set<ValidatedFloatingWindowSignature>]
+    >([:])
 
     init() {
         capturePermitPool = Self.processCapturePermitPool
@@ -1014,7 +1130,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                   windowIDs.contains(windowID),
                   let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
                   let layer = entry[kCGWindowLayer as String] as? Int,
-                  layer == 0,
+                  WindowLayerEligibilityPolicy.canCaptureState(layer: layer),
                   let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
                   let isOnScreen = PreviewCaptureStabilityPolicy.onScreenState(
@@ -1131,8 +1247,35 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let listOptions: CGWindowListOption = windowScope == .currentSpace
             ? [.optionOnScreenOnly, .excludeDesktopElements]
             : [.optionAll, .excludeDesktopElements]
-        guard let rawList = CGWindowListCopyWindowInfo(listOptions, kCGNullWindowID) as? [[String: Any]] else {
+        guard let primaryRawList = CGWindowListCopyWindowInfo(
+            listOptions,
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
             return SnapshotResult(visible: [], minimized: [])
+        }
+        var rawList = primaryRawList
+        if windowScope == .currentSpace,
+           let allWindows = CGWindowListCopyWindowInfo(
+               [.optionAll, .excludeDesktopElements],
+               kCGNullWindowID
+           ) as? [[String: Any]] {
+            var includedWindowIDs = Set(primaryRawList.compactMap {
+                $0[kCGWindowNumber as String] as? UInt32
+            })
+            for entry in allWindows {
+                guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
+                      !includedWindowIDs.contains(windowID),
+                      let layer = entry[kCGWindowLayer as String] as? Int else {
+                    continue
+                }
+                let title = entry[kCGWindowName as String] as? String ?? ""
+                guard WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: layer),
+                      WindowLayerEligibilityPolicy.canConsider(layer: layer, title: title) else {
+                    continue
+                }
+                rawList.append(entry)
+                includedWindowIDs.insert(windowID)
+            }
         }
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -1143,6 +1286,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         var applicationResolutionsByPID: [pid_t: WindowApplicationResolution] = [:]
         var rejectedApplicationPIDs = Set<pid_t>()
         var visibleWindowIDs = Set<CGWindowID>()
+        var floatingWindowIDs = Set<CGWindowID>()
 
         func applicationResolution(for ownerPID: pid_t) -> WindowApplicationResolution? {
             if let cached = applicationResolutionsByPID[ownerPID] { return cached }
@@ -1161,12 +1305,37 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             return resolution
         }
 
+        let currentSpaceVisibleHostPIDs: Set<pid_t> = windowScope == .currentSpace
+            ? Set(primaryRawList.compactMap { entry -> pid_t? in
+                guard let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+                      let appName = entry[kCGWindowOwnerName as String] as? String,
+                      appName != "Window Server",
+                      let layer = entry[kCGWindowLayer as String] as? Int,
+                      WindowLayerEligibilityPolicy.canConsider(layer: layer, title: ""),
+                      entry[kCGWindowIsOnscreen as String] as? Bool == true else {
+                    return nil
+                }
+                let alpha = entry[kCGWindowAlpha as String] as? Double ?? 1
+                guard alpha > 0 else { return nil }
+                let bounds = (entry[kCGWindowBounds as String] as? NSDictionary)
+                    .flatMap(CGRect.init(dictionaryRepresentation:)) ?? .zero
+                guard bounds.width >= 120, bounds.height >= 80,
+                      let resolution = applicationResolution(for: ownerPID) else {
+                    return nil
+                }
+                return resolution.hostProcessIdentifier
+            })
+            : []
+
         let visibleItems = rawList.compactMap { entry -> WindowItem? in
             guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
                   let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
                   let appName = entry[kCGWindowOwnerName as String] as? String,
-                  let layer = entry[kCGWindowLayer as String] as? Int,
-                  layer == 0 else {
+                  let layer = entry[kCGWindowLayer as String] as? Int else {
+                return nil
+            }
+            let title = entry[kCGWindowName as String] as? String ?? ""
+            guard WindowLayerEligibilityPolicy.canConsider(layer: layer, title: title) else {
                 return nil
             }
 
@@ -1174,14 +1343,6 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 return nil
             }
 
-            // When restricting to current Space, also re-check isOnScreen per
-            // entry. The list option above already filters, but the explicit
-            // check protects against macOS occasionally returning stale rows.
-            // When not restricting, accept windows regardless of isOnScreen.
-            if windowScope == .currentSpace {
-                let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
-                guard isOnScreen else { return nil }
-            }
             let alpha = entry[kCGWindowAlpha as String] as? Double ?? 1
             guard alpha > 0 else {
                 return nil
@@ -1193,9 +1354,20 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 return nil
             }
 
-            let title = entry[kCGWindowName as String] as? String ?? ""
             guard let applicationResolution = applicationResolution(for: ownerPID) else {
                 return nil
+            }
+            if windowScope == .currentSpace {
+                let isOnScreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
+                guard WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
+                    layer: layer,
+                    isOnScreen: isOnScreen,
+                    hostHasOnScreenWindow: currentSpaceVisibleHostPIDs.contains(
+                        applicationResolution.hostProcessIdentifier
+                    )
+                ) else {
+                    return nil
+                }
             }
             if windowScope == .currentApp,
                applicationResolution.hostProcessIdentifier != frontmostPID,
@@ -1211,6 +1383,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 sharingState: sharingState
             ) else {
                 return nil
+            }
+            if WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: layer) {
+                floatingWindowIDs.insert(windowID)
             }
             visibleWindowIDs.insert(windowID)
 
@@ -1237,7 +1412,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         }
 
         let filteredVisibleItems = filterAuxiliaryWindowSurfaces(
-            HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems)
+            HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems),
+            requiredFloatingWindowIDs: floatingWindowIDs
         )
         rememberConcreteWindows(
             filteredVisibleItems,
@@ -1284,15 +1460,34 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         )
     }
 
-    private func filterAuxiliaryWindowSurfaces(_ items: [WindowItem]) -> [WindowItem] {
-        guard AXIsProcessTrusted(), items.count > 1 else { return items }
+    private func filterAuxiliaryWindowSurfaces(
+        _ items: [WindowItem],
+        requiredFloatingWindowIDs: Set<CGWindowID>
+    ) -> [WindowItem] {
+        let requiredIDs = requiredFloatingWindowIDs.intersection(items.map(\.id))
+        guard AXIsProcessTrusted() else {
+            return items.filter { !requiredIDs.contains($0.id) }
+        }
+        guard items.count > 1 || !requiredIDs.isEmpty else { return items }
 
         let itemsByPID = Dictionary(grouping: items, by: \.windowProcessIdentifier)
+        let liveWindowPIDs = Set(itemsByPID.keys)
+        let frontmostWindowPIDs = Set(items.filter(\.isFrontmostApp).map(\.windowProcessIdentifier))
+        validatedFloatingWindowSignatures.withValue { signaturesByPID in
+            signaturesByPID = signaturesByPID.filter { liveWindowPIDs.contains($0.key) }
+            for pid in frontmostWindowPIDs {
+                signaturesByPID.removeValue(forKey: pid)
+            }
+        }
+        let rememberedSignaturesByPID = validatedFloatingWindowSignatures.value
         var orderedPIDs: [pid_t] = []
         var seenPIDs = Set<pid_t>()
         for item in items where seenPIDs.insert(item.windowProcessIdentifier).inserted {
             guard let siblings = itemsByPID[item.windowProcessIdentifier],
-                  AXWindowEligibilityPolicy.requiresValidation(siblings) else {
+                  AXWindowEligibilityPolicy.requiresValidation(
+                      siblings,
+                      requiredFloatingWindowIDs: requiredIDs
+                  ) else {
                 continue
             }
             orderedPIDs.append(item.windowProcessIdentifier)
@@ -1312,21 +1507,51 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
         for pid in orderedPIDs {
             guard budget.beginApplication(now: ProcessInfo.processInfo.systemUptime) else { break }
-            guard let siblings = itemsByPID[pid],
-                  let candidates = topLevelAXWindowCandidates(pid: pid, budget: &budget) else {
+            guard let siblings = itemsByPID[pid] else { continue }
+            let isFrontmostApplication = siblings.contains { $0.isFrontmostApp }
+            let rememberedSignatures = rememberedSignaturesByPID[pid] ?? []
+            let trustedFloatingWindowIDs: Set<CGWindowID> = isFrontmostApplication
+                ? []
+                : Set(siblings.compactMap { item in
+                    guard requiredIDs.contains(item.id),
+                          rememberedSignatures.contains(ValidatedFloatingWindowSignature(item)) else {
+                        return nil
+                    }
+                    return item.id
+                })
+            let candidates = topLevelAXWindowCandidates(pid: pid, budget: &budget)
+            if candidates == nil {
                 fallbackApplications += 1
-                continue
             }
             let filtered = AXWindowEligibilityPolicy.filteredItems(
                 siblings,
-                candidates: candidates
+                candidates: candidates,
+                requiredFloatingWindowIDs: requiredIDs,
+                trustedFloatingWindowIDs: trustedFloatingWindowIDs
             )
+            if isFrontmostApplication {
+                let validatedSignatures = Set(filtered.compactMap { item in
+                    requiredIDs.contains(item.id)
+                        ? ValidatedFloatingWindowSignature(item)
+                        : nil
+                })
+                if !validatedSignatures.isEmpty {
+                    validatedFloatingWindowSignatures.withValue {
+                        $0[pid] = validatedSignatures
+                    }
+                }
+            }
             allowedWindowIDsByPID[pid] = Set(filtered.map(\.id))
-            validatedApplications += 1
+            if candidates != nil {
+                validatedApplications += 1
+            }
         }
 
         let filteredItems = items.filter { item in
-            allowedWindowIDsByPID[item.windowProcessIdentifier]?.contains(item.id) ?? true
+            if requiredIDs.contains(item.id) {
+                return allowedWindowIDsByPID[item.windowProcessIdentifier]?.contains(item.id) == true
+            }
+            return allowedWindowIDsByPID[item.windowProcessIdentifier]?.contains(item.id) ?? true
         }
         PerformanceDiagnostics.record(
             "window_ax_eligibility",
@@ -1404,7 +1629,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return AXTopLevelWindowCandidate(
             title: title,
             frame: CGRect(origin: point, size: size),
-            isSwitcherWindow: subrole != (kAXSystemDialogSubrole as String)
+            isSwitcherWindow: subrole != (kAXSystemDialogSubrole as String),
+            isFloatingWindow: subrole == (kAXFloatingWindowSubrole as String)
         )
     }
 
