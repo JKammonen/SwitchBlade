@@ -5,6 +5,8 @@ import Foundation
 enum WindowActivatorTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("WindowActivator/strictMatchingRejectsTruncatedCandidates", strictMatchingRejectsTruncatedCandidates),
+        ("WindowActivator/axScreensUsePrimaryDisplayOrigin", axScreensUsePrimaryDisplayOrigin),
         ("WindowActivator/framesAreClose_exactMatch", framesExact),
         ("WindowActivator/framesAreClose_withinTolerance", framesWithinTolerance),
         ("WindowActivator/framesAreClose_outsideTolerance", framesOutsideTolerance),
@@ -38,6 +40,40 @@ enum WindowActivatorTests {
         ("WindowActivator/snapFrame_halvesVisibleFrame", snapFrame_halvesVisibleFrame),
         ("WindowActivator/bestVisibleFrame_prefersLargestIntersection", bestVisibleFrame_prefersLargestIntersection)
     ]
+
+    static func strictMatchingRejectsTruncatedCandidates() throws {
+        let target = makeItem(id: 33, title: "Untitled", bounds: CGRect(x: 2000, y: 0, width: 800, height: 600))
+        let candidates = (1...33).map { id in
+            WindowActivator.WindowMatchCandidate(
+                title: id == 1 || id == 33 ? "Untitled" : "Other \(id)",
+                frame: CGRect(x: id == 33 ? 2000 : 0, y: 0, width: 800, height: 600),
+                isMain: false, isFocused: false
+            )
+        }
+        for prefix in [1, 32] {
+            try expectNil(WindowActivator.bestMatchDecision(
+                for: target.actionTarget, candidates: Array(candidates.prefix(prefix)),
+                requireUniqueEvidence: true, candidateScanIsComplete: false
+            ))
+        }
+        try expectEqual(WindowActivator.bestMatchDecision(
+            for: target.actionTarget, candidates: candidates, requireUniqueEvidence: true
+        )?.index, 32)
+    }
+
+    static func axScreensUsePrimaryDisplayOrigin() throws {
+        let frames = [CGRect(x: 0, y: 0, width: 1440, height: 900),
+                      CGRect(x: 0, y: 900, width: 1440, height: 900),
+                      CGRect(x: 1440, y: -900, width: 1440, height: 900)]
+        let screens = frames.map { WindowActivator.ScreenGeometry(frame: $0, visibleFrame: $0) }
+        let actual = WindowActivator.axScreenGeometries(from: screens)
+        try expectEqual(actual.map { $0.frame.minY }, [0, -900, 900])
+        try expectEqual(WindowActivator.snapFrame(inVisibleFrame: actual[1].visibleFrame,
+                                                 screenFrame: actual[1].frame, to: .top),
+                        CGRect(x: 0, y: -900, width: 1440, height: 450))
+        try expectEqual(WindowActivator.bestScreen(for: CGRect(x: 100, y: 100, width: 800, height: 600),
+                                                   candidates: actual), actual[0])
+    }
 
     static func framesExact() throws {
         let a = CGRect(x: 100, y: 200, width: 800, height: 600)
@@ -576,12 +612,12 @@ enum WindowActivatorTests {
     }
 
     static func toAXScreenRect_flipsVerticallyOffsetDisplay() throws {
-        let rootFrame = CGRect(x: 0, y: 0, width: 1440, height: 1800)
+        let rootFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let appKitVisibleFrameAboveMain = CGRect(x: 0, y: 900, width: 1440, height: 860)
 
         try expectEqual(
             WindowActivator.toAXScreenRect(appKitVisibleFrameAboveMain, rootScreenFrame: rootFrame),
-            CGRect(x: 0, y: 40, width: 1440, height: 860)
+            CGRect(x: 0, y: -860, width: 1440, height: 860)
         )
     }
 

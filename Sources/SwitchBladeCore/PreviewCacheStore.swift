@@ -41,6 +41,8 @@ final class PreviewCacheStore {
     private var byAppProcessIdentity: LRUDictionary<String, CachedPreview>
     private var byRecentlySeenWindowIdentity: LRUDictionary<String, CachedPreview>
     private var byRecentlySeenSignature: LRUDictionary<String, CachedPreview>
+    /// Bounded history prevents partial snapshots from forgetting title collisions.
+    private var ambiguousSignatures: LRUDictionary<String, Date>
     /// Window IDs whose last capture was mostly-white and was deferred once.
     /// A second consecutive white capture for the same window is then accepted
     /// as genuine content. Pruned to live windows on every `record`.
@@ -53,6 +55,7 @@ final class PreviewCacheStore {
         retainedPreviewMaxAge: TimeInterval = 300,
         now: @escaping () -> Date = Date.init
     ) {
+        ambiguousSignatures = LRUDictionary(capacity: capacity)
         byID = LRUDictionary(capacity: capacity)
         bySignature = LRUDictionary(capacity: capacity)
         byAppProcessIdentity = LRUDictionary(capacity: capacity)
@@ -90,19 +93,20 @@ final class PreviewCacheStore {
             return item.withPreview(cached.image)
         }
         let itemSignature = signature(for: item)
-        if liveItems.filter({ signature(for: $0) == itemSignature }).count == 1,
+        let allowsIdentityFallback = !hasRecentAmbiguity(item)
+        if allowsIdentityFallback, liveItems.filter({ signature(for: $0) == itemSignature }).count == 1,
            let cached = bySignature[itemSignature] {
             return item.withPreview(cached.image)
         }
         let exactSignature = recentSignature(for: item)
-        if item.isMinimized,
+        if allowsIdentityFallback, item.isMinimized,
            liveItems.filter({ recentSignature(for: $0) == exactSignature }).count == 1,
            let cached = byRecentlySeenSignature[exactSignature],
            isFreshEnough(cached) {
             return item.withPreview(cached.image)
         }
         let identity = appIdentity(for: item)
-        if liveItems.filter({ appIdentity(for: $0) == identity }).count == 1,
+        if allowsIdentityFallback, liveItems.filter({ appIdentity(for: $0) == identity }).count == 1,
            let cached = byAppProcessIdentity[appProcessIdentity(for: item)],
            isFreshEnough(cached) {
             return item.withPreview(cached.image)
@@ -126,6 +130,14 @@ final class PreviewCacheStore {
         liveItems: [WindowItem],
         classifications: PreviewFrameClassifications? = nil
     ) -> [CGWindowID: NSImage] {
+        // A visible-only capture can omit a minimized same-title sibling.
+        // Remember observed ambiguity across partial snapshots for a bounded time.
+        let groups = Dictionary(grouping: liveItems, by: recentSignature(for:))
+        for (key, group) in groups where group.count > 1 {
+            ambiguousSignatures[key] = now()
+            byRecentlySeenSignature[key] = nil
+            for item in group { bySignature[signature(for: item)] = nil }
+        }
         guard !previews.isEmpty else {
             keepOnlyLive(liveItems)
             return [:]
@@ -163,10 +175,12 @@ final class PreviewCacheStore {
             whiteDeferredIDs.remove(windowID)
             let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
-            bySignature[signature(for: item)] = cached
             byRecentlySeenWindowIdentity[windowIdentity(for: item)] = cached
-            byRecentlySeenSignature[recentSignature(for: item)] = cached
-            if singleWindowAppIdentities.contains(appIdentity(for: item)) {
+            if !hasRecentAmbiguity(item) {
+                bySignature[signature(for: item)] = cached
+                byRecentlySeenSignature[recentSignature(for: item)] = cached
+            }
+            if !hasRecentAmbiguity(item), singleWindowAppIdentities.contains(appIdentity(for: item)) {
                 byAppProcessIdentity[appProcessIdentity(for: item)] = cached
             }
             accepted[windowID] = image
@@ -196,6 +210,7 @@ final class PreviewCacheStore {
     }
 
     func removeAll() {
+        ambiguousSignatures.keepOnly([])
         byID.keepOnly([])
         bySignature.keepOnly([])
         byRecentlySeenWindowIdentity.keepOnly([])
@@ -235,6 +250,12 @@ final class PreviewCacheStore {
 
     private func appProcessIdentity(for item: WindowItem) -> String {
         "\(item.pid)::\(appIdentity(for: item))"
+    }
+
+    private func hasRecentAmbiguity(_ item: WindowItem) -> Bool {
+        ambiguousSignatures[recentSignature(for: item)].map {
+            now().timeIntervalSince($0) <= retainedPreviewMaxAge
+        } ?? false
     }
 
     private func isFreshEnough(_ cached: CachedPreview) -> Bool {

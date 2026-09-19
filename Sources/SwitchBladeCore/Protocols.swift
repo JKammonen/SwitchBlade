@@ -20,7 +20,18 @@ final class CooperativeCancellationToken: @unchecked Sendable {
 
 struct MinimizedWindowSnapshot {
     let items: [WindowItem]
+    /// Traversal completed; individual processes may still have unavailable AX data.
     let isComplete: Bool
+    let unresolvedWindowProcessIDs: Set<pid_t>
+    let retentionDeniedProcessIDs: Set<pid_t>
+
+    init(items: [WindowItem], isComplete: Bool,
+         unresolvedWindowProcessIDs: Set<pid_t> = [], retentionDeniedProcessIDs: Set<pid_t> = []) {
+        self.items = items
+        self.isComplete = isComplete
+        self.unresolvedWindowProcessIDs = unresolvedWindowProcessIDs
+        self.retentionDeniedProcessIDs = retentionDeniedProcessIDs
+    }
 }
 
 /// Window-listing dependency for SwitcherStore. Concrete WindowCatalog conforms;

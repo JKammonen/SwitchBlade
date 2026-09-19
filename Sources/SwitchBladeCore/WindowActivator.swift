@@ -685,7 +685,8 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             for: item,
             candidates: candidates.map(\.candidate),
             preferNonMainOnTies: preferNonMainOnTies,
-            requireUniqueEvidence: requireUniqueEvidence
+            requireUniqueEvidence: requireUniqueEvidence,
+            candidateScanIsComplete: !candidateScanWasBounded
         ) {
             let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
             PerformanceDiagnostics.record(
@@ -837,9 +838,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         for item: WindowActionTarget,
         candidates: [WindowMatchCandidate],
         preferNonMainOnTies: Bool = false,
-        requireUniqueEvidence: Bool = false
+        requireUniqueEvidence: Bool = false,
+        candidateScanIsComplete: Bool = true
     ) -> WindowMatchDecision? {
         guard !candidates.isEmpty else { return nil }
+        // Uniqueness in a prefix is not proof of identity. Close/snap must not
+        // act on a sibling when the actual target was beyond the scan budget.
+        guard !requireUniqueEvidence || candidateScanIsComplete else { return nil }
 
         let indexedCandidates = candidates.enumerated().map { (index: $0.offset, candidate: $0.element) }
         let exactTitleMatches = indexedCandidates.filter {
@@ -1112,14 +1117,17 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     private static func axScreenGeometries(from screens: [NSScreen]) -> [ScreenGeometry] {
-        let rootScreenFrame = screens.reduce(CGRect.null) { partial, screen in
-            partial.isNull ? screen.frame : partial.union(screen.frame)
-        }
-        guard !rootScreenFrame.isNull else { return [] }
+        axScreenGeometries(from: screens.map { ScreenGeometry(frame: $0.frame, visibleFrame: $0.visibleFrame) })
+    }
+
+    /// NSScreen.screens lists the primary display first. Quartz/AX's origin is
+    /// that display's top-left, even when another display extends above it.
+    static func axScreenGeometries(from screens: [ScreenGeometry]) -> [ScreenGeometry] {
+        guard let primary = screens.first else { return [] }
         return screens.map { screen in
             ScreenGeometry(
-                frame: toAXScreenRect(screen.frame, rootScreenFrame: rootScreenFrame),
-                visibleFrame: toAXScreenRect(screen.visibleFrame, rootScreenFrame: rootScreenFrame)
+                frame: toAXScreenRect(screen.frame, rootScreenFrame: primary.frame),
+                visibleFrame: toAXScreenRect(screen.visibleFrame, rootScreenFrame: primary.frame)
             )
         }
     }

@@ -120,8 +120,7 @@ final class SwitcherStore: ObservableObject {
     private var currentOpenSource: String?
     private var cachedOpenItems: [WindowItem] = []
     private var cachedOpenItemsUpdatedAt: Date?
-    private var cachedMinimizedItems: [WindowItem] = []
-    private var cachedMinimizedItemsUpdatedAt: Date?
+    private var minimizedCache = MinimizedWindowCache()
     /// Set when app focus changes outside the switcher after the cache was
     /// built. The cached list may still be young by timestamp, but its first
     /// item can now point at the wrong frontmost app for a fast Cmd+Tab.
@@ -336,10 +335,9 @@ final class SwitcherStore: ObservableObject {
               !isVisible,
               !isSwitching else { return }
         let orderedItems = orderItems(mruTracker.orderedForDisplay(from: visibleSnapshot, context: "warm-preview", snapshotDiagnosticID: lastReturnedSnapshotDiagnosticID))
-        let stabilizedItems = stabilizeBackgroundWarmupOrder(
+        let stabilizedItems = includingRetainedCurrentAppWindows(
             orderedItems,
-            context: context,
-            retainMissingCurrentAppWindows: true
+            context: context
         )
         let cacheItems = updateCachedOpenItems(stabilizedItems)
         let windowIDs = stabilizedItems
@@ -471,16 +469,14 @@ final class SwitcherStore: ObservableObject {
                 Logger.switcher.info(
                     "Bypassing cached open items after external activation changed the frontmost app"
                 )
-                openFromFreshSnapshotOffMain(
-                    stabilizeWithCachedOrder: cachedOpenItemsRequireFreshSnapshotForCurrentApp()
-                )
+                openFromFreshSnapshotOffMain()
                 return
             }
             if cachedOpenItemsRequireFreshSnapshotForCurrentApp() {
                 Logger.switcher.info(
                     "Bypassing cached open items for current multi-window app"
                 )
-                openFromFreshSnapshotOffMain(stabilizeWithCachedOrder: true)
+                openFromFreshSnapshotOffMain()
                 return
             }
             let cacheIsFresh = isCachedOpenItemsFresh()
@@ -1370,8 +1366,7 @@ final class SwitcherStore: ObservableObject {
         inFlightVisibleSnapshot = nil
         cachedOpenItems = []
         cachedOpenItemsUpdatedAt = nil
-        cachedMinimizedItems = []
-        cachedMinimizedItemsUpdatedAt = nil
+        minimizedCache = MinimizedWindowCache()
         cachedOpenItemsNeedResnapshot = false
         previewCache.removeAll()
 
@@ -1518,13 +1513,6 @@ final class SwitcherStore: ObservableObject {
         updateCachedItems: Bool = true,
         showingStaleCachedItems: Bool = false
     ) {
-        guard !orderedItems.isEmpty else {
-            pendingOpenCycleDelta = nil
-            enterIdle()
-            Logger.switcher.notice("Cycle aborted: snapshot is empty")
-            return
-        }
-
         currentOpenSource = source
         let displayOrderedItems = updateCachedItems
             ? updateCachedOpenItems(orderedItems)
@@ -1532,6 +1520,12 @@ final class SwitcherStore: ObservableObject {
                 orderedItems,
                 context: "cached-open-display"
             )
+        guard !displayOrderedItems.isEmpty else {
+            pendingOpenCycleDelta = nil
+            enterIdle()
+            Logger.switcher.notice("Cycle aborted: snapshot and remembered minimized windows are empty")
+            return
+        }
         // Display staleness is carried into the visible/previewHidden phase by the
         // mutators at the end of this method (enterPreviewHidden / enterVisible).
         let preselectedID = pendingOpenSelectedID(in: displayOrderedItems)
@@ -1620,7 +1614,7 @@ final class SwitcherStore: ObservableObject {
         // `previewGeneration == generation` would always fail.
     }
 
-    private func openFromFreshSnapshotOffMain(stabilizeWithCachedOrder: Bool = false) {
+    private func openFromFreshSnapshotOffMain() {
         openRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
@@ -1643,13 +1637,7 @@ final class SwitcherStore: ObservableObject {
             let snapshotOrderedItems = self.orderItems(
                 self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "request-snapshot", snapshotDiagnosticID: self.lastReturnedSnapshotDiagnosticID)
             )
-            let orderedItems = stabilizeWithCachedOrder
-                ? self.stabilizeBackgroundWarmupOrder(
-                    snapshotOrderedItems,
-                    context: "current-app-cache-validation",
-                    retainMissingCurrentAppWindows: false
-                )
-                : snapshotOrderedItems
+            let orderedItems = snapshotOrderedItems
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
             self.openFromOrderedItems(
                 orderedItems,
@@ -1894,10 +1882,9 @@ final class SwitcherStore: ObservableObject {
                 )
             )
             guard !Task.isCancelled, !orderedItems.isEmpty else { return }
-            let stabilizedItems = self.stabilizeBackgroundWarmupOrder(
+            let stabilizedItems = self.includingRetainedCurrentAppWindows(
                 orderedItems,
-                context: context,
-                retainMissingCurrentAppWindows: true
+                context: context
             )
             let cacheItems = self.updateCachedOpenItems(stabilizedItems)
             let ms = Date().timeIntervalSince(start) * 1000
@@ -1909,39 +1896,20 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func stabilizeBackgroundWarmupOrder(
-        _ orderedItems: [WindowItem],
-        context: String,
-        retainMissingCurrentAppWindows: Bool
+    private func includingRetainedCurrentAppWindows(
+        _ orderedItems: [WindowItem], context: String
     ) -> [WindowItem] {
         guard let frontmost = orderedItems.first else { return orderedItems }
-
-        let cachedSameAppCount = cachedOpenItems.filter { $0.pid == frontmost.pid }.count
-        guard cachedSameAppCount > 1 else { return orderedItems }
-
-        let freshByID = Dictionary(orderedItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        var usedIDs: Set<WindowItem.ID> = [frontmost.id]
-        var stabilized: [WindowItem] = [frontmost]
-
-        for cachedItem in cachedOpenItems where cachedItem.id != frontmost.id {
-            if let fresh = freshByID[cachedItem.id] {
-                guard usedIDs.insert(fresh.id).inserted else { continue }
-                stabilized.append(fresh)
-                continue
-            }
-
-            guard retainMissingCurrentAppWindows,
-                  cachedItem.pid == frontmost.pid,
-                  usedIDs.insert(cachedItem.id).inserted else { continue }
-            stabilized.append(cachedItem)
-        }
-
-        for item in orderedItems where usedIDs.insert(item.id).inserted {
-            stabilized.append(item)
-        }
-
-        logWarmupStabilization(context: context, original: orderedItems, stabilized: stabilized)
-        return stabilized
+        guard cachedOpenItems.filter({ $0.pid == frontmost.pid }).count > 1 else { return orderedItems }
+        let liveIDs = Set(orderedItems.map(\.id))
+        let retained = cachedOpenItems.filter { $0.pid == frontmost.pid && !liveIDs.contains($0.id) }
+        guard !retained.isEmpty else { return orderedItems }
+        // Retention affects membership only. Cached positions must never override MRU.
+        let result = orderItems(mruTracker.orderedForDisplay(
+            from: orderedItems + retained, context: "retained-current-app:\(context)"
+        ))
+        logWarmupStabilization(context: context, original: orderedItems, stabilized: result)
+        return result
     }
 
     private func logWarmupStabilization(context: String, original: [WindowItem], stabilized: [WindowItem]) {
@@ -1985,24 +1953,16 @@ final class SwitcherStore: ObservableObject {
         return cacheItems
     }
 
-    private func updateCachedMinimizedItems(_ minimizedItems: [WindowItem]) {
-        cachedMinimizedItems = minimizedItems
-        cachedMinimizedItemsUpdatedAt = minimizedItems.isEmpty ? nil : Date()
-    }
-
     private func freshCachedMinimizedItems(now: Date = Date()) -> [WindowItem] {
-        guard let updatedAt = cachedMinimizedItemsUpdatedAt,
-              now.timeIntervalSince(updatedAt) <= cachedOpenItemsMaxAge else {
-            return []
-        }
-        return cachedMinimizedItems
+        minimizedCache.freshItems(now: now, maxAge: cachedOpenItemsMaxAge)
     }
 
     private func orderedItemsWithRememberedMinimizedItems(
         _ orderedItems: [WindowItem],
         context: String
     ) -> [WindowItem] {
-        let rememberedMinimizedItems = freshCachedMinimizedItems()
+        let visibleIDs = Set(orderedItems.filter { !$0.isMinimized }.map(\.id))
+        let rememberedMinimizedItems = freshCachedMinimizedItems().filter { !visibleIDs.contains($0.id) }
         guard !rememberedMinimizedItems.isEmpty else { return orderedItems }
 
         let rememberedMinimizedIDs = Set(rememberedMinimizedItems.map(\.id))
@@ -2578,7 +2538,7 @@ final class SwitcherStore: ObservableObject {
                 guard !Task.isCancelled, !cancellation.isCancelled else { return }
                 guard minimizedSnapshot.isComplete else { return }
                 let previewWindowIDs = self?.mergeMinimizedItems(
-                    minimizedSnapshot.items,
+                    minimizedSnapshot,
                     generation: mergeGeneration
                 ) ?? []
                 guard !Task.isCancelled,
@@ -2598,11 +2558,12 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
-    private func mergeMinimizedItems(_ minimized: [WindowItem], generation: Int) -> [CGWindowID] {
+    private func mergeMinimizedItems(_ snapshot: MinimizedWindowSnapshot, generation: Int) -> [CGWindowID] {
         guard isVisible, previewGeneration == generation else { return [] }
-        updateCachedMinimizedItems(minimized)
+        let minimized = minimizedCache.reconcile(
+            snapshot, visibleItems: items, now: Date(), maxAge: cachedOpenItemsMaxAge
+        )
         let previousSelectedID = selectedID
-        let selectionWasDefault = previousSelectedID == defaultSelectedID(in: items)
         let minimizedIDs = Set(minimized.map(\.id))
         let minimizedApplicationPIDs = Set(minimized.map(\.pid))
         let visibleItems = items.filter { item in
@@ -2615,13 +2576,24 @@ final class SwitcherStore: ObservableObject {
                 : previewCache.hydrated(item, liveItems: visibleItems + minimized)
         }
         let mergedItems = visibleItems + minimizedItems
-        guard !mergedItems.isEmpty else { return [] }
-        let orderedItems = orderItems(
-            mruTracker.orderedForDisplay(
-                from: mergedItems,
-                context: "minimized-merge"
-            )
-        )
+        guard !mergedItems.isEmpty else {
+            updateCachedOpenItems([])
+            applyDisplayItems([], selectedID: nil)
+            cancel()
+            return []
+        }
+        let rankedItems = orderItems(mruTracker.orderedForDisplay(
+            from: mergedItems, context: "minimized-merge"
+        ))
+        let freshByID = Dictionary(rankedItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let survivors = items.compactMap { freshByID[$0.id] }
+        let survivingIDs = Set(survivors.map(\.id))
+        var survivorIndex = 0
+        let orderedItems = rankedItems.map { item in
+            guard survivingIDs.contains(item.id) else { return item }
+            defer { survivorIndex += 1 }
+            return survivors[survivorIndex]
+        }
         updateCachedOpenItems(orderedItems)
         let minimizedPreviewCandidates = SwitchBladeSettings.shared.previewMode == .iconsOnly
             ? []
@@ -2651,9 +2623,7 @@ final class SwitcherStore: ObservableObject {
         }
         guard orderedItems != items else { return minimizedPreviewWindowIDs }
         items = orderedItems
-        if selectionWasDefault {
-            selectedID = defaultSelectedID(in: orderedItems)
-        } else if let previousSelectedID,
+        if let previousSelectedID,
                   orderedItems.contains(where: { $0.id == previousSelectedID }) {
             selectedID = previousSelectedID
         } else {

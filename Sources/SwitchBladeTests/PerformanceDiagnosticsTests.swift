@@ -205,6 +205,7 @@ enum PerformanceDiagnosticsTests {
         try expectEqual(windowIDs(try recording.payloads(event: "mru_snapshot")), items.map(\.id))
         try expectEqual(Set(chunks.compactMap { $0["event_sequence"] as? Int }).count, 1)
         for chunk in chunks {
+            try expectEqual(chunk["process_id"] as? Int, Int(ProcessInfo.processInfo.processIdentifier))
             try expectEqual(chunk["chunk_count"] as? Int, 3)
             try expectEqual(chunk["row_count"] as? Int, 65)
             try expectEqual(chunk["correlation_id"] as? String, "snapshot-test")
@@ -262,16 +263,19 @@ enum PerformanceDiagnosticsTests {
         catalog.visibleItems = [
             makeItem(id: 10, pid: 100, isFrontmostApp: true),
             makeItem(id: 11, pid: 100, isFrontmostApp: true),
+            makeItem(id: 12, pid: 100, isFrontmostApp: true),
             makeItem(id: 20, pid: 200),
             makeItem(id: 30, pid: 300)
         ]
         await seedOpenItemsCache(store)
-        // History changes while the cached order remains fixed. The real
-        // multi-window open must report both sides of that disagreement.
-        tracker.rememberSelection(20, in: catalog.visibleItems)
-        tracker.rememberSelection(30, in: catalog.visibleItems)
+        // A transiently missing same-app row may be retained by a hidden warmup;
+        // this changes membership, never restores stale cached positions.
+        catalog.visibleItems.removeAll { $0.id == 11 }
+        store.scheduleOpenItemsCacheWarmup(context: "test-retention")
+        await runPendingMainTasks()
         await openSwitcher(store)
         let changes = try recording.payloads(event: "cache_stabilization")
+        try expect(!store.items.contains { $0.id == 11 }, "fresh open must remove the warmup-only retained row")
         let before = changes.filter { $0["phase"] as? String == "before" }
         let after = changes.filter { $0["phase"] as? String == "after" }
         try expect(!before.isEmpty, "the production cache stabilization must emit its input and output")

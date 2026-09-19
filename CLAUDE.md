@@ -96,7 +96,8 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   window present, then run `python3 scripts/verify_minimized_runtime_proof.py`.
   The resulting Git-private receipt is bound to HEAD, the staged tree, signed
   bundle source metadata, the versioned producer, and the retained aggregate
-  `minimized_window_snapshot` log line. `check-repo.sh` may defer this interactive
+  `minimized_window_snapshot` log line from the running PID after its relaunch.
+  `check-repo.sh` may defer this interactive
   receipt while building, but the shared Git pre-commit gate does not.
 
 ## Conventions
@@ -177,7 +178,7 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `chunk_count` chunks and exactly `row_count` rows. The old concatenated
   `order` field was truncated at 256 characters and cannot prove tail order.
   `mru_snapshot` / `mru_order` record input and ranked output; `cache_stabilization`
-  records both sides of a cache override; `cache_order` records the resulting
+  records hidden warmup retention of missing same-app rows; `cache_order` records the resulting
   cache; `display_order` records actual panel show and subsequent list changes
   after selection reconciliation. `open_order` and `prepared_order` alone do not
   prove a visible panel. Follow `open_id` across an open and `correlation_id`
@@ -189,6 +190,14 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   Rows contain IDs/state/reasons only. Logging remains debug-only, size-bounded,
   and best-effort: sequence gaps or missing chunks must not be interpreted as
   proof that a window vanished. These diagnostics do not change MRU behavior.
+  Fresh opens use current MRU order. A delayed minimized merge keeps surviving
+  displayed rows in their existing relative order and retains selection by ID;
+  new minimized rows use MRU insertion positions. An unavailable AX owner may
+  retain previously confirmed minimized rows only within their original cache
+  lifetime. Fresh rows from that owner or privacy exclusions suppress uncertain
+  retention; synthetic rows are also suppressed by fresh visible owner evidence.
+  Regressions: `Store/freshOpenUsesMRUBeforeEmptyMerge`,
+  `Store/minimizedMergePreservesVisibleOrderAndSelection`, and `MinimizedCache/*`.
 - **Window-targeted self-activation changes a sibling's rank** → capture the
   backgrounded app's exact AX focus before SwitchBlade raises/focuses the target.
   The later app-activation notification must not rescan post-transition AX focus

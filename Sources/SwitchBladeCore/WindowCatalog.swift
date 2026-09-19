@@ -2475,6 +2475,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             unorderedApplicationResolutions.map { ($0.windowProcessIdentifier, $0) }
         )
         var axEmptyWindowProcessIdentifiers = Set<pid_t>()
+        var unresolvedWindowProcessIDs = Set<pid_t>()
+        var retentionDeniedProcessIDs = Set<pid_t>()
 
         let execution: MinimizedAXScanExecutionResult<WindowItem> = MinimizedAXScanExecution.run(
             candidates: orderedScanCandidates,
@@ -2495,15 +2497,23 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 }
                 return windows
             },
+            onUnavailableCandidate: { unresolvedWindowProcessIDs.insert($0.windowProcessIdentifier) },
             itemForWindow: { scanCandidate, index, window -> WindowItem? in
                 guard let applicationResolution = applicationResolutionsByPID[
                     scanCandidate.windowProcessIdentifier
                 ] else { return nil }
                 _ = AXUIElementSetMessagingTimeout(window, axTimeoutSeconds)
-                guard axBool(kAXMinimizedAttribute, on: window) == true else { return nil }
+                guard let isMinimized = axBool(kAXMinimizedAttribute, on: window) else {
+                    unresolvedWindowProcessIDs.insert(scanCandidate.windowProcessIdentifier)
+                    return nil
+                }
+                guard isMinimized else { return nil }
 
                 let appName = applicationResolution.appName
-                let title = axString(kAXTitleAttribute, on: window) ?? ""
+                guard let title = axString(kAXTitleAttribute, on: window) else {
+                    unresolvedWindowProcessIDs.insert(scanCandidate.windowProcessIdentifier)
+                    return nil
+                }
                 let frame = axFrame(on: window)
                 let exactTitleMatch = sharingStateIndex.uniqueWindow(
                     pid: applicationResolution.windowProcessIdentifier,
@@ -2534,6 +2544,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         )
                 )
                 if titleDecision == .exclude {
+                    retentionDeniedProcessIDs.insert(scanCandidate.windowProcessIdentifier)
                     return nil
                 }
                 let canCapturePreview = WindowSharingPolicy.canCaptureMinimizedPreview(
@@ -2607,10 +2618,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "synthetic_ids": .int(filteredResult.filter { SyntheticWindowID.isSynthetic($0.id) }.count),
                 "title_matches": .int(exactTitleMatchCount),
                 "unavailable_ax_apps": .int(execution.applicationsWithUnavailableAX),
+                "unresolved_ax_processes": .int(unresolvedWindowProcessIDs.count),
                 "zero_window_apps": .int(execution.applicationsWithoutWindows)
             ]
         )
-        return MinimizedWindowSnapshot(items: filteredResult, isComplete: isComplete)
+        return MinimizedWindowSnapshot(items: filteredResult, isComplete: isComplete,
+                                       unresolvedWindowProcessIDs: unresolvedWindowProcessIDs,
+                                       retentionDeniedProcessIDs: retentionDeniedProcessIDs)
     }
 
     private func shouldIncludeApplication(

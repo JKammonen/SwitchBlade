@@ -3,6 +3,10 @@ import AppKit
 
 enum WindowEligibilityPolicyTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("MinimizedCache/partialResultsRetainOnlyUnresolvedOwners", partialResultsRetainOnlyUnresolvedOwners),
+        ("MinimizedCache/retainedRowsExpireWithoutRenewal", retainedRowsExpireWithoutRenewal),
+        ("MinimizedCache/freshVisibleAndPrivacyEvidenceBeatRetention", freshVisibleAndPrivacyEvidenceBeatRetention),
+        ("MinimizedCache/changedSyntheticIdentityCannotDuplicateOrBypassPrivacy", changedSyntheticIdentityCannotDuplicateOrBypassPrivacy),
         ("WindowEligibilityPolicy/rejectsOwnProcessUnconditionally", rejectsOwnProcess),
         ("WindowEligibilityPolicy/rejectsAccessoryAndUnfinishedApps", rejectsAccessoryAndUnfinishedApps),
         ("WindowEligibilityPolicy/allowsFinishedRegularExternalApp", allowsFinishedRegularExternalApp),
@@ -428,6 +432,62 @@ enum WindowEligibilityPolicyTests {
         try expectEqual(ordered[1].hostProcessIdentifier, 100)
     }
 
+    @MainActor static func partialResultsRetainOnlyUnresolvedOwners() throws {
+        var cache = MinimizedWindowCache()
+        let old = [makeItem(id: 1, pid: 100, isMinimized: true),
+                   makeItem(id: 2, pid: 200, isMinimized: true, windowOwnerPID: 201),
+                   makeItem(id: 3, pid: 300, isMinimized: true)]
+        let now = Date(timeIntervalSince1970: 100)
+        _ = cache.reconcile(.init(items: old, isComplete: true), visibleItems: [], now: now, maxAge: 30)
+        let fresh = makeItem(id: 4, pid: 100, isMinimized: true)
+        let result = cache.reconcile(.init(items: [fresh], isComplete: true,
+                                          unresolvedWindowProcessIDs: [201, 999]),
+                                     visibleItems: [], now: now.addingTimeInterval(1), maxAge: 30)
+        try expectEqual(result.map(\.id), [4, 2], "only failed owner survives; confirmed empty process is removed")
+    }
+
+    @MainActor static func retainedRowsExpireWithoutRenewal() throws {
+        var cache = MinimizedWindowCache()
+        let old = makeItem(id: 1, pid: 100, isMinimized: true)
+        let now = Date(timeIntervalSince1970: 100)
+        _ = cache.reconcile(.init(items: [old], isComplete: true), visibleItems: [], now: now, maxAge: 30)
+        for seconds in [10.0, 20, 29] {
+            let result = cache.reconcile(.init(items: [], isComplete: true, unresolvedWindowProcessIDs: [100]),
+                                         visibleItems: [], now: now.addingTimeInterval(seconds), maxAge: 30)
+            try expectEqual(result.map(\.id), [1])
+        }
+        let expired = cache.reconcile(.init(items: [], isComplete: true, unresolvedWindowProcessIDs: [100]),
+                                      visibleItems: [], now: now.addingTimeInterval(31), maxAge: 30)
+        try expect(expired.isEmpty)
+    }
+
+    @MainActor static func freshVisibleAndPrivacyEvidenceBeatRetention() throws {
+        var cache = MinimizedWindowCache()
+        let old = [makeItem(id: 1, isMinimized: true), makeItem(id: 2, isMinimized: true)]
+        let now = Date()
+        _ = cache.reconcile(.init(items: old, isComplete: true), visibleItems: [], now: now, maxAge: 30)
+        let result = cache.reconcile(.init(items: [], isComplete: true,
+                                          unresolvedWindowProcessIDs: [100], retentionDeniedProcessIDs: [100]),
+                                     visibleItems: [makeItem(id: 1)], now: now, maxAge: 30)
+        try expect(result.isEmpty)
+    }
+
+    @MainActor static func changedSyntheticIdentityCannotDuplicateOrBypassPrivacy() throws {
+        let old = makeItem(id: SyntheticWindowID.make(pid: 100, index: 0, title: "Old"), isMinimized: true)
+        let now = Date()
+        for mode in 0..<3 {
+            var cache = MinimizedWindowCache()
+            _ = cache.reconcile(.init(items: [old], isComplete: true), visibleItems: [], now: now, maxAge: 30)
+            let current = makeItem(id: 5, isMinimized: mode == 0)
+            let result = cache.reconcile(.init(items: mode == 0 ? [current] : [], isComplete: true,
+                                              unresolvedWindowProcessIDs: [100],
+                                              retentionDeniedProcessIDs: mode == 2 ? [100] : []),
+                                         visibleItems: mode == 1 ? [current] : [], now: now, maxAge: 30)
+            try expect(!result.contains { $0.id == old.id }, "old synthetic identity must not survive fresh owner/privacy evidence")
+            try expectEqual(result.count, mode == 0 ? 1 : 0)
+        }
+    }
+
     @MainActor static func minimizedScanExecutionScansCandidateBeyondLegacyApplicationLimit() throws {
         let candidates = (0 ..< 53).map { offset in
             MinimizedAXScanCandidate(
@@ -441,6 +501,7 @@ enum WindowEligibilityPolicyTests {
             windowServerProcessIdentifiers: []
         )
         let targetPID = candidates.last!.windowProcessIdentifier
+        var unavailablePIDs = Set<pid_t>()
 
         let execution: MinimizedAXScanExecutionResult<pid_t> = MinimizedAXScanExecution.run(
             candidates: ordered,
@@ -455,6 +516,7 @@ enum WindowEligibilityPolicyTests {
                 if candidate.windowProcessIdentifier == targetPID { return [true] }
                 return nil
             },
+            onUnavailableCandidate: { unavailablePIDs.insert($0.windowProcessIdentifier) },
             itemForWindow: { candidate, _, isMinimized in
                 isMinimized ? candidate.windowProcessIdentifier : nil
             }
@@ -465,6 +527,7 @@ enum WindowEligibilityPolicyTests {
         try expectEqual(execution.scannedWindows, 1)
         try expectEqual(execution.applicationsWithoutWindows, 49)
         try expectEqual(execution.applicationsWithUnavailableAX, 3)
+        try expectEqual(unavailablePIDs, Set([1049, 1050, 1051]))
         try expect(!execution.isBudgetExhausted)
         try expect(execution.isComplete)
     }

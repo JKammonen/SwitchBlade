@@ -78,6 +78,7 @@ enum MinimizedAXScanExecution {
         now: () -> TimeInterval,
         isCancelled: () -> Bool,
         windowsForCandidate: (Candidate) -> [Window]?,
+        onUnavailableCandidate: (Candidate) -> Void = { _ in },
         itemForWindow: (Candidate, Int, Window) -> Item?
     ) -> MinimizedAXScanExecutionResult<Item> {
         var budget = AXScanBudget(
@@ -95,6 +96,7 @@ enum MinimizedAXScanExecution {
             guard budget.beginApplication(now: now()) else { break }
             guard let windows = windowsForCandidate(candidate) else {
                 applicationsWithUnavailableAX += 1
+                onUnavailableCandidate(candidate)
                 continue
             }
             if windows.isEmpty {
@@ -121,5 +123,41 @@ enum MinimizedAXScanExecution {
             isBudgetExhausted: budget.isExhausted,
             isComplete: isComplete
         )
+    }
+}
+
+/// A failed process query is not evidence that its previously observed windows
+/// closed. Retain only those rows, with their original confirmation age.
+struct MinimizedWindowCache {
+    private var items: [WindowItem] = []
+    private var confirmedAt: [CGWindowID: Date] = [:]
+
+    func freshItems(now: Date, maxAge: TimeInterval) -> [WindowItem] {
+        items.filter { item in
+            confirmedAt[item.id].map { now.timeIntervalSince($0) <= maxAge } ?? false
+        }
+    }
+
+    mutating func reconcile(_ snapshot: MinimizedWindowSnapshot, visibleItems: [WindowItem],
+                            now: Date, maxAge: TimeInterval) -> [WindowItem] {
+        guard snapshot.isComplete else { return freshItems(now: now, maxAge: maxAge) }
+        let freshOwners = Set(snapshot.items.map(\.windowProcessIdentifier))
+        let visibleIDs = Set(visibleItems.filter { !$0.isMinimized }.map(\.id))
+        let visibleOwners = Set(visibleItems.filter { !$0.isMinimized }.map(\.windowProcessIdentifier))
+        let retained = freshItems(now: now, maxAge: maxAge).filter {
+            snapshot.unresolvedWindowProcessIDs.contains($0.windowProcessIdentifier)
+                && !freshOwners.contains($0.windowProcessIdentifier)
+                && !visibleIDs.contains($0.id)
+                && !snapshot.retentionDeniedProcessIDs.contains($0.windowProcessIdentifier)
+                // Synthetic IDs can change with AX order or become concrete.
+                // Never retain one alongside fresh evidence from the same owner.
+                && (!SyntheticWindowID.isSynthetic($0.id)
+                    || !visibleOwners.contains($0.windowProcessIdentifier))
+        }
+        items = snapshot.items + retained
+        let retainedIDs = Set(retained.map(\.id))
+        confirmedAt = confirmedAt.filter { retainedIDs.contains($0.key) }
+        for item in snapshot.items { confirmedAt[item.id] = now }
+        return items
     }
 }

@@ -399,10 +399,8 @@ enum CaptureTimeoutTests {
         try expect(!tracker.recentWindowIDs.contains(11))
     }
 
-    /// Regression guard: the post-activation open-items warmup is a background
-    /// cache refresh, not an authoritative reorder. If it sees the frontmost
-    /// app's sibling window later in the raw snapshot, it must not push that
-    /// sibling behind other apps in the next cached open.
+    /// Background refresh must preserve concrete per-window MRU, irrespective
+    /// of a sibling's incidental position in the WindowServer snapshot.
     @MainActor static func activation_warmupDoesNotPushSameAppSiblingToTail() async throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let (store, catalog, _, _) = makeStore(mruTracker: tracker)
@@ -411,6 +409,7 @@ enum CaptureTimeoutTests {
             makeItem(id: 2, pid: 100, title: "Ghostty A"),
             makeItem(id: 3, pid: 200, title: "Other App")
         ]
+        tracker.trackFocusedWindowActivation(catalog.visibleItems[1])
         await seedOpenItemsCache(store)
         let baselineConcreteMRU = tracker.recentWindowIDs
 

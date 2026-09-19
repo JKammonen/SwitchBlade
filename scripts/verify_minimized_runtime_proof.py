@@ -97,6 +97,9 @@ def qualifying_snapshot(payload: dict[str, Any]) -> bool:
 def select_snapshot_line(
     lines: Iterable[bytes],
     built_at: datetime.datetime,
+    *,
+    running_pid: int,
+    running_started_at: datetime.datetime,
 ) -> tuple[dict[str, Any], bytes]:
     selected: tuple[datetime.datetime, dict[str, Any], bytes] | None = None
     for raw_line in lines:
@@ -109,17 +112,21 @@ def select_snapshot_line(
             continue
         if not isinstance(payload, dict) or not qualifying_snapshot(payload):
             continue
+        # Build start alone can admit a scan from the old app while its
+        # replacement is compiling. PID also rejects same-second relaunches.
+        if type(payload.get("process_id")) is not int or payload["process_id"] != running_pid:
+            continue
         try:
             timestamp = parse_timestamp(payload.get("timestamp"))
         except ProofError:
             continue
-        if timestamp < built_at:
+        if timestamp < max(built_at, running_started_at):
             continue
         if selected is None or timestamp > selected[0]:
             selected = (timestamp, payload, line)
     if selected is None:
         raise ProofError(
-            "no complete post-build minimized scan with at least one minimized window was found; "
+            "no complete minimized scan from the current process after build and relaunch was found; "
             "open the signed app, keep one safe test window minimized, use Cmd+Tab once, and retry"
         )
     return selected[1], selected[2]
@@ -224,7 +231,10 @@ def create_receipt(app: Path = DEFAULT_APP, log: Path = DEFAULT_LOG) -> Path:
     subject, built_at = app_subject(app, tree_id, head_commit)
     try:
         with log.open("rb") as handle:
-            snapshot, artifact_line = select_snapshot_line(handle, built_at)
+            snapshot, artifact_line = select_snapshot_line(
+                handle, built_at, running_pid=subject["running_pid"],
+                running_started_at=parse_timestamp(subject["running_started_at"]),
+            )
     except OSError as exc:
         raise ProofError(f"performance log is unavailable: {log}") from exc
 
@@ -247,6 +257,8 @@ def create_receipt(app: Path = DEFAULT_APP, log: Path = DEFAULT_LOG) -> Path:
         "subject": subject,
         "artifact": {"path": str(log), "line_sha256": sha256(artifact_line)},
         "measurements": {
+            "process_id": snapshot["process_id"],
+            "session_id": snapshot.get("session_id"),
             "candidate_apps": snapshot["candidate_apps"],
             "complete": snapshot["complete"],
             "count": snapshot["count"],

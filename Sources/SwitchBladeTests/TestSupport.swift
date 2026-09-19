@@ -43,6 +43,7 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
     var visibleItems: [WindowItem] = []
     var minimizedItems: [WindowItem] = []
     var minimizedSnapshotIsComplete = true
+    var unresolvedMinimizedProcessIDs: Set<pid_t> = []
     var previewsToReturn: [CGWindowID: NSImage] = [:]
     var visibleSnapshotDelayNanoseconds: UInt64 = 0
     var minimizedSnapshotDelayNanoseconds: UInt64 = 0
@@ -102,7 +103,8 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
         withLock { _minimizedSnapshotCount += 1 }
         return MinimizedWindowSnapshot(
             items: minimizedItems,
-            isComplete: minimizedSnapshotIsComplete
+            isComplete: minimizedSnapshotIsComplete,
+            unresolvedWindowProcessIDs: unresolvedMinimizedProcessIDs
         )
     }
 

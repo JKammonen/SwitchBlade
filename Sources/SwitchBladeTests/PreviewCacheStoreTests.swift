@@ -4,6 +4,9 @@ import AppKit
 enum PreviewCacheStoreTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("PreviewCache/duplicateSignatureCannotSupplyRecreatedSibling", duplicateSignatureCannotSupplyRecreatedSibling),
+        ("PreviewCache/observedAmbiguitySurvivesPartialSnapshots", observedAmbiguitySurvivesPartialSnapshots),
+        ("PreviewCache/expiredAmbiguityAllowsFreshUniqueCapture", expiredAmbiguityAllowsFreshUniqueCapture),
         ("PreviewCache/hydrated_returnsItem_whenNoPreviewMatch", hydrated_noMatch),
         ("PreviewCache/record_then_hydrated_returnsImage_byWindowID", roundTrip_byWindowID),
         ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
@@ -51,6 +54,42 @@ enum PreviewCacheStoreTests {
 
         let result = store.hydrated(item, liveItems: [item])
         try expect(result.preview === img)
+    }
+
+    @MainActor static func duplicateSignatureCannotSupplyRecreatedSibling() throws {
+        let cache = PreviewCacheStore()
+        let first = makeItem(id: 1, title: "Untitled")
+        let sibling = makeItem(id: 2, title: "Untitled")
+        let image = NSImage(size: .init(width: 4, height: 4))
+        cache.record([2: image], liveItems: [first, sibling])
+        try expect(cache.hydrated(sibling, liveItems: [first, sibling]).preview === image)
+        let recreated = makeItem(id: 3, title: "Untitled")
+        try expectNil(cache.hydrated(recreated, liveItems: [recreated]).preview)
+    }
+
+    @MainActor static func observedAmbiguitySurvivesPartialSnapshots() throws {
+        let cache = PreviewCacheStore()
+        let first = makeItem(id: 1, title: "Untitled")
+        let sibling = makeItem(id: 2, title: "Untitled")
+        let image = NSImage(size: .init(width: 4, height: 4))
+        cache.record([1: image], liveItems: [first])
+        cache.record([:], liveItems: [first, sibling])
+        cache.record([2: image], liveItems: [sibling]) // Visible-only snapshot omits first.
+        let recreated = makeItem(id: 3, title: "Untitled", isMinimized: true)
+        try expectNil(cache.hydrated(recreated, liveItems: [recreated]).preview)
+    }
+
+    @MainActor static func expiredAmbiguityAllowsFreshUniqueCapture() throws {
+        var time = Date(timeIntervalSince1970: 100)
+        let cache = PreviewCacheStore(retainedPreviewMaxAge: 30, now: { time })
+        let first = makeItem(id: 1, title: "Untitled")
+        let sibling = makeItem(id: 2, title: "Untitled")
+        let image = NSImage(size: .init(width: 4, height: 4))
+        cache.record([1: image], liveItems: [first, sibling])
+        time = time.addingTimeInterval(31)
+        cache.record([2: image], liveItems: [sibling])
+        let recreated = makeItem(id: 3, title: "Untitled", isMinimized: true)
+        try expect(cache.hydrated(recreated, liveItems: [recreated]).preview === image)
     }
 
     @MainActor static func keepOnlyLive() throws {
@@ -298,7 +337,7 @@ enum PreviewCacheStoreTests {
             title: "shell",
             isMinimized: true,
             canCapturePreview: false,
-            isTitleRedacted: true,
+            isTitleRedacted: false,
             bundleIdentifier: "com.apple.Terminal"
         )
         let secondMinimized = makeItem(
@@ -308,7 +347,7 @@ enum PreviewCacheStoreTests {
             title: "shell",
             isMinimized: true,
             canCapturePreview: false,
-            isTitleRedacted: true,
+            isTitleRedacted: false,
             bundleIdentifier: "com.apple.Terminal"
         )
 

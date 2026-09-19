@@ -84,6 +84,7 @@ enum PerformanceDiagnostics {
         let payloads = chunks.map { fields in
             var payload = fields
             payload["session_id"] = .string(sessionID)
+            payload["process_id"] = .int(Int(ProcessInfo.processInfo.processIdentifier))
             payload["event_sequence"] = .int(eventSequence)
             payload["emitted_uptime_ms"] = .double(emittedAt)
             payload["diagnostic_context"] = .string(context)

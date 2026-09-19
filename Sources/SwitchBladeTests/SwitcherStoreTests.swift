@@ -5,6 +5,10 @@ import Carbon.HIToolbox
 enum SwitcherStoreTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("Store/freshOpenUsesMRUBeforeEmptyMerge", freshOpenUsesMRUBeforeEmptyMerge),
+        ("Store/minimizedMergePreservesVisibleOrderAndSelection", minimizedMergePreservesVisibleOrderAndSelection),
+        ("Store/minimizedOnlyPanelRetainsUnavailableThenClosesWhenEmpty", minimizedOnlyPanelRetainsUnavailableThenClosesWhenEmpty),
+        ("Store/warmupDoesNotRetainRecreatedSingleWindow", warmupDoesNotRetainRecreatedSingleWindow),
         // cycle / show
         ("Store/cycle_whenNotVisible_showsPanel", cycle_showsPanel),
         ("Store/cycle_whenNotVisible_emptySnapshot_doesNotShow", cycle_emptyNoShow),
@@ -700,6 +704,45 @@ enum SwitcherStoreTests {
         )
     }
 
+    @MainActor static func warmupDoesNotRetainRecreatedSingleWindow() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        catalog.visibleItems = [makeItem(id: 1, pid: 100, isFrontmostApp: true)]
+        await seedOpenItemsCache(store)
+        catalog.visibleItems = [makeItem(id: 2, pid: 100, isFrontmostApp: true)]
+        store.scheduleOpenItemsCacheWarmup(context: "test-recreated-single-window")
+        await runPendingMainTasks()
+        try expectEqual(store.items.map(\.id), [2])
+    }
+
+    @MainActor static func minimizedOnlyPanelRetainsUnavailableThenClosesWhenEmpty() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        catalog.visibleItems = [makeItem(id: 1, pid: 100, isFrontmostApp: true),
+                                makeItem(id: 3, pid: 100, isFrontmostApp: true)]
+        catalog.minimizedItems = [makeItem(id: 2, pid: 200, isMinimized: true)]
+        await openSwitcher(store)
+        for _ in 0..<60 where !store.items.contains(where: { $0.id == 2 }) {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expect(store.items.contains { $0.id == 2 })
+        store.cancel()
+        catalog.visibleItems = []
+        catalog.minimizedItems = []
+        catalog.unresolvedMinimizedProcessIDs = [200]
+        catalog.minimizedSnapshotDelayNanoseconds = 50_000_000
+        await openSwitcher(store)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [2], "unavailable AX must retain the only minimized window")
+        store.cancel()
+        catalog.unresolvedMinimizedProcessIDs = []
+        await openSwitcher(store)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        try expect(!store.isVisible, "confirmed empty minimized scan must dismiss the empty panel")
+        try expect(store.items.isEmpty)
+    }
+
     @MainActor static func minimizedMerge_clearsRememberedMinimizedWhenAXSnapshotEmpty() async throws {
         let (store, catalog, _, _) = makeStore()
         let frontmost = makeItem(id: 1, pid: 100, isFrontmostApp: true)
@@ -859,8 +902,8 @@ enum SwitcherStoreTests {
         )
         try expectEqual(
             store.selectedID,
-            syntheticTeamsID,
-            "automatic default selection should follow the new MRU order after minimized merge"
+            codex.id,
+            "late minimized rows must preserve the already displayed selection"
         )
     }
 
@@ -1458,6 +1501,50 @@ enum SwitcherStoreTests {
 
         try expect(!store.isVisible)
         try expectEqual(activator.activatedItems.map(\.id), [4])
+    }
+
+    @MainActor static func freshOpenUsesMRUBeforeEmptyMerge() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker, initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        catalog.visibleItems = (1...12).map { id in
+            makeItem(id: UInt32(id), pid: id <= 2 ? 100 : pid_t(id * 100),
+                     title: "Window \(id)", isFrontmostApp: id <= 2)
+        }
+        await seedOpenItemsCache(store)
+        tracker.trackFocusedWindowActivation(catalog.visibleItems[11])
+        catalog.minimizedSnapshotDelayNanoseconds = 150_000_000
+        var firstPaint: [UInt32] = []
+        var firstSelection: UInt32?
+        store.onShow = { firstPaint = store.items.map(\.id); firstSelection = store.selectedID }
+        await openSwitcher(store)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        try expectEqual(Array(firstPaint.prefix(2)), [1, 12], "fresh MRU must win before first paint")
+        try expectEqual(store.items.map(\.id), firstPaint, "empty merge must not reorder existing rows")
+        try expectEqual(store.selectedID, firstSelection)
+    }
+
+    @MainActor static func minimizedMergePreservesVisibleOrderAndSelection() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker)
+        defer { store.cancel() }
+        catalog.visibleItems = (1...12).map {
+            makeItem(id: UInt32($0), pid: pid_t($0 * 100), title: "Window \($0)", isFrontmostApp: $0 == 1)
+        }
+        let minimized = makeItem(id: 50, pid: 5000, title: "Minimized", isMinimized: true)
+        tracker.trackFocusedWindowActivation(minimized)
+        catalog.minimizedItems = [minimized]
+        catalog.minimizedSnapshotDelayNanoseconds = 200_000_000
+        await openSwitcher(store)
+        let displayedIDs = store.items.map(\.id)
+        let selection = store.selectedID
+        store.cycle(forward: true)
+        store.cycle(forward: false) // Explicitly return to the default row.
+        tracker.trackFocusedWindowActivation(catalog.visibleItems[11])
+        try? await Task.sleep(nanoseconds: 240_000_000)
+        try expect(store.items.contains { $0.id == 50 })
+        try expectEqual(store.items.filter { $0.id != 50 }.map(\.id), displayedIDs)
+        try expectEqual(store.selectedID, selection, "late additions must not retarget the user's selection")
     }
 
     // MARK: ordering
