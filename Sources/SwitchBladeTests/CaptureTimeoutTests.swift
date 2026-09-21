@@ -20,6 +20,10 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation),
+        ("SpaceChange/nextOpenDropsPreviousSpace", spaceChangeNextOpenDropsPreviousSpace),
+        ("SpaceChange/visiblePanelReplacesPreviousSpace", spaceChangeVisiblePanelReplacesPreviousSpace),
+        ("SpaceChange/releaseDuringTransitionUsesFreshTarget", spaceChangeReleaseUsesFreshTarget),
+        ("SpaceChange/cancelDuringTransitionStaysCancelled", spaceChangeCancelStaysCancelled),
         ("CaptureStability/stableVisibleWindowIsAccepted", captureStability_stableVisibleWindowIsAccepted),
         ("CaptureStability/visibilityTransitionIsRejected", captureStability_visibilityTransitionIsRejected),
         ("CaptureStability/boundsTransitionIsRejected", captureStability_boundsTransitionIsRejected),
@@ -460,6 +464,65 @@ enum CaptureTimeoutTests {
 
         try expectEqual(catalog.invalidateContentCacheCallCount, 1)
         try expectEqual(catalog.lastInvalidationReason, "test display change")
+    }
+
+    @MainActor static func spaceChangeNextOpenDropsPreviousSpace() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...8).map { makeItem(id: UInt32($0), pid: Int32($0 + 100)) }
+        await openSwitcher(store)
+        try expectEqual(store.items.count, 8)
+        store.cancel()
+        catalog.visibleItems = [makeItem(id: 20, pid: 120)]
+
+        await store.handleActiveSpaceChange()
+        await openSwitcher(store)
+
+        try expectEqual(store.items.map(\.id), [20], "a fresh cache from the previous Space must not be reused")
+        store.cancel()
+    }
+
+    @MainActor static func spaceChangeVisiblePanelReplacesPreviousSpace() async throws {
+        let (store, catalog, _, _) = makeStore()
+        catalog.visibleItems = (1...8).map { makeItem(id: UInt32($0), pid: Int32($0 + 100)) }
+        await openSwitcher(store)
+        catalog.visibleItems = [makeItem(id: 20, pid: 120)]
+
+        await store.handleActiveSpaceChange()
+
+        try expect(store.isVisible)
+        try expectEqual(store.items.map(\.id), [20], "an open panel must refresh without another Cmd+Tab")
+        try expectEqual(store.selectedID, 20)
+        store.cancel()
+    }
+
+    @MainActor static func spaceChangeReleaseUsesFreshTarget() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [makeItem(id: 1), makeItem(id: 2, pid: 200)]
+        await openSwitcher(store)
+        catalog.visibleItems = [makeItem(id: 20, pid: 120)]
+        let transition = Task { await store.handleActiveSpaceChange() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        store.commitSelection()
+        await transition.value
+        await runPendingMainTasks()
+        for _ in 0..<40 where activator.activatedItems.isEmpty {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expectEqual(activator.activatedItems.map(\.id), [20])
+        store.cancel()
+    }
+
+    @MainActor static func spaceChangeCancelStaysCancelled() async throws {
+        let (store, catalog, activator, _) = makeStore()
+        catalog.visibleItems = [makeItem(id: 1), makeItem(id: 2, pid: 200)]
+        await openSwitcher(store)
+        let transition = Task { await store.handleActiveSpaceChange() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        store.cancel()
+        await transition.value
+        try expect(!store.isSwitching)
+        try expect(!store.isVisible)
+        try expect(activator.activatedItems.isEmpty)
     }
 
     static func captureStability_stableVisibleWindowIsAccepted() async throws {

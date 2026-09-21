@@ -324,6 +324,51 @@ final class SwitcherStore: ObservableObject {
         await catalog.invalidateContentCache(reason: reason)
     }
 
+    func handleActiveSpaceChange() async {
+        // A fresh-in-time cache can still belong to a different Space. Drop
+        // membership and in-flight work before any actor suspension.
+        invalidateDisplayCachesForSettingsChange()
+        cancelPanelShow()
+        let generation = settingsGeneration
+        let openID = openDiagnosticID
+        let wasVisible = isVisible
+        if isSwitching {
+            let commitWhenReady: Bool
+            if case .resolving(let pendingCommit) = phase {
+                commitWhenReady = pendingCommit
+            } else {
+                commitWhenReady = false
+            }
+            // Releasing the modifier during the transition must resolve a new
+            // target, never activate an old Space's selected window.
+            enterResolving(commitWhenReady: commitWhenReady)
+            items = []
+            if wasVisible { onHide?() }
+        }
+        PerformanceDiagnostics.record("active_space_changed", fields: [
+            "visible": .bool(wasVisible),
+            "switching": .bool(isSwitching)
+        ])
+        await invalidateCaptureCache(reason: "active space changed")
+        // Coalesce fullscreen transition notifications before enumerating.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        guard !Task.isCancelled, settingsGeneration == generation,
+              isSwitching, openDiagnosticID == openID else { return }
+
+        let startedAt = Date()
+        let snapshot = await snapshotVisibleOnlyOffMain(priority: .userInitiated)
+        guard !Task.isCancelled, settingsGeneration == generation,
+              isSwitching, !isVisible, openDiagnosticID == openID else { return }
+        let ordered = orderItems(mruTracker.orderedForDisplay(
+            from: snapshot, context: "space-change", snapshotDiagnosticID: lastReturnedSnapshotDiagnosticID
+        ))
+        openFromOrderedItems(
+            ordered, openStart: startedAt, queueMs: nil, permissionMs: 0,
+            snapshotMs: Date().timeIntervalSince(startedAt) * 1000,
+            orderMs: 0, source: "space-change"
+        )
+    }
+
     func warmPreviewCache(context: String) async {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else { return }
         guard !isVisible, !isSwitching else { return }

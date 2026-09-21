@@ -19,6 +19,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lifecycleObservers: [(NotificationCenter, NSObjectProtocol)] = []
     private var appTerminationRefreshTask: Task<Void, Never>?
     private var captureLifecycleTask: Task<Void, Never>?
+    private var spaceLifecycleTask: Task<Void, Never>?
     private var responsivenessActivity: NSObjectProtocol?
     /// Last observed Screen Recording grant. Used to detect the
     /// not-granted → granted transition mid-session so we can warm the SCKit
@@ -156,6 +157,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_ notification: Notification) {
         appTerminationRefreshTask?.cancel()
         captureLifecycleTask?.cancel()
+        spaceLifecycleTask?.cancel()
         hotkeyMonitor?.stop()
         if let responsivenessActivity {
             ProcessInfo.processInfo.endActivity(responsivenessActivity)
@@ -218,6 +220,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func installLifecycleObservers() {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
+        lifecycleObservers.append((
+            workspaceCenter,
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.spaceLifecycleTask?.cancel()
+                    self.spaceLifecycleTask = Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.store.handleActiveSpaceChange()
+                        guard !Task.isCancelled else { return }
+                        await self.warmCaptureCaches(context: "active space changed")
+                    }
+                }
+            }
+        ))
         lifecycleObservers.append((
             workspaceCenter,
             workspaceCenter.addObserver(

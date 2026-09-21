@@ -142,6 +142,17 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 
 ## Common Interventions
 
+- **Fullscreen / Space changes leave old tiles or icon-only cards** → keep the
+  intended window scope; switching to all Spaces also admits retained offscreen
+  WindowServer surfaces and is not a general fix. `activeSpaceDidChange` now
+  invalidates membership, minimized and preview caches, discards old in-flight
+  work, and resolves an open switcher again after a 150 ms settling interval.
+  Modifier release during that interval waits for a fresh target. Space work
+  has a separate task from screen-parameter/wake capture warmups. Diagnostics:
+  `active_space_changed` followed by current-scope `window_snapshot` events.
+  `com.apple.loginwindow` is excluded in every scope. Do not infer that an
+  offscreen row is closed merely because AXWindows is empty: some minimized
+  windows use the established remembered-window fallback.
 - **TCC permissions reset after rebuild** → local-signing path broke. Check
   `scripts/setup-local-codesign.sh` output. Should not happen with current setup.
 - **Blank previews after idle** → first-batch capture cold-starts. Has retry + soft

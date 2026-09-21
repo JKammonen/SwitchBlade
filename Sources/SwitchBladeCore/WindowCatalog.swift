@@ -1082,6 +1082,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     }
 
     private let excludedBundleIdentifiers: Set<String> = [
+        "com.apple.loginwindow", // Session-management surfaces are not user windows.
         "com.apple.PasswordsUIAgent",
         "com.apple.PasskeysUIService",
         "com.apple.Safari.PasswordBreachAgent",
