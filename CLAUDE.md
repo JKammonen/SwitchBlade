@@ -155,8 +155,16 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   windows use the established remembered-window fallback.
 - **TCC permissions reset after rebuild** → local-signing path broke. Check
   `scripts/setup-local-codesign.sh` output. Should not happen with current setup.
-- **Blank previews after idle** → first-batch capture cold-starts. Has retry + soft
-  timeout. Check rolling p95/p99 in cold-open log.
+- **All previews disappear after a Space change or unlock** → a failed
+  `SCShareableContent` refresh after invalidation leaves no content. The capture
+  path must still run its existing CG fallback for real requested window IDs,
+  with permission, permit and before/after stability checks intact. Do not
+  return early merely because SC content is nil. `capture_content_refresh`
+  records failure domain/code without private error text; `capture_previews`
+  includes `sc_content_available`. `CaptureRecovery/*` tests exercise the actual
+  capture path with missing content, private frames and denied permission.
+- **Slow previews after idle** → check first-batch latency and retry/soft-timeout
+  counts in the performance log before attributing missing images to latency.
 - **Cmd+Tab falls through to the macOS switcher, then SwitchBlade works again** →
   with performance logging on debug, read `performance.jsonl` around the gap
   before touching tap heuristics. Rows to look for: `hotkey_passthrough` (tap saw

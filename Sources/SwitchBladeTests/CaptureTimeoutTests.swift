@@ -6,6 +6,9 @@ import Foundation
 enum CaptureTimeoutTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("CaptureRecovery/missingContentUsesFallback", missingContentUsesFallback),
+        ("CaptureRecovery/missingContentRejectsPrivateFrame", missingContentRejectsPrivateFrame),
+        ("CaptureRecovery/missingContentRequiresPermission", missingContentRequiresPermission),
         ("CaptureTimeout/sleepRaceFires_inBoundedTime", timeoutBounded),
         ("CaptureTimeout/softTimeoutHelper_timesOutWithoutWaitingForBlockedTask", softTimeoutHelper_timesOutWithoutWaitingForBlockedTask),
         ("CaptureTimeout/softTimeoutHelper_returnsCompletedValueForFastTask", softTimeoutHelper_returnsCompletedValueForFastTask),
@@ -32,6 +35,36 @@ enum CaptureTimeoutTests {
         ("CaptureStability/explicitOffscreenAllowanceIsExact", captureStability_explicitOffscreenAllowanceIsExact),
         ("CaptureStability/missingOnScreenStateRequiresExplicitAllowance", captureStability_missingOnScreenStateRequiresExplicitAllowance)
     ]
+
+    static func missingContentCapture(sharingState: Int, permission: Bool = true) async -> [CGWindowID: NSImage] {
+        let catalog = WindowCatalog(captureTestHooks: .init(
+            permission: { permission },
+            windows: { nil },
+            states: { ids in Dictionary(uniqueKeysWithValues: ids.map { id in
+                (id, PreviewCaptureWindowState(ownerPID: 123,
+                    bounds: CGRect(x: 0, y: 0, width: 800, height: 600),
+                    isOnScreen: true, sharingState: sharingState, alpha: 1))
+            }) },
+            fallback: { _ in .success(NSImage(size: NSSize(width: 10, height: 10))) }
+        ))
+        return await catalog.capturePreviews(for: Array(1...9), maxCount: nil,
+            maxConcurrentCaptures: 4, allowedOffscreenWindowIDs: [])
+    }
+
+    static func missingContentUsesFallback() async throws {
+        let images = await missingContentCapture(sharingState: 1)
+        try expectEqual(images.count, 9, "Missing SC content must not suppress available fallback previews")
+    }
+
+    static func missingContentRejectsPrivateFrame() async throws {
+        let images = await missingContentCapture(sharingState: 0)
+        try expectEqual(images.count, 0, "Fallback must preserve the privacy acceptance gate")
+    }
+
+    static func missingContentRequiresPermission() async throws {
+        let images = await missingContentCapture(sharingState: 1, permission: false)
+        try expectEqual(images.count, 0, "Missing content must not bypass Screen Recording permission")
+    }
 
     /// We can't invoke captureWithSoftTimeout against a real SCWindow from
     /// tests, but we can verify the Task.sleep timing primitive it uses for

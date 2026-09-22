@@ -45,6 +45,13 @@ actor SCContentCache {
             }
         } catch {
             lastRefreshFailedAt = Date()
+            let failure = error as NSError
+            PerformanceDiagnostics.record("capture_content_refresh", fields: [
+                "succeeded": .bool(false),
+                "error_domain": .string(failure.domain),
+                "error_code": .int(failure.code),
+                "retained_content": .bool(content != nil)
+            ])
             Logger.capture.error("SCShareableContent refresh failed: \(error.localizedDescription, privacy: .private)")
         }
     }
@@ -1105,8 +1112,59 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         [pid_t: Set<ValidatedFloatingWindowSignature>]
     >([:])
 
+    #if DEBUG
+    // Exercise the real capture/fallback pipeline without test-runner TCC access.
+    struct CaptureTestHooks: Sendable {
+        var permission: @Sendable () -> Bool
+        var windows: @Sendable () async -> [SCWindow]?
+        var states: @Sendable (Set<CGWindowID>) -> [CGWindowID: PreviewCaptureWindowState]
+        var fallback: @Sendable (CGWindowID) async -> FallbackAttemptResult
+    }
+    private let captureTestHooks: CaptureTestHooks?
+
+    init(captureTestHooks: CaptureTestHooks? = nil) {
+        self.captureTestHooks = captureTestHooks
+        capturePermitPool = Self.processCapturePermitPool
+    }
+    #else
     init() {
         capturePermitPool = Self.processCapturePermitPool
+    }
+    #endif
+
+    private func previewCapturePermission() -> Bool {
+        #if DEBUG
+        if let captureTestHooks { return captureTestHooks.permission() }
+        #endif
+        return CGPreflightScreenCaptureAccess()
+    }
+
+    private func previewContentWindows() async -> [SCWindow]? {
+        #if DEBUG
+        if let captureTestHooks { return await captureTestHooks.windows() }
+        #endif
+        await refreshContentCacheIfStale()
+        return await contentCache.content?.windows
+    }
+
+    private func previewWindowStates(
+        for ids: Set<CGWindowID>, allowedMissingOnScreenWindowIDs: Set<CGWindowID>
+    ) -> [CGWindowID: PreviewCaptureWindowState] {
+        #if DEBUG
+        if let captureTestHooks { return captureTestHooks.states(ids) }
+        #endif
+        return Self.captureWindowStates(for: ids, allowedMissingOnScreenWindowIDs: allowedMissingOnScreenWindowIDs)
+    }
+
+    private func previewFallback(
+        windowID: CGWindowID, maxDim: Int, timeoutMs: Int, permitPool: CapturePermitPool
+    ) async -> FallbackAttemptResult {
+        #if DEBUG
+        if let captureTestHooks { return await captureTestHooks.fallback(windowID) }
+        #endif
+        return await Self.captureFallbackWithSoftTimeout(
+            windowID: windowID, maxDim: maxDim, timeoutMs: timeoutMs, permitPool: permitPool
+        )
     }
 
     private static func captureWindowStates(
@@ -1811,7 +1869,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     ) async -> [CGWindowID: NSImage] {
         guard !Task.isCancelled else { return [:] }
         // Single preflight syscall instead of currentState() which does three.
-        guard CGPreflightScreenCaptureAccess() else {
+        guard previewCapturePermission() else {
             PerformanceDiagnostics.record(
                 "capture_previews",
                 fields: [
@@ -1828,13 +1886,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         // Refresh inline when the cache is missing OR stale: stale SCWindow refs
         // lose their warm capture-pipeline link, and proceeding with them costs
         // ~300 ms timeout + retry per window. The inline refresh is ~30–80 ms.
-        await self.refreshContentCacheIfStale()
-        guard let content = await contentCache.content else {
-            Logger.capture.error("capturePreviews: no SCShareableContent available")
-            return [:]
-        }
+        let contentWindows = await previewContentWindows()
+        // A failed refresh after Space/sleep invalidation leaves no SC content.
+        // Keep the existing CG fallback reachable for those real window IDs;
+        // permission, capture permits and before/after stability still apply.
         guard !Task.isCancelled else { return [:] }
-        let windowsByID = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
+        let windowsByID = Dictionary((contentWindows ?? []).map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
         let maxDim = 320
         let captureTimeoutMs = 300
         let fallbackTimeoutMs = 300
@@ -1842,7 +1899,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let requestedIDSet = Set(requestedIDs)
         let requestedOffscreenWindowIDs = allowedOffscreenWindowIDs.intersection(requestedIDSet)
         let captureScope = WindowFilterState.scope
-        let captureStatesBefore = Self.captureWindowStates(
+        let captureStatesBefore = self.previewWindowStates(
             for: requestedIDSet,
             allowedMissingOnScreenWindowIDs: requestedOffscreenWindowIDs
         )
@@ -1984,7 +2041,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             fallbackAttempt: nil
                         )
                     }
-                    let fallback = await WindowCatalog.captureFallbackWithSoftTimeout(
+                    let fallback = await self.previewFallback(
                         windowID: windowID,
                         maxDim: maxDim,
                         timeoutMs: fallbackTimeoutMs,
@@ -2082,7 +2139,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     for windowID in scMissingIDs {
                         let wid = windowID
                         fallbackGroup.addTask {
-                            let fallback = await WindowCatalog.captureFallbackWithSoftTimeout(
+                            let fallback = await self.previewFallback(
                                 windowID: wid,
                                 maxDim: maxDim,
                                 timeoutMs: fallbackTimeoutMs,
@@ -2108,7 +2165,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     }
                 }
             }
-            let captureStatesAfter = Self.captureWindowStates(
+            let captureStatesAfter = self.previewWindowStates(
                 for: Set(result.keys),
                 allowedMissingOnScreenWindowIDs: requestedOffscreenWindowIDs
             )
@@ -2140,6 +2197,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     "milliseconds": .double(ms),
                     "requested": .int(requestedIDs.count),
                     "sc_missing": .int(scMissingIDs.count),
+                    "sc_content_available": .bool(contentWindows != nil),
                     "screen_recording": .bool(true),
                     "fallback_failures": .int(fallbackFailures),
                     "fallback_resource_limited": .int(fallbackResourceLimits),
