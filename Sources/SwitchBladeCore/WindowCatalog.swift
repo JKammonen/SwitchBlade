@@ -1052,14 +1052,26 @@ struct WindowSharingStateIndex {
 /// mutates the displayed list. Returning a uniquely-named copy (keyed by bundle
 /// id, falling back to app name) gives each app its own cache entry so reuse
 /// resolves the right icon. Copy first so the shared app icon is never mutated.
+///
+/// AppKit's name registry retains every named image for the process lifetime,
+/// so the named copy is created once per app identity and reused. A fresh copy
+/// per snapshot retained ~55k icons after 22 h (254 MB footprint). An app whose
+/// icon changes while SwitchBlade runs keeps its first icon until relaunch.
 enum IconNaming {
+    private static let namedIcons = LockedValue<[String: NSImage]>([:])
+
     static func named(_ icon: NSImage?, bundleIdentifier: String?, appName: String) -> NSImage? {
-        guard let icon, let copy = icon.copy() as? NSImage else { return icon }
+        guard let icon else { return nil }
         let baseName = bundleIdentifier ?? appName
-        if !copy.setName(baseName) {
-            copy.setName("\(baseName)-\(UUID().uuidString)")
+        return namedIcons.withValue { cache in
+            if let cached = cache[baseName] { return cached }
+            guard let copy = icon.copy() as? NSImage else { return icon }
+            if !copy.setName(baseName) {
+                copy.setName("\(baseName)-\(UUID().uuidString)")
+            }
+            cache[baseName] = copy
+            return copy
         }
-        return copy
     }
 }
 
