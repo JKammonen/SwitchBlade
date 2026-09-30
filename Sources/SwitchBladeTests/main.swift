@@ -66,6 +66,14 @@ func runAll() async -> Int {
     print(String(format: "Ran %d tests in %.2fs — %d passed, %d failed",
                  total, elapsed, passed, failures))
 
+    // Keep the actual failure visible in the tail retained by delivery gates.
+    for (name, failure) in failed {
+        print("FAILED: \(name) — \(prettyFile(failure.file)):\(failure.line)  \(failure.message)")
+    }
+    for (name, error) in unexpected {
+        print("FAILED: \(name) — unexpected error: \(error)")
+    }
+
     return failures
 }
 

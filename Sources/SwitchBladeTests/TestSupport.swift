@@ -356,9 +356,31 @@ func openSwitcher(_ store: SwitcherStore, forward: Bool = true) async {
 /// snapshot), then hides — without waiting for the panel to show. Use to seed the
 /// cache before a requestCycle test. Replaces the old `cycle(); cancel()` seed.
 @MainActor
-func seedOpenItemsCache(_ store: SwitcherStore, forward: Bool = true) async {
+func seedOpenItemsCache(_ store: SwitcherStore, forward: Bool = true) async throws {
+    // A fixed frame wait can cancel a loaded or deliberately delayed snapshot
+    // before it has populated the cache. Wait for this open's cache write.
+    let openID = LockedValue<String?>(nil)
+    let ready = LockedValue(false)
+    let previousObserver = PerformanceDiagnostics.testObserver.value
+    PerformanceDiagnostics.testObserver.value = { event, fields in
+        previousObserver?(event, fields)
+        guard case .string(let id)? = fields["open_id"] else { return }
+        if event == "open_cache_decision" {
+            openID.withValue { if $0 == nil { $0 = id } }
+        } else if event == "cache_order", id == openID.value {
+            ready.value = true
+        }
+    }
+    defer { PerformanceDiagnostics.testObserver.value = previousObserver }
     store.requestCycle(forward: forward)
-    await runPendingMainTasks()
+    for _ in 0..<200 where !ready.value {
+        try await Task.sleep(nanoseconds: 5_000_000)
+    }
+    guard ready.value else {
+        store.cancel()
+        try expect(false, "cache seed did not finish its open snapshot")
+        return
+    }
     store.cancel()
     await runPendingMainTasks()
 }

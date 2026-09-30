@@ -8,10 +8,16 @@ enum CachedSwitchOrderingTests {
         ("CachedSwitch/freshSingleWindowCacheUsesCurrentMRU", freshCacheUsesCurrentMRU),
         ("CachedSwitch/staleSingleWindowCacheUsesCurrentMRUBeforeRefresh", staleCacheUsesCurrentMRU),
         ("CachedSwitch/rebasedSingleWindowCacheUsesCurrentMRU", rebasedCacheUsesCurrentMRU),
+        ("CachedSwitch/cachedOpenPreservesAlphabeticalSort", cachedAlphabeticalSort),
+        ("CachedSwitch/cachedOpenPreservesAppGroupedSort", cachedAppGroupedSort),
         ("CachedSwitch/resolvingReleaseReopensBeforeWarmup", resolvingReleaseReopens),
         ("CachedSwitch/preparedReleaseReopensBeforeWarmup", preparedReleaseReopens),
         ("CachedSwitch/lateActivationNotificationPreservesPreviousApp", lateNotificationPreservesHistory),
         ("CachedSwitch/missingActivationNotificationPreservesPreviousApp", missingNotificationPreservesHistory),
+        ("CachedSwitch/processedTargetNotificationPreservesPreviousApp", processedNotificationPreservesHistory),
+        ("CachedSwitch/snapReconcilesHistoryAndCachedFrontmost", snapReconcilesHistory),
+        ("CachedSwitch/failedSnapPreservesHistoryAndMRU", failedSnapPreservesHistory),
+        ("CachedSwitch/multiWindowSourceRetainsExactFocusedSiblingRank", multiWindowSourceRetainsFocusedRank),
         ("CachedSwitch/newerExternalActivationSurvivesOlderCompletion", newerActivationSurvivesCompletion),
         ("CachedSwitch/sameAppSelectionPreservesPreviousApp", sameAppSelectionPreservesHistory),
         ("CachedSwitch/failedActivationPreservesHistoryAndMRU", failedActivationPreservesHistory)
@@ -27,6 +33,40 @@ enum CachedSwitchOrderingTests {
 
     @MainActor private static func rebasedCacheUsesCurrentMRU() async throws {
         try await cachedOrderUsesCurrentMRU(maxAge: 30, rebase: true)
+    }
+
+    @MainActor private static func cachedAlphabeticalSort() async throws {
+        try await cachedSortRemainsSelected(.alphabetical, expected: [1, 2, 4, 3])
+    }
+
+    @MainActor private static func cachedAppGroupedSort() async throws {
+        try await cachedSortRemainsSelected(.appGrouped, expected: [1, 3, 4, 2])
+    }
+
+    @MainActor private static func cachedSortRemainsSelected(
+        _ sort: SBSortOrder, expected: [UInt32]
+    ) async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldSort = settings.sortOrder
+        settings.sortOrder = sort
+        defer { settings.sortOrder = oldSort }
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, _, _) = makeStore(mruTracker: tracker, initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let windows = [
+            makeItem(id: 1, pid: 100, appName: "Front", isFrontmostApp: true),
+            makeItem(id: 2, pid: 200, appName: "Zulu", title: "Alpha"),
+            makeItem(id: 3, pid: 300, appName: "Alpha", title: "Zulu"),
+            makeItem(id: 4, pid: 400, appName: "Beta", title: "Beta")
+        ]
+        catalog.visibleItems = windows
+        await store.warmPreviewCache(context: "sort-cache-seed")
+        tracker.trackFocusedWindowActivation(windows[3])
+        let snapshots = catalog.visibleSnapshotCount
+        store.requestCycle(forward: true)
+        try expectEqual(store.items.map(\.id), expected)
+        try expectEqual(store.selectedID, expected[1])
+        try expectEqual(catalog.visibleSnapshotCount, snapshots)
     }
 
     @MainActor private static func cachedOrderUsesCurrentMRU(maxAge: TimeInterval, rebase: Bool) async throws {
@@ -75,6 +115,94 @@ enum CachedSwitchOrderingTests {
 
     @MainActor private static func missingNotificationPreservesHistory() async throws {
         try await quickReleaseReopens(prepared: true, notification: .none)
+    }
+
+    @MainActor private static func processedNotificationPreservesHistory() async throws {
+        try await visibleActionReconcilesHistory(snap: false)
+    }
+
+    @MainActor private static func snapReconcilesHistory() async throws {
+        try await visibleActionReconcilesHistory(snap: true)
+    }
+
+    @MainActor private static func visibleActionReconcilesHistory(snap: Bool) async throws {
+        let catalog = MockWindowCatalog()
+        let activator = HeldActivation()
+        let store = SwitcherStore(
+            catalog: catalog, activator: activator, permissionService: MockPermissionService(),
+            userDefaults: makeIsolatedUserDefaults(), initialFrontmostAppPID: 100, switchBladePID: 999
+        )
+        defer { activator.release(); store.cancel() }
+        catalog.visibleItems = [
+            makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "fixture.a"),
+            makeItem(id: 2, pid: 200, bundleIdentifier: "fixture.b")
+        ]
+        await openSwitcher(store)
+        try expect(store.isVisible)
+        let completion = selectionCompletionProbe()
+        defer { completion.restore() }
+        if snap {
+            store.snap(store.items[1], to: .bottom)
+        } else {
+            store.selectedID = 2
+            store.commitSelection()
+        }
+        try await waitUntil { activator.started.value }
+        try expectEqual(store.isSwitching, snap, "activate hides early; snap completes while switching")
+        store.handleAppActivation(pid: 200)
+        activator.release()
+        try await waitUntil { completion.completed.value }
+        if snap {
+            try expectEqual(activator.base.snapCalls, [.init(id: 2, edge: .bottom)])
+            try expect(activator.base.activatedItems.isEmpty)
+        } else {
+            try expectEqual(activator.base.activatedItems.map(\.id), [2])
+        }
+        store.requestCycle(forward: true)
+        try expectEqual(store.items.map(\.id), [2, 1])
+        try expectEqual(store.items.map(\.isFrontmostApp), [true, false])
+        try expectEqual(store.selectedID, 1)
+        store.cancel()
+        let settings = SwitchBladeSettings.shared
+        let wasEnabled = settings.doubleModifierSwitchEnabled
+        settings.doubleModifierSwitchEnabled = true
+        defer { settings.doubleModifierSwitchEnabled = wasEnabled }
+        store.switchToPreviousApplication()
+        try await waitUntil { !activator.base.activatedApplicationPIDs.isEmpty }
+        try expectEqual(activator.base.activatedApplicationPIDs, [100])
+    }
+
+    @MainActor private static func multiWindowSourceRetainsFocusedRank() async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let catalog = MockWindowCatalog()
+        let activator = HeldActivation()
+        let store = makeHeldStore(catalog: catalog, activator: activator, tracker: tracker)
+        defer { activator.release(); store.cancel() }
+        let windows = (1...16).map { index in
+            let pid: pid_t = index == 16 ? 100 : pid_t(index * 100)
+            return makeItem(id: UInt32(index), pid: pid, title: "Fixture \(index)",
+                            isFrontmostApp: pid == 100, bundleIdentifier: "fixture.\(pid)")
+        }
+        for item in windows.reversed() { tracker.trackFocusedWindowActivation(item) }
+        catalog.visibleItems = windows
+        catalog.focusedWindowItemsByPID[100] = windows[0]
+        store.requestCycle(forward: true)
+        store.commitSelection()
+        try await waitUntil { activator.started.value }
+        // A sibling reported after the transition must never replace the exact
+        // pre-activation focus captured by the detached action.
+        catalog.focusedWindowItemsByPID[100] = windows[15]
+        store.handleAppActivation(pid: 200)
+        activator.release()
+        try await waitUntil { !store.isSwitching }
+        let snapshots = catalog.visibleSnapshotCount
+        store.requestCycle(forward: true)
+        let expected = [UInt32(2), 1] + Array(UInt32(3)...UInt32(16))
+        try expectEqual(store.items.map(\.id), expected)
+        try expectEqual(tracker.recentWindowIDs, expected)
+        try expectEqual(store.selectedID, 1)
+        try expectEqual(catalog.visibleSnapshotCount, snapshots)
+        try expectEqual(catalog.focusedWindowItemCallCount, 1)
     }
 
     private enum NotificationTiming { case duringAction, afterAction, none }
@@ -145,6 +273,8 @@ enum CachedSwitchOrderingTests {
             initialFrontmostAppPID: 100, switchBladePID: 999
         )
         defer { activator.release(); store.cancel() }
+        let completion = selectionCompletionProbe()
+        defer { completion.restore() }
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "fixture.a"),
             makeItem(id: 2, pid: 200, bundleIdentifier: "fixture.b"),
@@ -157,8 +287,7 @@ enum CachedSwitchOrderingTests {
         store.handleAppActivation(pid: 200)
         store.handleAppActivation(pid: 300)
         activator.release()
-        try await waitUntil { !activator.base.activatedItems.isEmpty }
-        await runPendingMainTasks()
+        try await waitUntil { completion.completed.value }
 
         store.requestCycle(forward: true)
         try expectEqual(store.items.first?.id, 3, "an older action must not replace newer observed focus")
@@ -176,13 +305,20 @@ enum CachedSwitchOrderingTests {
         try await selectionPreservesHistory(succeeds: false)
     }
 
-    @MainActor private static func selectionPreservesHistory(succeeds: Bool) async throws {
+    @MainActor private static func failedSnapPreservesHistory() async throws {
+        try await selectionPreservesHistory(succeeds: false, snap: true)
+    }
+
+    @MainActor private static func selectionPreservesHistory(succeeds: Bool, snap: Bool = false) async throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let catalog = MockWindowCatalog()
         let activator = HeldActivation()
         activator.base.activationSucceeds = succeeds
+        activator.base.snapSucceeds = succeeds
         let store = makeHeldStore(catalog: catalog, activator: activator, tracker: tracker)
         defer { activator.release(); store.cancel() }
+        let completion = selectionCompletionProbe()
+        defer { completion.restore() }
         let a = makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "fixture.a")
         let target = makeItem(id: 2, pid: succeeds ? 100 : 200, isFrontmostApp: succeeds,
                               bundleIdentifier: succeeds ? "fixture.a" : "fixture.b")
@@ -194,11 +330,10 @@ enum CachedSwitchOrderingTests {
         try await waitUntil { store.items.count == 3 }
         store.selectedID = target.id
         let ranksBefore = tracker.recentWindowIDs
-        store.commitSelection()
+        if snap { store.snap(target, to: .bottom) } else { store.commitSelection() }
         try await waitUntil { activator.started.value }
         activator.release()
-        try await waitUntil { !activator.base.activatedItems.isEmpty }
-        await runPendingMainTasks()
+        try await waitUntil { completion.completed.value }
         if !succeeds { try expectEqual(tracker.recentWindowIDs, ranksBefore) }
         store.cancel()
         // Membership can shrink independently; with one current-app window,
@@ -232,6 +367,18 @@ enum CachedSwitchOrderingTests {
         try expect(false, "mock operation did not reach the expected state")
     }
 
+    private static func selectionCompletionProbe() -> (completed: LockedValue<Bool>, restore: () -> Void) {
+        let completed = LockedValue(false)
+        let previousObserver = PerformanceDiagnostics.testObserver.value
+        PerformanceDiagnostics.testObserver.value = { event, fields in
+            previousObserver?(event, fields)
+            if event == "selection_action_dispatch" || event == "selection_action_failed" {
+                completed.value = true
+            }
+        }
+        return (completed, { PerformanceDiagnostics.testObserver.value = previousObserver })
+    }
+
     /// Holds the detached action until the test delivers its notification.
     /// The bounded wait and deferred release prevent a failed test stranding it.
     private final class HeldActivation: WindowActivating, @unchecked Sendable {
@@ -246,7 +393,11 @@ enum CachedSwitchOrderingTests {
         }
         func activateApplication(pid: pid_t) -> Bool { base.activateApplication(pid: pid) }
         func reopenApplication(pid: pid_t) -> Bool { base.reopenApplication(pid: pid) }
-        func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool { base.snap(item, to: edge) }
+        func snap(_ item: WindowActionTarget, to edge: WindowSnapEdge) -> Bool {
+            started.value = true
+            guard gate.wait(timeout: .now() + 2) == .success else { return false }
+            return base.snap(item, to: edge)
+        }
         func close(_ item: WindowActionTarget) -> Bool { base.close(item) }
         func quit(_ item: WindowActionTarget) -> Bool { base.quit(item) }
         func hide(_ item: WindowActionTarget) -> Bool { base.hide(item) }

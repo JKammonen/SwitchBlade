@@ -231,7 +231,7 @@ enum PerformanceDiagnosticsTests {
             let pid = Int32(61_000 + index)
             return makeItem(id: windowID, pid: pid, isFrontmostApp: index == 0)
         }
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         recording.entries.value = []
         let newWindow = makeItem(id: 44_000, pid: 62_000)
         catalog.visibleItems.append(newWindow)
@@ -267,7 +267,7 @@ enum PerformanceDiagnosticsTests {
             makeItem(id: 20, pid: 200),
             makeItem(id: 30, pid: 300)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         // A transiently missing same-app row may be retained by a hidden warmup;
         // this changes membership, never restores stale cached positions.
         catalog.visibleItems.removeAll { $0.id == 11 }

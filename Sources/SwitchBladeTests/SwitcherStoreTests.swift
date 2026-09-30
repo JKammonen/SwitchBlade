@@ -28,6 +28,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
         ("Store/requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation", requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation),
         ("Store/requestCycle_cachedSecondTabMovesSelectionBeforePanelShows", requestCycle_cachedSecondTabMovesSelectionBeforePanelShows),
+        ("Store/requestCycle_cachedSecondTabAfterSlowCacheSeed", requestCycle_cachedSecondTabAfterSlowCacheSeed),
         ("Store/requestCycle_immediateReopenAfterCommitUsesUpdatedCachedOrder", requestCycle_immediateReopenAfterCommitUsesUpdatedCachedOrder),
         ("Store/requestCycle_reusesInFlightWarmupSnapshot", requestCycle_reusesInFlightWarmupSnapshot),
         ("Store/requestCycle_slowSnapshotDoesNotPaySecondPanelDelay", requestCycle_slowSnapshotDoesNotPaySecondPanelDelay),
@@ -332,7 +333,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -356,7 +357,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -387,7 +388,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         catalog.visibleSnapshotDelayNanoseconds = 200_000_000
         let baselineSnapshots = catalog.visibleSnapshotCount
@@ -510,7 +511,7 @@ enum SwitcherStoreTests {
             initialItems[2],
             initialItems[1]
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -551,7 +552,7 @@ enum SwitcherStoreTests {
             makeItem(id: 10, pid: 100, appName: "Outlook", title: "Inbox", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
             makeItem(id: 20, pid: 200, appName: "Browser", title: "Docs", bundleIdentifier: "com.example.browser")
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         catalog.visibleItems = [
             makeItem(id: 11, pid: 100, appName: "Outlook", title: "Message", isFrontmostApp: true, bundleIdentifier: "com.microsoft.Outlook"),
@@ -634,7 +635,7 @@ enum SwitcherStoreTests {
             makeItem(id: 99, isMinimized: true)
         ]
         // Prime cachedOpenItems via a full open + cancel cycle.
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         // requestCycle now uses the cached path with delayPanelShow=true.
         store.requestCycle(forward: true)
@@ -708,7 +709,7 @@ enum SwitcherStoreTests {
         let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
         defer { store.cancel() }
         catalog.visibleItems = [makeItem(id: 1, pid: 100, isFrontmostApp: true)]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         catalog.visibleItems = [makeItem(id: 2, pid: 100, isFrontmostApp: true)]
         store.scheduleOpenItemsCacheWarmup(context: "test-recreated-single-window")
         await runPendingMainTasks()
@@ -1214,13 +1215,23 @@ enum SwitcherStoreTests {
     }
 
     @MainActor static func requestCycle_cachedSecondTabMovesSelectionBeforePanelShows() async throws {
+        try await cachedSecondTabMovesSelection(snapshotDelay: 0)
+    }
+
+    @MainActor static func requestCycle_cachedSecondTabAfterSlowCacheSeed() async throws {
+        try await cachedSecondTabMovesSelection(snapshotDelay: 75_000_000)
+    }
+
+    @MainActor private static func cachedSecondTabMovesSelection(snapshotDelay: UInt64) async throws {
         let (store, catalog, _, _) = makeStore(initialPanelShowDelayNanoseconds: 120_000_000)
+        defer { store.cancel() }
+        catalog.visibleSnapshotDelayNanoseconds = snapshotDelay
         catalog.visibleItems = [
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2),
             makeItem(id: 3)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
 
@@ -1338,7 +1349,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -1366,7 +1377,7 @@ enum SwitcherStoreTests {
             makeItem(id: 2, pid: 100, title: "Dialog", isFrontmostApp: true),
             makeItem(id: 3, pid: 200, title: "Other")
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleItems = [
@@ -1392,7 +1403,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, isFrontmostApp: true),
             makeItem(id: 2)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         var onShowCalls = 0
         store.onShow = { onShowCalls += 1 }
@@ -1429,7 +1440,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
             makeItem(id: 2, pid: 200)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         catalog.visibleItems = [
             makeItem(id: 3, pid: 300, isFrontmostApp: true),
@@ -1478,7 +1489,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, pid: 100, title: "A", isFrontmostApp: true),
             makeItem(id: 2, pid: 100, title: "B", isFrontmostApp: true)
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         catalog.visibleItems = [
             makeItem(id: 3, pid: 100, title: "A", isFrontmostApp: true),
@@ -1511,7 +1522,7 @@ enum SwitcherStoreTests {
             makeItem(id: UInt32(id), pid: id <= 2 ? 100 : pid_t(id * 100),
                      title: "Window \(id)", isFrontmostApp: id <= 2)
         }
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         tracker.trackFocusedWindowActivation(catalog.visibleItems[11])
         catalog.minimizedSnapshotDelayNanoseconds = 150_000_000
         var firstPaint: [UInt32] = []
@@ -1724,7 +1735,7 @@ enum SwitcherStoreTests {
             makeItem(id: 1, appName: "Front", isFrontmostApp: true),
             makeItem(id: 2, appName: "Slack")
         ]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         let baselineSnapshots = catalog.visibleSnapshotCount
 
         settings.hiddenAppsText = "=Slack"
@@ -2510,7 +2521,7 @@ enum SwitcherStoreTests {
             initialFrontmostAppPID: 101,
             switchBladePID: 999
         )
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         let baselineSnapshots = catalog.visibleSnapshotCount
         catalog.visibleSnapshotDelayNanoseconds = 200_000_000
         store.handleAppActivation(pid: 202)

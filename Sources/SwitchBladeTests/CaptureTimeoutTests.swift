@@ -352,7 +352,7 @@ enum CaptureTimeoutTests {
             bundleIdentifier: "com.example.browser"
         )
         catalog.visibleItems = [outlookMain, browser]
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
 
         let calendar = makeItem(
             id: 11,
@@ -447,7 +447,7 @@ enum CaptureTimeoutTests {
             makeItem(id: 3, pid: 200, title: "Other App")
         ]
         tracker.trackFocusedWindowActivation(catalog.visibleItems[1])
-        await seedOpenItemsCache(store)
+        try await seedOpenItemsCache(store)
         let baselineConcreteMRU = tracker.recentWindowIDs
 
         let baselineSnapshots = catalog.visibleSnapshotCount
