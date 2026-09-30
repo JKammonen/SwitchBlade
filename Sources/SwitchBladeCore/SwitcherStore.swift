@@ -889,7 +889,6 @@ final class SwitcherStore: ObservableObject {
                 performSelectionAction(
                     for: item,
                     actionName: "activate",
-                    updateCachedSelectionState: true,
                     dismissVisiblePanelImmediately: true
                 ) { activator, selectedItem in
                     Self.activateSelectionTarget(selectedItem, using: activator)
@@ -913,7 +912,6 @@ final class SwitcherStore: ObservableObject {
         performSelectionAction(
             for: item,
             actionName: "activate",
-            updateCachedSelectionState: true,
             dismissVisiblePanelImmediately: true
         ) { activator, selectedItem in
             Self.activateSelectionTarget(selectedItem, using: activator)
@@ -1182,7 +1180,6 @@ final class SwitcherStore: ObservableObject {
         liveItems: [WindowItem]? = nil,
         actionName: String,
         source: String? = nil,
-        updateCachedSelectionState: Bool = false,
         dismissVisiblePanelImmediately: Bool = false,
         action: @escaping @Sendable (WindowActivating, WindowActionTarget) -> Bool
     ) -> Bool {
@@ -1193,7 +1190,8 @@ final class SwitcherStore: ObservableObject {
         let catalog = self.catalog
         let target = item.actionTarget
         let dismissBeforeCompletion = dismissVisiblePanelImmediately && isVisible
-        let backgroundedPID = currentAppPID.flatMap { pid in
+        let sourceAppPID = currentAppPID
+        let backgroundedPID = sourceAppPID.flatMap { pid in
             pid != item.pid && pid != switchBladePID ? pid : nil
         }
         let backgroundedFocusBeforeActivation = LockedValue<WindowItem?>(nil)
@@ -1226,7 +1224,7 @@ final class SwitcherStore: ObservableObject {
                     liveItems: liveItems,
                     actionName: actionName,
                     actionSource: actionSource,
-                    updateCachedSelectionState: updateCachedSelectionState,
+                    sourceAppPID: sourceAppPID,
                     dismissedBeforeCompletion: dismissBeforeCompletion,
                     actionStart: actionStart,
                     activationRequestID: activationRequestID,
@@ -1278,7 +1276,7 @@ final class SwitcherStore: ObservableObject {
         liveItems: [WindowItem],
         actionName: String,
         actionSource: String,
-        updateCachedSelectionState: Bool,
+        sourceAppPID: pid_t?,
         dismissedBeforeCompletion: Bool,
         actionStart: Date,
         activationRequestID: UUID?,
@@ -1320,6 +1318,18 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
+        // Hidden quick releases can consume the activation notification while
+        // still switching. Success must reconcile history and cache itself.
+        // A notification already processed for this target keeps its previous
+        // app; a newer external activation must not be overwritten here.
+        let selectionStillOwnsFocus = currentAppPID == sourceAppPID || currentAppPID == item.pid
+        if selectionStillOwnsFocus, currentAppPID != item.pid {
+            if let currentAppPID, currentAppPID != switchBladePID {
+                previousAppPID = currentAppPID
+            }
+            currentAppPID = item.pid
+        }
+
         let rememberStart = Date()
         mruTracker.rememberSelection(
             item.id,
@@ -1340,8 +1350,10 @@ final class SwitcherStore: ObservableObject {
         }
         let rememberMs = Date().timeIntervalSince(rememberStart) * 1000
         let cacheSyncStart = Date()
-        if updateCachedSelectionState {
+        if selectionStillOwnsFocus {
             syncCachedOpenStateAfterSelection(item, liveItems: liveItems)
+        } else {
+            cachedOpenItemsNeedResnapshot = true
         }
         let cacheSyncMs = Date().timeIntervalSince(cacheSyncStart) * 1000
         let scheduledAt = Date()
@@ -1381,7 +1393,9 @@ final class SwitcherStore: ObservableObject {
         let frontmostAdjustedItems = reorderedItems.map { candidate in
             candidate.withFrontmostState(candidate.pid == item.pid)
         }
-        updateCachedOpenItems(orderItems(frontmostAdjustedItems))
+        updateCachedOpenItems(orderItems(mruTracker.orderedForDisplay(
+            from: frontmostAdjustedItems, context: "selection-cache-sync"
+        )))
     }
 
     private func hydratedForDisplay(_ sourceItems: [WindowItem]) -> [WindowItem] {
@@ -1559,10 +1573,15 @@ final class SwitcherStore: ObservableObject {
         showingStaleCachedItems: Bool = false
     ) {
         currentOpenSource = source
+        // Cache membership can still be usable after a focused-window upgrade
+        // changes MRU. Re-rank before selecting/showing, without another scan.
+        let rankedItems = orderItems(mruTracker.orderedForDisplay(
+            from: orderedItems, context: "open:\(source)"
+        ))
         let displayOrderedItems = updateCachedItems
-            ? updateCachedOpenItems(orderedItems)
+            ? updateCachedOpenItems(rankedItems)
             : orderedItemsWithRememberedMinimizedItems(
-                orderedItems,
+                rankedItems,
                 context: "cached-open-display"
             )
         guard !displayOrderedItems.isEmpty else {

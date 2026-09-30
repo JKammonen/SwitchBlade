@@ -26,6 +26,7 @@ func runAll() async -> Int {
         ("SyntheticWindowID",       SyntheticWindowIDTests.all),
         ("WindowActivator",         WindowActivatorTests.all),
         ("SwitcherStore",           SwitcherStoreTests.all),
+        ("CachedSwitchOrdering",     CachedSwitchOrderingTests.all),
         ("MRUPersistence",          MRUPersistenceTests.all),
         ("PerformanceMetrics",      PerformanceMetricsTests.all),
         ("CaptureTimeout",          CaptureTimeoutTests.all),

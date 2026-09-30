@@ -1578,10 +1578,9 @@ enum SwitcherStoreTests {
             makeItem(id: 2, pid: 2),
             makeItem(id: 3, pid: 3)
         ]
-        // Activating window 3 above fires a real app activation; that marks the
-        // cached open list for resnapshot so the next open re-reads the world
-        // (and applies the updated MRU order) instead of replaying the cache.
-        store.handleAppActivation(pid: 3)
+        // Selection succeeded in app 3. Model the external activation that
+        // makes app 1 frontmost again, matching the next catalog snapshot.
+        store.handleAppActivation(pid: 1)
         await openSwitcher(store)
         try expectEqual(store.items.map(\.id), [1, 3, 2])
     }

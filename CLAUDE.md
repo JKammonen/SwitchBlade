@@ -209,7 +209,16 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   Rows contain IDs/state/reasons only. Logging remains debug-only, size-bounded,
   and best-effort: sequence gaps or missing chunks must not be interpreted as
   proof that a window vanished. These diagnostics do not change MRU behavior.
-  Fresh opens use current MRU order. A delayed minimized merge keeps surviving
+  Every open re-ranks its input with current MRU before choosing the default
+  selection or showing the panel, including fresh, stale, and rebased cache
+  paths. This reuses cached membership and requires no extra window scan.
+  Successful selected-window actions reconcile current/previous app history
+  and cached frontmost flags even when an activation notification arrived
+  while the panel was still hidden. An already-processed target notification,
+  same-app selection, or failed action must not corrupt previous-app history;
+  a newer external activation must survive an older action completion.
+  `CachedSwitchOrderingTests` covers those paths without real window actions.
+  A delayed minimized merge keeps surviving
   displayed rows in their existing relative order and retains selection by ID;
   new minimized rows use MRU insertion positions. An unavailable AX owner may
   retain previously confirmed minimized rows only within their original cache
