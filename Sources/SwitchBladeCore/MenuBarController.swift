@@ -388,33 +388,42 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
 
     @objc func openSettings() {
         SwitchBladeSettings.shared.refreshLaunchAtLoginStatus()
-        if settingsWindowController == nil {
-            let view = makeSettingsView()
-            let host = NSHostingController(rootView: view)
-            let window = NSWindow(contentViewController: host)
-            window.title = L10n.tr(.menuSettingsWindowTitle)
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.isReleasedWhenClosed = false
-            window.setAccessibilityRole(.window)
-            window.setAccessibilitySubrole(.standardWindow)
-            window.setAccessibilityLabel(L10n.tr(.menuSettingsWindowTitle))
-            window.delegate = self
-            window.contentMinSize = NSSize(width: 380, height: 420)
-            host.view.layoutSubtreeIfNeeded()
-            let fittingSize = host.view.fittingSize
-            window.setContentSize(NSSize(
-                width: max(420, fittingSize.width),
-                height: max(620, fittingSize.height)
-            ))
-            centerWindowOnActiveScreen(window)
-            settingsHostingController = host
-            settingsWindowController = NSWindowController(window: window)
-        } else if let window = settingsWindowController?.window {
-            clampWindowToVisibleScreen(window)
-        }
+        let window = prepareSettingsWindow()
         NSApp.activate(ignoringOtherApps: true)
         settingsWindowController?.showWindow(nil)
-        settingsWindowController?.window?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Construct without showing, so only the explicit settings action presents it.
+    func prepareSettingsWindow() -> NSWindow {
+        if let window = settingsWindowController?.window {
+            clampWindowToVisibleScreen(window)
+            return window
+        }
+        let view = makeSettingsView()
+        let host = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: host)
+        window.title = L10n.tr(.menuSettingsWindowTitle)
+        // Preferences belong to the menu-bar agent, never to the Dock or the
+        // next launch's restored windows.
+        window.styleMask = [.titled, .closable, .resizable]
+        window.isRestorable = false
+        window.isReleasedWhenClosed = false
+        window.setAccessibilityRole(.window)
+        window.setAccessibilitySubrole(.standardWindow)
+        window.setAccessibilityLabel(L10n.tr(.menuSettingsWindowTitle))
+        window.delegate = self
+        window.contentMinSize = NSSize(width: 380, height: 420)
+        host.view.layoutSubtreeIfNeeded()
+        let fittingSize = host.view.fittingSize
+        window.setContentSize(NSSize(
+            width: max(420, fittingSize.width),
+            height: max(620, fittingSize.height)
+        ))
+        centerWindowOnActiveScreen(window)
+        settingsHostingController = host
+        settingsWindowController = NSWindowController(window: window)
+        return window
     }
 
     private func makeSettingsView() -> SettingsView {

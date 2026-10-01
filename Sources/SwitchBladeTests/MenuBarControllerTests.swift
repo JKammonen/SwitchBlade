@@ -12,8 +12,24 @@ enum MenuBarControllerTests {
         ("MenuBarController/permissionRecovery_routesExactMenuSelection", permissionRecoveryRoutesExactSelection),
         ("MenuBarController/mainMenu_hasConventionalLocalizedSections", mainMenuHasConventionalLocalizedSections),
         ("MenuBarController/settingsFrame_clampsSizeAndOriginToVisibleScreen", settingsFrameClampsToVisibleScreen),
-        ("MenuBarController/settingsFrame_handlesTinyVisibleScreen", settingsFrameHandlesTinyScreen)
+        ("MenuBarController/settingsFrame_handlesTinyVisibleScreen", settingsFrameHandlesTinyScreen),
+        ("MenuBarController/settingsConstruction_staysHiddenAndOutOfDock", settingsConstructionStaysHidden)
     ]
+
+    @MainActor static func settingsConstructionStaysHidden() throws {
+        let controller = MenuBarController()
+        let window = controller.prepareSettingsWindow()
+        defer { window.close() }
+        try expect(!window.isVisible, "construction alone must not open settings")
+        try expect(!window.isMiniaturizable, "settings must not create a minimized Dock tile")
+        try expect(!window.isRestorable, "preferences must not return on a later launch")
+        try expect(window.styleMask.contains(.closable))
+        try expect(window.isResizable)
+        try expect(controller.prepareSettingsWindow() === window, "explicit reopen must reuse the same settings window")
+        window.performClose(nil)
+        try expect(!window.isVisible)
+        try expect(controller.prepareSettingsWindow() === window, "closing must preserve reusable settings state")
+    }
 
     @MainActor static func aboutVersionStringUsesShortVersionOnly() throws {
         let settings = SwitchBladeSettings.shared

@@ -141,16 +141,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.menuBarController = menuBar
 
-        if state.needsVisibleRecovery(for: SwitchBladeSettings.shared.previewMode) {
-            Logger.permissions.notice("Opening permission recovery on launch")
-            // Accessory apps are not yet ready to activate a key window while
-            // applicationDidFinishLaunching is still on the stack. Defer until
-            // the next main-loop turn so the recovery window is actually shown.
-            DispatchQueue.main.async { [weak menuBar] in
-                menuBar?.openSettings()
-            }
-        }
-
         installLifecycleObservers()
     }
 
@@ -194,8 +184,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        menuBarController?.openSettings()
-        return true
+        // Repeated Launch Services opens leave the agent quiet. Settings are
+        // opened only by the explicit menu action.
+        return false
+    }
+
+    public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Closing preferences leaves the status item and hotkey service running.
+        return false
     }
 
     private func handlePermissionRecovery(_ permission: PermissionKind) {

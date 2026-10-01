@@ -29,6 +29,9 @@ enum WindowActivatorTests {
         ("WindowActivator/reopenApplication_pressesDockBeforeAppActivation", reopenApplicationPressesDockBeforeAppActivation),
         ("WindowActivator/dockCandidate_prefersURLThenLocalizedTitle", dockCandidatePrefersURLThenLocalizedTitle),
         ("WindowActivator/activate_backgroundWindow_requiresRaiseAndAppActivation", activateBackgroundWindowRequiresBothSteps),
+        ("WindowActivator/activationResult_distinguishesAppOnlyAndExactTarget", activationResultDistinguishesAppOnlyAndExactTarget),
+        ("WindowActivator/activationResult_frontmostFailureChecksActualActiveState", activationResultChecksFrontmostState),
+        ("WindowActivator/activate_boolDoesNotTreatAppOnlyAsExactSuccess", activateBoolRejectsAppOnly),
         ("WindowActivator/activationTargeting_acceptsAttributeUnsupportedRaiseAfterMainAndFocus", activationTargetingAcceptsAttributeUnsupportedRaiseAfterMainAndFocus),
         ("WindowActivator/activationTargeting_acceptsMinimizedTransitionCannotCompleteAfterRestoreAndFocus", activationTargetingAcceptsMinimizedTransitionCannotCompleteAfterRestoreAndFocus),
         ("WindowActivator/activationTargeting_keepsOtherAXFailuresClosed", activationTargetingKeepsOtherAXFailuresClosed),
@@ -462,6 +465,41 @@ enum WindowActivatorTests {
         )
 
         try expect(!succeeded)
+    }
+
+    static func activationResultDistinguishesAppOnlyAndExactTarget() throws {
+        let cases: [(Bool, Bool, WindowActivationResult)] = [
+            (false, false, .failed), (true, false, .failed),
+            (false, true, .applicationOnly), (true, true, .selectedTarget)
+        ]
+        for (raised, activated, expected) in cases {
+            var steps: [String] = []
+            let activator = WindowActivator(
+                raiseWindowOverride: { _ in steps.append("window"); return raised },
+                activateApplicationOverride: { _ in steps.append("app"); return activated }
+            )
+            try expectEqual(activator.activateWithResult(makeItem(id: 2, pid: 200).actionTarget), expected)
+            try expectEqual(steps, ["window", "app"], "AX targeting must still precede app activation")
+        }
+    }
+
+    static func activationResultChecksFrontmostState() throws {
+        for active in [false, true] {
+            let activator = WindowActivator(
+                raiseWindowOverride: { _ in false },
+                activateApplicationOverride: { _ in preconditionFailure("frontmost path must skip activation") },
+                isApplicationActiveOverride: { _ in active }
+            )
+            try expectEqual(activator.activateWithResult(makeItem(id: 2, isFrontmostApp: true).actionTarget),
+                            active ? .applicationOnly : .failed)
+        }
+    }
+
+    static func activateBoolRejectsAppOnly() throws {
+        let activator = WindowActivator(raiseWindowOverride: { _ in false },
+                                        activateApplicationOverride: { _ in true })
+        try expect(!activator.activate(makeItem(id: 2, pid: 200).actionTarget),
+                   "legacy exact-window callers must not rank unverified focus")
     }
 
     static func activationTargetingAcceptsAttributeUnsupportedRaiseAfterMainAndFocus() throws {

@@ -61,10 +61,19 @@ protocol WindowSnapshotProviding: Sendable {
     func invalidateContentCache(reason: String) async
 }
 
+/// Keeps confirmed app focus separate from verified selected-window focus.
+enum WindowActivationResult: String, Sendable {
+    case selectedTarget = "selected-target"
+    /// The app is confirmed active, but the selected window is unverified.
+    case applicationOnly = "application-only"
+    case failed
+}
+
 /// Window activation / closing dependency. Concrete WindowActivator conforms;
 /// tests verify that selection and close paths call the right method.
 protocol WindowActivating: Sendable {
     func activate(_ item: WindowActionTarget) -> Bool
+    func activateWithResult(_ item: WindowActionTarget) -> WindowActivationResult
     func activateApplication(pid: pid_t) -> Bool
     /// Reopens an app-only row through its Dock item, then confirms the app is
     /// active. This stays separate from previous-app activation, which must not
@@ -78,6 +87,12 @@ protocol WindowActivating: Sendable {
     /// Sends NSRunningApplication.hide(). All of the app's windows go away
     /// without quitting; the app stays running and can be reactivated later.
     func hide(_ item: WindowActionTarget) -> Bool
+}
+
+extension WindowActivating {
+    func activateWithResult(_ item: WindowActionTarget) -> WindowActivationResult {
+        activate(item) ? .selectedTarget : .failed
+    }
 }
 
 /// Permission-state dependency. Concrete PermissionService conforms; tests

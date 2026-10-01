@@ -10,10 +10,10 @@ actor WindowActionCoordinator {
     /// nil means another window operation still owns the single action lane.
     /// The lane stays occupied until detached AX/AppKit work actually returns,
     /// even when the caller task is cancelled meanwhile.
-    func run(
+    func run<Result: Sendable>(
         priority: TaskPriority = .userInitiated,
-        operation: @escaping @Sendable () -> Bool
-    ) async -> Bool? {
+        operation: @escaping @Sendable () -> Result
+    ) async -> Result? {
         guard !isRunning else { return nil }
         isRunning = true
         defer { isRunning = false }
@@ -125,6 +125,7 @@ final class SwitcherStore: ObservableObject {
     /// built. The cached list may still be young by timestamp, but its first
     /// item can now point at the wrong frontmost app for a fast Cmd+Tab.
     private var cachedOpenItemsNeedResnapshot = false
+    private let workspaceNotificationCenter: NotificationCenter
     nonisolated(unsafe) private var activationObserver: Any?
     /// Prevents the tile under the mouse from stealing selection when the panel first appears.
     private var hoverEnabled = false
@@ -196,6 +197,7 @@ final class SwitcherStore: ObservableObject {
         initialPanelShowDelayNanoseconds: UInt64 = 0,
         deferredPreviewCaptureBudget: Int = 12,
         focusedRankUpgradeDelayNanoseconds: UInt64 = 150_000_000,
+        workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         initialFrontmostAppPID: pid_t? = NSWorkspace.shared.frontmostApplication?.processIdentifier,
         switchBladePID: pid_t = getpid()
     ) {
@@ -211,10 +213,11 @@ final class SwitcherStore: ObservableObject {
         self.initialPanelShowDelayNanoseconds = initialPanelShowDelayNanoseconds
         self.deferredPreviewCaptureBudget = max(0, deferredPreviewCaptureBudget)
         self.focusedRankUpgradeDelayNanoseconds = focusedRankUpgradeDelayNanoseconds
+        self.workspaceNotificationCenter = workspaceNotificationCenter
         self.currentAppPID = initialFrontmostAppPID
         self.switchBladePID = switchBladePID
 
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        activationObserver = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -308,7 +311,7 @@ final class SwitcherStore: ObservableObject {
         windowActionTask?.cancel()
         minimizedMergeTask?.cancel()
         if let activationObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+            workspaceNotificationCenter.removeObserver(activationObserver)
         }
     }
 
@@ -800,7 +803,7 @@ final class SwitcherStore: ObservableObject {
         }
         selectedID = item.id
         performSelectionAction(for: item, actionName: "snap-\(edge.rawValue)") { activator, selectedItem in
-            activator.snap(selectedItem, to: edge)
+            activator.snap(selectedItem, to: edge) ? .selectedTarget : .failed
         }
     }
 
@@ -1009,7 +1012,7 @@ final class SwitcherStore: ObservableObject {
             let activator = self.activator
             let target = targetItem.actionTarget
             guard await runActivatorOperation({
-                Self.activateSelectionTarget(target, using: activator)
+                Self.activateSelectionTarget(target, using: activator) == .selectedTarget
             }) else {
                 Logger.switcher.notice(
                     "Double modifier window activation failed targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public); preserving app history"
@@ -1167,11 +1170,11 @@ final class SwitcherStore: ObservableObject {
     private nonisolated static func activateSelectionTarget(
         _ item: WindowActionTarget,
         using activator: WindowActivating
-    ) -> Bool {
+    ) -> WindowActivationResult {
         if item.isApplicationFallback {
-            return activator.reopenApplication(pid: item.pid)
+            return activator.reopenApplication(pid: item.pid) ? .selectedTarget : .failed
         }
-        return activator.activate(item)
+        return activator.activateWithResult(item)
     }
 
     @discardableResult
@@ -1181,7 +1184,7 @@ final class SwitcherStore: ObservableObject {
         actionName: String,
         source: String? = nil,
         dismissVisiblePanelImmediately: Bool = false,
-        action: @escaping @Sendable (WindowActivating, WindowActionTarget) -> Bool
+        action: @escaping @Sendable (WindowActivating, WindowActionTarget) -> WindowActivationResult
     ) -> Bool {
         let actionStart = Date()
         let liveItems = liveItems ?? items
@@ -1217,9 +1220,9 @@ final class SwitcherStore: ObservableObject {
                 }
                 return action(activator, target)
             },
-            completion: { [weak self] didPerformAction in
+            completion: { [weak self] result in
                 self?.completeSelectionAction(
-                    didPerformAction: didPerformAction,
+                    result: result,
                     item: item,
                     liveItems: liveItems,
                     actionName: actionName,
@@ -1244,9 +1247,9 @@ final class SwitcherStore: ObservableObject {
     }
 
     @discardableResult
-    private func startWindowAction(
-        operation: @escaping @Sendable () -> Bool,
-        completion: @escaping @MainActor (Bool) -> Void
+    private func startWindowAction<Result: Sendable>(
+        operation: @escaping @Sendable () -> Result,
+        completion: @escaping @MainActor (Result) -> Void
     ) -> Bool {
         guard windowActionTask == nil else {
             Logger.switcher.notice("Window action ignored while another action is in flight")
@@ -1271,7 +1274,7 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func completeSelectionAction(
-        didPerformAction: Bool,
+        result: WindowActivationResult,
         item: WindowItem,
         liveItems: [WindowItem],
         actionName: String,
@@ -1285,7 +1288,7 @@ final class SwitcherStore: ObservableObject {
         backgroundedFocusWasRequested: Bool
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
-        guard didPerformAction else {
+        guard result != .failed else {
             recordFocusRankDecision(item: backgroundedFocusBeforeActivation, diagnosticID: focusDiagnosticID,
                                     context: "pre-activation-backgrounded-focus", outcome: "discarded-action-failed")
             if let activationRequestID {
@@ -1331,11 +1334,13 @@ final class SwitcherStore: ObservableObject {
         }
 
         let rememberStart = Date()
-        mruTracker.rememberSelection(
-            item.id,
-            in: liveItems,
-            context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
-        )
+        if result == .selectedTarget {
+            mruTracker.rememberSelection(
+                item.id,
+                in: liveItems,
+                context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
+            )
+        }
         if let backgroundedFocusBeforeActivation,
            !backgroundedFocusBeforeActivation.isApplicationFallback {
             recordFocusRankDecision(item: backgroundedFocusBeforeActivation, diagnosticID: focusDiagnosticID,
@@ -1350,9 +1355,11 @@ final class SwitcherStore: ObservableObject {
         }
         let rememberMs = Date().timeIntervalSince(rememberStart) * 1000
         let cacheSyncStart = Date()
-        if selectionStillOwnsFocus {
+        if selectionStillOwnsFocus, result == .selectedTarget {
             syncCachedOpenStateAfterSelection(item, liveItems: liveItems)
         } else {
+            // App-only success must not pin the unverified selected sibling.
+            // Rebase a single-window cache or obtain fresh multi-window order.
             cachedOpenItemsNeedResnapshot = true
         }
         let cacheSyncMs = Date().timeIntervalSince(cacheSyncStart) * 1000
@@ -1376,6 +1383,7 @@ final class SwitcherStore: ObservableObject {
                 "pid": .int(Int(item.pid)),
                 "pre_hide_ms": .double(preHideMs),
                 "remember_ms": .double(rememberMs),
+                "result": .string(result.rawValue),
                 "source": .string(actionSource),
                 "total_prepare_ms": .double(totalPrepareMs),
                 "window_id": .int(Int(item.id))

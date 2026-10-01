@@ -142,6 +142,15 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 
 ## Common Interventions
 
+- **Launch or repeated open shows preferences** → SwitchBlade is a quiet
+  menu-bar agent (`LSUIElement`, `.accessory`). Launch and
+  `applicationShouldHandleReopen` must not open settings automatically, even
+  when permissions are missing; recovery remains in the status menu and
+  switcher permission footer. Preferences open only through the explicit
+  settings action, cannot minimize into the Dock, and are not restorable.
+  Closing the last window keeps the agent running. `AppLifecycleTests` and
+  the real settings-window construction test cover these contracts; verify
+  cold launch, repeated open and manual settings close in the signed app.
 - **Fullscreen / Space changes leave old tiles or icon-only cards** → keep the
   intended window scope; switching to all Spaces also admits retained offscreen
   WindowServer surfaces and is not a general fix. `activeSpaceDidChange` now
@@ -226,6 +235,18 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   retention; synthetic rows are also suppressed by fresh visible owner evidence.
   Regressions: `Store/freshOpenUsesMRUBeforeEmptyMerge`,
   `Store/minimizedMergePreservesVisibleOrderAndSelection`, and `MinimizedCache/*`.
+- **Switcher returns after modifier release** → compare `panel_hide`,
+  `activation_ax_match`, `activation_app_activate`, `selection_action_failed`,
+  and the next `panel_show`. An AX target failure can coexist with confirmed
+  app activation. Selection uses `WindowActivationResult`: `applicationOnly`
+  dismisses the panel and reconciles app history, but does not remember the
+  unverified selected window or pin its cached sibling order. The next open
+  rebases a single-window cache or refreshes multi-window order. A frontmost
+  target with failed AX targeting requires an actual active-app check before
+  this partial result; cached frontmost flags alone are insufficient. Genuine
+  activation failures retain the recovery panel; failed snaps remain failures.
+  `PartialActivationTests` covers visible/prepared/resolving release, history,
+  exact-window MRU preservation, fresh sibling order and newer external focus.
 - **Window-targeted self-activation changes a sibling's rank** → capture the
   backgrounded app's exact AX focus before SwitchBlade raises/focuses the target.
   The later app-activation notification must not rescan post-transition AX focus

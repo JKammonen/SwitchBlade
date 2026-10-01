@@ -24,6 +24,7 @@ enum SwitcherStoreTests {
         ("Store/requestCycle_mixedDirectionsCanReturnToFrontmost", requestCycleMixedDirectionsCanReturnToFrontmost),
         ("Store/requestCycle_backwardColdOpenWrapsToLast", requestCycleBackwardColdOpenWrapsToLast),
         ("Store/requestCycle_usesCachedItemsWithoutSnapshot", requestCycle_usesCachedItemsWithoutSnapshot),
+        ("Store/cachedOpenIgnoresUnrelatedWorkspaceNotifications", cachedOpenIgnoresUnrelatedWorkspaceNotifications),
         ("Store/requestCycle_bypassesFreshCacheAfterExternalActivation", requestCycle_bypassesFreshCacheAfterExternalActivation),
         ("Store/requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation", requestCycle_rebasesFreshCacheAfterSingleWindowExternalActivation),
         ("Store/requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation", requestCycle_backgroundedAppKeepsCachedPreviewAfterExternalActivation),
@@ -325,6 +326,32 @@ enum SwitcherStoreTests {
             try expectEqual(store.selectedID, 1)
             store.cancel()
         }
+    }
+
+    @MainActor static func cachedOpenIgnoresUnrelatedWorkspaceNotifications() async throws {
+        let center = NotificationCenter()
+        let (store, catalog, _, _) = makeStore(workspaceNotificationCenter: center,
+                                              initialFrontmostAppPID: 100, switchBladePID: 999)
+        defer { store.cancel() }
+        catalog.visibleItems = [makeItem(id: 1, pid: 100, isFrontmostApp: true),
+                                makeItem(id: 2, pid: NSRunningApplication.current.processIdentifier)]
+        try await seedOpenItemsCache(store)
+        let snapshots = catalog.visibleSnapshotCount
+        // This is process-local notification delivery, not real app activation.
+        // Fixture stores must not receive the user's unrelated workspace events.
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            userInfo: [NSWorkspace.applicationUserInfoKey: NSRunningApplication.current]
+        )
+        store.requestCycle(forward: true)
+        try expect(store.isVisible, "live workspace notifications must not invalidate a fixture's seeded cache")
+        try expectEqual(catalog.visibleSnapshotCount, snapshots)
+        store.cancel()
+        center.post(name: NSWorkspace.didActivateApplicationNotification, object: nil,
+                    userInfo: [NSWorkspace.applicationUserInfoKey: NSRunningApplication.current])
+        store.requestCycle(forward: true)
+        try expectEqual(store.items.first?.id, 2, "the explicitly injected workspace must still deliver activations")
     }
 
     @MainActor static func requestCycle_usesCachedItemsWithoutSnapshot() async throws {
@@ -873,6 +900,7 @@ enum SwitcherStoreTests {
             permissionService: permissions,
             userDefaults: userDefaults,
             mruTracker: mruTracker,
+            workspaceNotificationCenter: NotificationCenter(),
             initialFrontmostAppPID: frontmost.pid,
             switchBladePID: 999
         )
@@ -2376,6 +2404,7 @@ enum SwitcherStoreTests {
             permissionService: permissions,
             userDefaults: userDefaults,
             mruTracker: mruTracker,
+            workspaceNotificationCenter: NotificationCenter(),
             initialFrontmostAppPID: 100,
             switchBladePID: 999
         )
@@ -2447,6 +2476,7 @@ enum SwitcherStoreTests {
             permissionService: permissions,
             userDefaults: userDefaults,
             mruTracker: mruTracker,
+            workspaceNotificationCenter: NotificationCenter(),
             initialFrontmostAppPID: 200,
             switchBladePID: 999
         )

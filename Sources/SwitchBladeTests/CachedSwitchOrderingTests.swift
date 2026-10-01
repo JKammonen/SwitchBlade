@@ -130,7 +130,8 @@ enum CachedSwitchOrderingTests {
         let activator = HeldActivation()
         let store = SwitcherStore(
             catalog: catalog, activator: activator, permissionService: MockPermissionService(),
-            userDefaults: makeIsolatedUserDefaults(), initialFrontmostAppPID: 100, switchBladePID: 999
+            userDefaults: makeIsolatedUserDefaults(), workspaceNotificationCenter: NotificationCenter(),
+            initialFrontmostAppPID: 100, switchBladePID: 999
         )
         defer { activator.release(); store.cancel() }
         catalog.visibleItems = [
@@ -270,6 +271,7 @@ enum CachedSwitchOrderingTests {
         let store = SwitcherStore(
             catalog: catalog, activator: activator, permissionService: MockPermissionService(),
             userDefaults: makeIsolatedUserDefaults(), focusedRankUpgradeDelayNanoseconds: 5_000_000_000,
+            workspaceNotificationCenter: NotificationCenter(),
             initialFrontmostAppPID: 100, switchBladePID: 999
         )
         defer { activator.release(); store.cancel() }
@@ -356,6 +358,7 @@ enum CachedSwitchOrderingTests {
                       userDefaults: makeIsolatedUserDefaults(), mruTracker: tracker,
                       initialPanelShowDelayNanoseconds: 5_000_000_000,
                       focusedRankUpgradeDelayNanoseconds: 5_000_000_000,
+                      workspaceNotificationCenter: NotificationCenter(),
                       initialFrontmostAppPID: 100, switchBladePID: 999)
     }
 

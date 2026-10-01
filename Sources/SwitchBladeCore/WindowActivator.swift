@@ -46,18 +46,25 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     private let raiseWindowOverride: ((WindowActionTarget) -> Bool)?
     private let activateApplicationOverride: ((pid_t) -> Bool)?
     private let reopenApplicationOverride: ((pid_t) -> Bool)?
+    private let isApplicationActiveOverride: ((pid_t) -> Bool)?
 
     init(
         raiseWindowOverride: ((WindowActionTarget) -> Bool)? = nil,
         activateApplicationOverride: ((pid_t) -> Bool)? = nil,
-        reopenApplicationOverride: ((pid_t) -> Bool)? = nil
+        reopenApplicationOverride: ((pid_t) -> Bool)? = nil,
+        isApplicationActiveOverride: ((pid_t) -> Bool)? = nil
     ) {
         self.raiseWindowOverride = raiseWindowOverride
         self.activateApplicationOverride = activateApplicationOverride
         self.reopenApplicationOverride = reopenApplicationOverride
+        self.isApplicationActiveOverride = isApplicationActiveOverride
     }
 
     func activate(_ item: WindowActionTarget) -> Bool {
+        activateWithResult(item) == .selectedTarget
+    }
+
+    func activateWithResult(_ item: WindowActionTarget) -> WindowActivationResult {
         log(action: "activate", item: item)
         // Select the target window first, then activate the app. AX raise/focus
         // alone does not make many apps frontmost, while app activation before
@@ -66,12 +73,19 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let requiresApplicationActivation = Self.shouldActivateApplication(afterTargeting: item)
         let activated = requiresApplicationActivation
             ? performApplicationActivation(pid: item.pid)
-            : true
-        let succeeded = raised && activated
+            : (raised || isApplicationActive(pid: item.pid))
+        let result: WindowActivationResult = activated
+            ? (raised ? .selectedTarget : .applicationOnly)
+            : .failed
         Logger.activator.info(
-            "activate result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) raised=\(raised, privacy: .public) appActivated=\(activated, privacy: .public) succeeded=\(succeeded, privacy: .public)"
+            "activate result pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) raised=\(raised, privacy: .public) appActivated=\(activated, privacy: .public) result=\(result.rawValue, privacy: .public)"
         )
-        return succeeded
+        return result
+    }
+
+    private func isApplicationActive(pid: pid_t) -> Bool {
+        if let isApplicationActiveOverride { return isApplicationActiveOverride(pid) }
+        return NSRunningApplication(processIdentifier: pid)?.isActive == true
     }
 
     func activateApplication(pid: pid_t) -> Bool {

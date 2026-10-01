@@ -296,6 +296,7 @@ func makeStore(
     initialPanelShowDelayNanoseconds: UInt64 = 0,
     deferredPreviewCaptureBudget: Int = 12,
     focusedRankUpgradeDelayNanoseconds: UInt64 = 0,
+    workspaceNotificationCenter: NotificationCenter = NotificationCenter(),
     initialFrontmostAppPID: pid_t? = nil,
     switchBladePID: pid_t = getpid()
 ) -> (SwitcherStore, MockWindowCatalog, MockWindowActivator, MockPermissionService) {
@@ -310,6 +311,7 @@ func makeStore(
         initialPanelShowDelayNanoseconds: initialPanelShowDelayNanoseconds,
         deferredPreviewCaptureBudget: deferredPreviewCaptureBudget,
         focusedRankUpgradeDelayNanoseconds: focusedRankUpgradeDelayNanoseconds,
+        workspaceNotificationCenter: workspaceNotificationCenter,
         initialFrontmostAppPID: initialFrontmostAppPID,
         switchBladePID: switchBladePID
     )
