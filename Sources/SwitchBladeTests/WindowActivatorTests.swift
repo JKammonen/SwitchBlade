@@ -23,6 +23,7 @@ enum WindowActivatorTests {
         ("WindowActivator/bestScreen_emptyCandidates_returnsNil", bestScreenEmptyCandidatesReturnsNil),
         ("WindowActivator/bestScreen_windowOffAllScreens_picksNearestByCenter", bestScreenWindowOffAllScreensPicksNearestByCenter),
         ("WindowActivator/activate_frontmostWindow_skipsAppActivation", activateFrontmostWindowSkipsAppActivation),
+        ("WindowActivator/activate_previouslyFrontmostWindow_restoresActualActivation", activatePreviouslyFrontmostWindowRestoresActualActivation),
         ("WindowActivator/activate_backgroundWindow_callsAppActivation", activateBackgroundWindowCallsAppActivation),
         ("WindowActivator/activate_hostedWindow_targetsOwnerAndActivatesHost", activateHostedWindowTargetsOwnerAndActivatesHost),
         ("WindowActivator/activateApplication_alwaysCallsAppActivation", activateApplicationCallsAppActivation),
@@ -37,8 +38,6 @@ enum WindowActivatorTests {
         ("WindowActivator/activationTargeting_keepsOtherAXFailuresClosed", activationTargetingKeepsOtherAXFailuresClosed),
         ("WindowActivator/activationConfirmation_waitsForObservedActiveState", activationConfirmationWaitsForObservedState),
         ("WindowActivator/activationConfirmation_rejectsUnconfirmedRequest", activationConfirmationRejectsUnconfirmedRequest),
-        ("WindowActivator/shouldActivateApplication_falseForFrontmostAppWindow", shouldSkipActivationForFrontmostAppWindow),
-        ("WindowActivator/shouldActivateApplication_trueForBackgroundAppWindow", shouldActivateForBackgroundAppWindow),
         ("WindowActivator/toAXScreenRect_flipsVerticallyOffsetDisplay", toAXScreenRect_flipsVerticallyOffsetDisplay),
         ("WindowActivator/snapFrame_halvesVisibleFrame", snapFrame_halvesVisibleFrame),
         ("WindowActivator/bestVisibleFrame_prefersLargestIntersection", bestVisibleFrame_prefersLargestIntersection)
@@ -324,7 +323,8 @@ enum WindowActivatorTests {
             activateApplicationOverride: { pid in
                 activatedPIDs.append(pid)
                 return true
-            }
+            },
+            isApplicationActiveOverride: { _ in true }
         )
 
         let succeeded = activator.activate(makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true).actionTarget)
@@ -332,6 +332,31 @@ enum WindowActivatorTests {
         try expect(succeeded)
         try expectEqual(raisedItems, [2])
         try expectEqual(activatedPIDs, [])
+    }
+
+    static func activatePreviouslyFrontmostWindowRestoresActualActivation() throws {
+        // The switcher stole activation after this eight-window snapshot.
+        let windows = (1...8).map { makeItem(id: UInt32($0), pid: $0 <= 2 ? 100 : pid_t($0 * 100),
+                                           isFrontmostApp: $0 <= 2) }
+        for raised in [false, true] {
+            for activationSucceeded in [false, true] {
+                var steps: [String] = []
+                let activator = WindowActivator(
+                    raiseWindowOverride: { item in steps.append("window:\(item.id)"); return raised },
+                    activateApplicationOverride: { pid in
+                        steps.append("app:\(pid)")
+                        return activationSucceeded
+                    },
+                    isApplicationActiveOverride: { _ in false }
+                )
+                let expected: WindowActivationResult = activationSucceeded
+                    ? (raised ? .selectedTarget : .applicationOnly) : .failed
+                try expectEqual(activator.activateWithResult(windows[1].actionTarget), expected,
+                                "AX success alone cannot prove keyboard focus returned from the switcher")
+                try expectEqual(steps, ["window:2", "app:100"],
+                                "restore app activation after targeting the exact sibling")
+            }
+        }
     }
 
     static func activateBackgroundWindowCallsAppActivation() throws {
@@ -485,13 +510,18 @@ enum WindowActivatorTests {
 
     static func activationResultChecksFrontmostState() throws {
         for active in [false, true] {
+            var activationCalls = 0
             let activator = WindowActivator(
                 raiseWindowOverride: { _ in false },
-                activateApplicationOverride: { _ in preconditionFailure("frontmost path must skip activation") },
+                activateApplicationOverride: { _ in
+                    activationCalls += 1
+                    return false
+                },
                 isApplicationActiveOverride: { _ in active }
             )
             try expectEqual(activator.activateWithResult(makeItem(id: 2, isFrontmostApp: true).actionTarget),
                             active ? .applicationOnly : .failed)
+            try expectEqual(activationCalls, active ? 0 : 1)
         }
     }
 
@@ -615,16 +645,6 @@ enum WindowActivatorTests {
             wait: {}
         )
         try expect(!neverConfirmed)
-    }
-
-    static func shouldSkipActivationForFrontmostAppWindow() throws {
-        let item = makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true)
-        try expect(!WindowActivator.shouldActivateApplication(afterTargeting: item))
-    }
-
-    static func shouldActivateForBackgroundAppWindow() throws {
-        let item = makeItem(id: 2, pid: 100, title: "Background window", isFrontmostApp: false)
-        try expect(WindowActivator.shouldActivateApplication(afterTargeting: item))
     }
 
     static func snapFrame_halvesVisibleFrame() throws {

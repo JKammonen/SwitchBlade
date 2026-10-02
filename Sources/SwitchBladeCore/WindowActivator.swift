@@ -70,10 +70,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         // alone does not make many apps frontmost, while app activation before
         // AX targeting can raise the app's previously-main sibling window.
         let raised = raiseWindow(item)
-        let requiresApplicationActivation = Self.shouldActivateApplication(afterTargeting: item)
-        let activated = requiresApplicationActivation
-            ? performApplicationActivation(pid: item.pid)
-            : (raised || isApplicationActive(pid: item.pid))
+        let activated = activateTargetApplicationIfNeeded(item)
         let result: WindowActivationResult = activated
             ? (raised ? .selectedTarget : .applicationOnly)
             : .failed
@@ -86,6 +83,27 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     private func isApplicationActive(pid: pid_t) -> Bool {
         if let isApplicationActiveOverride { return isApplicationActiveOverride(pid) }
         return NSRunningApplication(processIdentifier: pid)?.isActive == true
+    }
+
+    private func activateTargetApplicationIfNeeded(_ item: WindowActionTarget) -> Bool {
+        // isFrontmostApp belongs to the window snapshot. Showing our panel can
+        // steal activation afterward, even when the target is the same app.
+        // Skip activation only while that app is still actually active, so an
+        // already-active sibling keeps its AX-targeted selection.
+        let wasActive = isApplicationActive(pid: item.pid)
+        let requiresActivation = !item.isFrontmostApp || !wasActive
+        let activated = requiresActivation ? performApplicationActivation(pid: item.pid) : true
+        PerformanceDiagnostics.record(
+            "activation_focus_restore",
+            fields: [
+                "pid": .int(Int(item.pid)),
+                "snapshot_frontmost": .bool(item.isFrontmostApp),
+                "was_active": .bool(wasActive),
+                "activation_required": .bool(requiresActivation),
+                "activated": .bool(activated)
+            ]
+        )
+        return activated
     }
 
     func activateApplication(pid: pid_t) -> Bool {
@@ -158,10 +176,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        let requiresApplicationActivation = Self.shouldActivateApplication(afterTargeting: item)
-        let activated = requiresApplicationActivation
-            ? performApplicationActivation(pid: item.pid)
-            : true
+        let activated = activateTargetApplicationIfNeeded(item)
         let succeeded = unminimized
             && raiseResult == .success
             && mainResult == .success
@@ -585,17 +600,6 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return nil
         }
         return CFBooleanGetValue((rawValue as! CFBoolean))
-    }
-
-    static func shouldActivateApplication(afterTargeting item: WindowActionTarget) -> Bool {
-        // Same-app window switches already target the frontmost app. Re-running
-        // app activation there can hand focus back to the app's previously-main
-        // sibling window and undo the AX-targeted selection we just made.
-        return !item.isFrontmostApp
-    }
-
-    static func shouldActivateApplication(afterTargeting item: WindowItem) -> Bool {
-        shouldActivateApplication(afterTargeting: item.actionTarget)
     }
 
     private func closeMatchingWindow(_ item: WindowActionTarget) -> Bool {

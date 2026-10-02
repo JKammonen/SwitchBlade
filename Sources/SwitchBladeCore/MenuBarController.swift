@@ -222,7 +222,9 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: L10n.tr(.menuQuit), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        // The agent can own activation with no visible window after dismissal.
+        // Quitting it must require an explicit menu action, never Cmd+Q.
+        let quit = NSMenuItem(title: L10n.tr(.menuQuit), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         quit.target = NSApp
         menu.addItem(quit)
 
@@ -296,8 +298,7 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(systemMenuItem(
             title: L10n.tr(.menuQuit),
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
+            action: #selector(NSApplication.terminate(_:))
         ))
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)

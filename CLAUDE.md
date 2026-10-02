@@ -142,6 +142,12 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 
 ## Common Interventions
 
+- **SwitchBlade unexpectedly quits after Cmd+Q** → the agent's status/application
+  Quit menu items intentionally have no keyboard equivalent; explicit menu Quit
+  remains available. The visible switcher still uses Cmd+Q for its selected app.
+  `isFrontmostApp` is snapshot state: after our panel takes activation, `activate`
+  and `snap` must confirm current target-app activation before skipping that
+  step. Inspect `activation_focus_restore` for actual state and outcome.
 - **Launch or repeated open shows preferences** → SwitchBlade is a quiet
   menu-bar agent (`LSUIElement`, `.accessory`). Launch and
   `applicationShouldHandleReopen` must not open settings automatically, even

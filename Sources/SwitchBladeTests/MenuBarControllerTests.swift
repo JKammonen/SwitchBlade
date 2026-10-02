@@ -11,10 +11,52 @@ enum MenuBarControllerTests {
         ("MenuBarController/statusVisibility_forcesRelevantPermissionRecovery", statusVisibilityForcesRecovery),
         ("MenuBarController/permissionRecovery_routesExactMenuSelection", permissionRecoveryRoutesExactSelection),
         ("MenuBarController/mainMenu_hasConventionalLocalizedSections", mainMenuHasConventionalLocalizedSections),
+        ("MenuBarController/quit_hasNoKeyboardEquivalent", quitHasNoKeyboardEquivalent),
         ("MenuBarController/settingsFrame_clampsSizeAndOriginToVisibleScreen", settingsFrameClampsToVisibleScreen),
         ("MenuBarController/settingsFrame_handlesTinyVisibleScreen", settingsFrameHandlesTinyScreen),
         ("MenuBarController/settingsConstruction_staysHiddenAndOutOfDock", settingsConstructionStaysHidden)
     ]
+
+    @MainActor static func quitHasNoKeyboardEquivalent() throws {
+        let app = NSApplication.shared
+        let originalMenu = app.mainMenu
+        let originalServicesMenu = app.servicesMenu
+        let originalWindowsMenu = app.windowsMenu
+        let originalHelpMenu = app.helpMenu
+        defer {
+            app.mainMenu = originalMenu
+            app.servicesMenu = originalServicesMenu
+            app.windowsMenu = originalWindowsMenu
+            app.helpMenu = originalHelpMenu
+        }
+        let controller = MenuBarController()
+        controller.installApplicationMainMenu()
+        guard let menu = app.mainMenu,
+              let appMenu = menu.items.first?.submenu,
+              let quit = appMenu.items.first(where: { $0.action == #selector(NSApplication.terminate(_:)) }) else {
+            throw TestFailure(message: "explicit Quit action must remain available", file: #filePath, line: #line)
+        }
+        // Substitute a harmless receiver before dispatching the real AppKit menu.
+        let receiver = QuitReceiver()
+        quit.target = receiver
+        quit.action = #selector(QuitReceiver.quit(_:))
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                                           timestamp: 0, windowNumber: 0, context: nil,
+                                           characters: "q", charactersIgnoringModifiers: "q",
+                                           isARepeat: false, keyCode: 12) else {
+            throw TestFailure(message: "could not create Cmd+Q event", file: #filePath, line: #line)
+        }
+        try expect(!menu.performKeyEquivalent(with: event), "Cmd+Q must never invoke the agent's Quit menu item")
+        try expectEqual(receiver.calls, 0)
+        try expectEqual(quit.keyEquivalent, "")
+        appMenu.performActionForItem(at: appMenu.index(of: quit))
+        try expectEqual(receiver.calls, 1, "explicit menu Quit must still dispatch")
+    }
+
+    @MainActor private final class QuitReceiver: NSObject {
+        var calls = 0
+        @objc func quit(_ sender: Any?) { calls += 1 }
+    }
 
     @MainActor static func settingsConstructionStaysHidden() throws {
         let controller = MenuBarController()

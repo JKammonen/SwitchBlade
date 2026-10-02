@@ -104,7 +104,7 @@ enum PartialActivationTests {
         for confirmedActive in [false, true] {
             let activator = WindowActivator(
                 raiseWindowOverride: { _ in false },
-                activateApplicationOverride: { _ in preconditionFailure("same-app selection must not activate all windows") },
+                activateApplicationOverride: { _ in false },
                 isApplicationActiveOverride: { _ in confirmedActive }
             )
             try await visibleOutcome(activator: activator, targetIsFrontmost: true,
