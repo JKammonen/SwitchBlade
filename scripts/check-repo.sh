@@ -55,9 +55,17 @@ fi
     --all-canaries \
     --defer-runtime-proofs
 
-if rg -n 'title=.*privacy: \.public|item\.title.*privacy: \.public|displayName.*privacy: \.public|appName.*privacy: \.public|bundleIdentifier.*privacy: \.public|appIdentity.*privacy: \.public' Sources/SwitchBladeCore; then
+# grep, not rg: rg is not installed in a plain shell, and a missing scanner
+# must fail this gate instead of reading as "no match" (exit 1 only).
+if grep -rnE 'title=.*privacy: \.public|item\.title.*privacy: \.public|displayName.*privacy: \.public|appName.*privacy: \.public|bundleIdentifier.*privacy: \.public|appIdentity.*privacy: \.public' Sources/SwitchBladeCore; then
     echo "ERROR: sensitive window/process display text is logged as public." >&2
     exit 1
+else
+    scan_status=$?
+    if [[ "$scan_status" -ne 1 ]]; then
+        echo "ERROR: privacy log scan failed (grep exit $scan_status)." >&2
+        exit 1
+    fi
 fi
 
 zsh scripts/test-signing-safety.sh

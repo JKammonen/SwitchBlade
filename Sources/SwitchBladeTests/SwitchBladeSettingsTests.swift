@@ -3,6 +3,7 @@
 enum SwitchBladeSettingsTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("Settings/launchAtLogin_disableRemovesPendingApprovalRegistration", launchAtLoginDisableRemovesPendingApproval),
         ("Settings/hiddenApps_normalizesCommaSemicolonAndNewline", hiddenApps_normalizesTokens),
         ("Settings/hiddenApps_equalsPrefixProducesExactToken", hiddenApps_equalsPrefixProducesExactToken),
         ("Settings/hiddenApps_equalsWithEmptyBodyIsDropped", hiddenApps_equalsWithEmptyBodyIsDropped),
@@ -24,6 +25,15 @@ enum SwitchBladeSettingsTests {
         ("Settings/windowScope_mirrorsThreadSafeFilterState", windowScope_mirrorsFilterState),
         ("Settings/performanceLogging_mirrorsThreadSafeState", performanceLogging_mirrorsState)
     ]
+
+    /// A login item that waits for approval is still registered; turning the
+    /// setting off must unregister it, not only an already-enabled one.
+    @MainActor static func launchAtLoginDisableRemovesPendingApproval() throws {
+        try expect(LaunchAtLoginController.registrationNeedsRemoval(.enabled))
+        try expect(LaunchAtLoginController.registrationNeedsRemoval(.requiresApproval))
+        try expect(!LaunchAtLoginController.registrationNeedsRemoval(.disabled))
+        try expect(!LaunchAtLoginController.registrationNeedsRemoval(.unavailable))
+    }
 
     @MainActor static func hiddenApps_normalizesTokens() async throws {
         let tokens = SwitchBladeSettings.normalizedHiddenAppTokens(

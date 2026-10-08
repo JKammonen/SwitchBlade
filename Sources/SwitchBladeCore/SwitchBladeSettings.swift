@@ -639,7 +639,7 @@ struct LaunchAtLoginController: @unchecked Sendable {
                     if SMAppService.mainApp.status != .enabled {
                         try SMAppService.mainApp.register()
                     }
-                } else if SMAppService.mainApp.status == .enabled {
+                } else if registrationNeedsRemoval(status(from: SMAppService.mainApp.status)) {
                     try SMAppService.mainApp.unregister()
                 }
                 return .success(status(from: SMAppService.mainApp.status))
@@ -648,6 +648,13 @@ struct LaunchAtLoginController: @unchecked Sendable {
             }
         }
     )
+
+    /// `requiresApproval` means the login item is registered and only waits
+    /// for the user's approval, so turning the setting off must unregister it
+    /// too; otherwise a later approval would start SwitchBlade at login.
+    static func registrationNeedsRemoval(_ status: LaunchAtLoginStatus) -> Bool {
+        status == .enabled || status == .requiresApproval
+    }
 
     @available(macOS 13.0, *)
     private static func status(from status: SMAppService.Status) -> LaunchAtLoginStatus {

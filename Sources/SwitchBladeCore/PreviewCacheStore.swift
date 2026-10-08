@@ -81,7 +81,12 @@ final class PreviewCacheStore {
     /// for ~100 ms. Window IDs are stable for the lifetime of the window in
     /// macOS, so there's no risk of showing the wrong window's image.
     func hydrated(_ item: WindowItem, liveItems: [WindowItem]) -> WindowItem {
-        guard !item.isTitleRedacted, !item.isApplicationFallback else {
+        // A visible non-capturable window (sharingState 0, allowed only for
+        // Teams) must not show pixels captured while it was still shareable.
+        // Minimized rows are never live-capturable; their privacy gate is the
+        // title redaction above, and retained previews stay valid for them.
+        guard !item.isTitleRedacted, !item.isApplicationFallback,
+              item.canCapturePreview || item.isMinimized else {
             return item.withPreview(nil)
         }
         if let cached = byID[item.windowID] {

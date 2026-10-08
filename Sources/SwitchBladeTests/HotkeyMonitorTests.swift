@@ -19,8 +19,49 @@ enum HotkeyMonitorTests {
         ("HotkeyMonitor/hotkeyDirection_rejectsSupersetModifiers", hotkeyDirectionRejectsSupersetModifiers),
         ("HotkeyMonitor/machDelta_clampsFutureTimestamp", machDeltaClampsFutureTimestamp),
         ("HotkeyMonitor/passthroughReason_reportsSupersetModifiersOnly", passthroughReasonReportsSupersetModifiersOnly),
-        ("HotkeyMonitor/secureInputProbe_throttlesToModifierDownInterval", secureInputProbeThrottlesToModifierDownInterval)
+        ("HotkeyMonitor/secureInputProbe_throttlesToModifierDownInterval", secureInputProbeThrottlesToModifierDownInterval),
+        ("HotkeyMonitor/doubleTap_firesWithCapsLockOn", doubleTapFiresWithCapsLockOn),
+        ("HotkeyMonitor/doubleTap_rejectsCompanionModifier", doubleTapRejectsCompanionModifier)
     ]
+
+    /// Caps Lock is a lock state, not a companion modifier: while it is on,
+    /// every flagsChanged event carries it, and the gesture must still work.
+    @MainActor static func doubleTapFiresWithCapsLockOn() throws {
+        try expectEqual(doubleTapCount(pressFlags: [.command, .capsLock], releaseFlags: [.capsLock]), 1)
+    }
+
+    @MainActor static func doubleTapRejectsCompanionModifier() throws {
+        try expectEqual(doubleTapCount(pressFlags: [.command, .shift], releaseFlags: [.shift]), 0)
+    }
+
+    @MainActor private static func doubleTapCount(
+        pressFlags: NSEvent.ModifierFlags,
+        releaseFlags: NSEvent.ModifierFlags
+    ) -> Int {
+        let settings = SwitchBladeSettings.shared
+        let oldEnabled = settings.doubleModifierSwitchEnabled
+        let oldModifier = settings.doubleModifier
+        settings.doubleModifierSwitchEnabled = true
+        settings.doubleModifier = .command
+        defer {
+            settings.doubleModifierSwitchEnabled = oldEnabled
+            settings.doubleModifier = oldModifier
+        }
+
+        let monitor = HotkeyMonitor()
+        var doubleTaps = 0
+        monitor.shouldTrackModifierRelease = { false }
+        monitor.onModifierDoubleTap = { doubleTaps += 1 }
+        let start = Date.timeIntervalSinceReferenceDate
+        for (offset, flags) in [(0.00, pressFlags), (0.05, releaseFlags), (0.10, pressFlags), (0.15, releaseFlags)] {
+            monitor.handleModifierFlagsChangedForTesting(
+                flags: flags,
+                timestamp: start + offset,
+                shouldHandleConfiguredRelease: false
+            )
+        }
+        return doubleTaps
+    }
 
     @MainActor static func commandReleaseFiresOnTransition() throws {
         let settings = SwitchBladeSettings.shared

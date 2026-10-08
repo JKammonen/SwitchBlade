@@ -10,7 +10,8 @@ enum PartialActivationTests {
         ("PartialActivation/resolvingReleaseStaysHiddenAfterAppOnlyActivation", resolvingRelease),
         ("PartialActivation/frontmostAppRequiresActiveConfirmation", frontmostAppRequiresConfirmation),
         ("PartialActivation/failedAppActivationKeepsRecoveryPanel", failedAppActivation),
-        ("PartialActivation/newerExternalActivationSurvivesAppOnlyCompletion", newerExternalActivation)
+        ("PartialActivation/newerExternalActivationSurvivesAppOnlyCompletion", newerExternalActivation),
+        ("PartialActivation/appOnlyKeepsBackgroundedWindowNextInLine", appOnlyKeepsBackgroundedWindowNext)
     ]
 
     private enum Phase { case visible, prepared, resolving }
@@ -195,6 +196,54 @@ enum PartialActivationTests {
         try expectEqual(tracker.recentWindowIDs, ranksBeforeCompletion)
         store.requestCycle(forward: true)
         try expectEqual(store.items.first?.id, 3, "partial completion must preserve newer external focus")
+    }
+
+    /// App-only success leaves the target app frontmost without an exact
+    /// window. The window the user just left must still be the next Cmd+Tab
+    /// target, ahead of an older window from a third app.
+    @MainActor private static func appOnlyKeepsBackgroundedWindowNext() async throws {
+        let catalog = MockWindowCatalog()
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let activator = WindowActivator(
+            raiseWindowOverride: { _ in false },
+            activateApplicationOverride: { _ in true }
+        )
+        let store = SwitcherStore(
+            catalog: catalog, activator: activator, permissionService: MockPermissionService(),
+            userDefaults: makeIsolatedUserDefaults(), mruTracker: tracker,
+            focusedRankUpgradeDelayNanoseconds: 5_000_000_000,
+            workspaceNotificationCenter: NotificationCenter(),
+            initialFrontmostAppPID: 100, switchBladePID: 999
+        )
+        defer { store.cancel() }
+        let left = makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "fixture.left")
+        let target = makeItem(id: 2, pid: 200, bundleIdentifier: "fixture.target")
+        let older = makeItem(id: 5, pid: 500, bundleIdentifier: "fixture.older")
+        for item in [target, older, left] { tracker.trackFocusedWindowActivation(item) }
+        try expectEqual(tracker.recentWindowIDs, [1, 5, 2])
+        catalog.visibleItems = [left, older, target]
+        catalog.focusedWindowItemsByPID[100] = left
+        let completed = LockedValue(false)
+        let previousObserver = PerformanceDiagnostics.testObserver.value
+        PerformanceDiagnostics.testObserver.value = { event, fields in
+            previousObserver?(event, fields)
+            if event == "selection_action_dispatch" || event == "selection_action_failed" { completed.value = true }
+        }
+        defer { PerformanceDiagnostics.testObserver.value = previousObserver }
+
+        await openSwitcher(store)
+        store.selectedID = 2
+        store.commitSelection()
+        try await waitUntil { completed.value }
+        try expect(!store.isVisible, "app-only success must dismiss")
+        try expect(!tracker.recentWindowIDs.prefix(1).contains(2),
+                   "unverified selected window must not gain exact rank")
+
+        catalog.visibleItems = [left.withFrontmostState(false), older, target.withFrontmostState(true)]
+        await openSwitcher(store)
+        try expectEqual(store.items.map(\.id), [2, 1, 5],
+                        "backgrounded window must stay directly behind the newly frontmost app")
+        try expectEqual(store.selectedID, 1)
     }
 
     @MainActor private static func waitUntil(_ predicate: () -> Bool) async throws {

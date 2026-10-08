@@ -516,7 +516,9 @@ final class HotkeyMonitor {
         }
         let isHotkeyModifierDown = flags.contains(hotkeyModifier)
         let isConfiguredModifierDown = flags.contains(doubleTapModifier)
-        let companionFlags = flags.subtracting(doubleTapModifier)
+        // Caps Lock is a lock state carried by every event while it is on,
+        // not a held companion key; it must not disable the double tap.
+        let companionFlags = flags.subtracting(doubleTapModifier).subtracting(.capsLock)
         let isBareModifierPress = isConfiguredModifierDown && companionFlags.isEmpty
 
         if isConfiguredModifierDown && !isTapModifierPressed {

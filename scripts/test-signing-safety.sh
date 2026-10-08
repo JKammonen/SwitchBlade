@@ -390,19 +390,36 @@ if ! SWITCHBLADE_SIGNING_LOCK_TIMEOUT_SECONDS=1 \
     fail "lock was not released after the inherited child descriptor closed"
 fi
 
-if rg -n 'list-keychains[^\n]*-s' \
+# Static scans use grep (rg is not installed in a plain shell). Exit 1 means
+# "no match"; any other non-zero status means the scan itself failed.
+scan_must_not_match() {
+    local message="$1"
+    local pattern="$2"
+    shift 2
+    local scan_status
+    if grep -nE "$pattern" "$@" >/dev/null; then
+        fail "$message"
+    else
+        scan_status=$?
+        [[ "$scan_status" -eq 1 ]] || fail "static scan failed (grep exit $scan_status): $message"
+    fi
+}
+
+scan_must_not_match "signing code still mutates a keychain search list or default keychain" \
+    '(list-keychains|default-keychain).*-s' \
     "$repo_root/scripts/build-app.sh" \
     "$repo_root/scripts/remove-login-codesign-identity.sh" \
     "$repo_root/scripts/setup-local-codesign.sh" \
-    "$repo_root/scripts/signing-safety.sh" >/dev/null; then
-    fail "signing code still mutates a keychain search list"
-fi
+    "$repo_root/scripts/signing-safety.sh"
 
-if rg -n 'verify-cert' \
+scan_must_not_match "signing helpers still mutate the keychain search list or default keychain" \
+    'SecKeychainSet(SearchList|Default|DomainSearchList|DomainDefault)' \
+    "$repo_root"/scripts/*.c
+
+scan_must_not_match "codesign trust checks bypass the centralized fail-closed verifier" \
+    'verify-cert' \
     "$repo_root/scripts/setup-local-codesign.sh" \
-    "$repo_root/scripts/remove-login-codesign-identity.sh" >/dev/null; then
-    fail "codesign trust checks bypass the centralized fail-closed verifier"
-fi
+    "$repo_root/scripts/remove-login-codesign-identity.sh"
 
 policy_failure_security="$tmp_dir/policy-failure-security"
 cat > "$policy_failure_security" <<'EOF'

@@ -8,6 +8,10 @@ bash scripts/build-app.sh             # builds, signs with local cert, emits dis
 swift run SwitchBladeTests            # runs the in-process test suite, exit non-zero on failure
 ```
 
+On this Mac the CLT default MacOSX27 SDK lacks the SwiftUIMacros plugin (`@State`
+fails to expand). Prefix builds and test runs with
+`SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` until that is fixed.
+
 For user-tested behavior changes, `swift build` is not enough. Rebuild/sign with
 `bash scripts/build-app.sh`, quit any old running SwitchBlade process, and launch the
 rebuilt `dist/SwitchBlade.app`; `.build/debug/SwitchBlade` does not update the app
@@ -54,7 +58,7 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 
 | Module | Role |
 |--------|------|
-| `SwitcherStore` | `@MainActor ObservableObject`. Holds `items`, `selectedID`, `isVisible`. Orchestrates open/commit, including the prepared-hidden grace window for quick Cmd+Tab release. |
+| `SwitcherStore` | `@MainActor ObservableObject`. Holds `items`, `selectedID`, `isVisible`. Orchestrates open/commit. The prepared-hidden phase still exists, but the production panel-show delay is 0 since `99a7db7`, so the shipped app shows the panel immediately; delayed-phase tests inject a delay. |
 | `WindowCatalog` | `Sendable`. Window enumeration + ScreenCaptureKit capture. Owns `SCContentCache` actor. |
 | `SCContentCache` | Actor. Caches `SCShareableContent` with staleness tracking (5 s threshold). |
 | `WindowActivator` | `Sendable`. Activate / close / quit / hide. Selected-window activate/snap target the AX window first, then activate the app so the target can become frontmost. |
@@ -249,10 +253,21 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   unverified selected window or pin its cached sibling order. The next open
   rebases a single-window cache or refreshes multi-window order. A frontmost
   target with failed AX targeting requires an actual active-app check before
-  this partial result; cached frontmost flags alone are insufficient. Genuine
+  this partial result; cached frontmost flags alone are insufficient. A
+  cross-app `applicationOnly` result records the coarse app hint that an
+  external activation would (plus the delayed AX-focus upgrade), so the
+  backgrounded window stays the next Cmd+Tab target. Genuine
   activation failures retain the recovery panel; failed snaps remain failures.
   `PartialActivationTests` covers visible/prepared/resolving release, history,
-  exact-window MRU preservation, fresh sibling order and newer external focus.
+  exact-window MRU preservation, backgrounded-window order, fresh sibling order
+  and newer external focus.
+- **Cmd+Tab does nothing, or release activates nothing** → look for
+  `selection_action_refused`. The single window-action lane stays busy while
+  detached AX work finishes, even after `hide()` dropped the caller task. The
+  store mirrors the lane in `isWindowActionLaneBusy`; a refused selection is
+  handled like a failure (hidden open becomes the visible recovery panel) and
+  must never leave the open phase `resolving`, which used to swallow every later
+  Cmd+Tab until a Space change. Regressions: `WindowActionLane/*`.
 - **Window-targeted self-activation changes a sibling's rank** → capture the
   backgrounded app's exact AX focus before SwitchBlade raises/focuses the target.
   The later app-activation notification must not rescan post-transition AX focus

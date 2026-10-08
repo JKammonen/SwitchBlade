@@ -110,6 +110,10 @@ final class SwitcherStore: ObservableObject {
     private var windowActionID: UUID?
     private var windowActionGeneration = 0
     private let windowActionCoordinator = WindowActionCoordinator()
+    /// Main-actor mirror of the coordinator lane. `hide()` drops
+    /// `windowActionTask` while detached AX work still owns the lane, so the
+    /// task handle alone cannot tell whether a new action would be accepted.
+    private var isWindowActionLaneBusy = false
     private var settingsCancellables: Set<AnyCancellable> = []
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
@@ -1104,6 +1108,12 @@ final class SwitcherStore: ObservableObject {
     private func runActivatorOperation(
         _ operation: @escaping @Sendable () -> Bool
     ) async -> Bool {
+        guard !isWindowActionLaneBusy else {
+            Logger.switcher.notice("Window action ignored while another detached action is still running")
+            return false
+        }
+        isWindowActionLaneBusy = true
+        defer { isWindowActionLaneBusy = false }
         guard let result = await windowActionCoordinator.run(operation: operation) else {
             Logger.switcher.notice("Window action ignored while another detached action is still running")
             return false
@@ -1237,8 +1247,11 @@ final class SwitcherStore: ObservableObject {
                 )
             }
         )
-        if !started, let activationRequestID {
-            cancelActivationRequest(pid: item.pid, id: activationRequestID)
+        if !started {
+            if let activationRequestID {
+                cancelActivationRequest(pid: item.pid, id: activationRequestID)
+            }
+            recoverFromRefusedSelectionAction(item: item, liveItems: liveItems, actionName: actionName, source: actionSource)
         }
         if started, dismissBeforeCompletion {
             hide(cancelWindowAction: false, scheduleWarmups: false)
@@ -1246,27 +1259,64 @@ final class SwitcherStore: ObservableObject {
         return started
     }
 
+    /// A refused action never ran, so it is handled like a failed one: a
+    /// hidden open (released modifier, resolving or prepared) becomes the
+    /// visible recovery panel instead of staying in an open phase that no
+    /// later Cmd+Tab can leave. A visible panel simply stays for a retry.
+    private func recoverFromRefusedSelectionAction(
+        item: WindowItem,
+        liveItems: [WindowItem],
+        actionName: String,
+        source: String
+    ) {
+        Logger.switcher.notice(
+            "Selection action refused action=\(actionName, privacy: .public) source=\(source, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); window-action lane busy"
+        )
+        PerformanceDiagnostics.record(
+            "selection_action_refused",
+            fields: [
+                "action": .string(actionName),
+                "pid": .int(Int(item.pid)),
+                "source": .string(source),
+                "window_id": .int(Int(item.id))
+            ]
+        )
+        guard !isVisible else { return }
+        if case .resolving = phase {
+            applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
+            enterPreviewHidden(stale: false)
+        }
+        showPreparedPanelIfNeeded()
+    }
+
     @discardableResult
     private func startWindowAction<Result: Sendable>(
         operation: @escaping @Sendable () -> Result,
         completion: @escaping @MainActor (Result) -> Void
     ) -> Bool {
-        guard windowActionTask == nil else {
+        guard windowActionTask == nil, !isWindowActionLaneBusy else {
             Logger.switcher.notice("Window action ignored while another action is in flight")
             return false
         }
         let generation = windowActionGeneration
         let actionID = UUID()
         windowActionID = actionID
+        isWindowActionLaneBusy = true
         windowActionTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await self.windowActionCoordinator.run(operation: operation)
+            // The lane is free once detached work returns, even when hide()
+            // already cancelled and detached this caller task.
+            self.isWindowActionLaneBusy = false
             if self.windowActionID == actionID {
                 self.windowActionTask = nil
                 self.windowActionID = nil
             }
-            guard let result,
-                  !Task.isCancelled,
+            guard let result else {
+                Logger.switcher.error("Window action lane refused an action the store believed was free")
+                return
+            }
+            guard !Task.isCancelled,
                   self.windowActionGeneration == generation else { return }
             completion(result)
         }
@@ -1340,6 +1390,16 @@ final class SwitcherStore: ObservableObject {
                 in: liveItems,
                 context: "selection-\(actionName)-source=\(actionSource)-stale=\(currentShowingStale)"
             )
+        } else if result == .applicationOnly, selectionStillOwnsFocus,
+                  sourceAppPID != item.pid, item.pid != switchBladePID {
+            // A different app is now frontmost but its exact window is
+            // unverified. Record the same coarse app hint an external
+            // activation gets, so the backgrounded window below lands directly
+            // behind it, and let the delayed AX probe upgrade the hint to the
+            // window that actually has focus. The notification path does not
+            // record this switch: its pending self-activation carries a window ID.
+            mruTracker.trackSystemActivation(item.pid, in: liveItems, bundleIdentifier: item.bundleIdentifier)
+            scheduleFocusedWindowRankUpgrade(pid: item.pid)
         }
         if let backgroundedFocusBeforeActivation,
            !backgroundedFocusBeforeActivation.isApplicationFallback {

@@ -36,7 +36,8 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/whiteCapture_acceptedOnSecondConsecutiveSighting", whiteCaptureAcceptedOnSecondSighting),
         ("PreviewCache/whiteCapture_replacesOldPreviewOnSecondSighting", whiteCaptureReplacesOldPreviewOnSecondSighting),
         ("PreviewCache/whiteCapture_deferralResetsAfterGoodCapture", whiteDeferralResetsAfterGoodCapture),
-        ("PreviewCache/invalidate_dropsCachedPreviewAcrossAllKeys", invalidateDropsCachedPreviewAcrossAllKeys)
+        ("PreviewCache/invalidate_dropsCachedPreviewAcrossAllKeys", invalidateDropsCachedPreviewAcrossAllKeys),
+        ("PreviewCache/nonCapturableWindowDoesNotHydrateEarlierPreview", nonCapturableWindowDoesNotHydrateEarlierPreview)
     ]
 
     @MainActor static func hydrated_noMatch() throws {
@@ -54,6 +55,22 @@ enum PreviewCacheStoreTests {
 
         let result = store.hydrated(item, liveItems: [item])
         try expect(result.preview === img)
+    }
+
+    /// A window that was shareable when captured can later switch to
+    /// sharingState 0 (allowed for Teams). Its old pixels must not stay visible.
+    @MainActor static func nonCapturableWindowDoesNotHydrateEarlierPreview() throws {
+        let store = PreviewCacheStore()
+        let shareable = makeItem(id: 1, appName: "Microsoft Teams", bundleIdentifier: "com.microsoft.teams2")
+        let image = NSImage(size: .init(width: 4, height: 4))
+        store.record([1: image], liveItems: [shareable])
+        try expect(store.hydrated(shareable, liveItems: [shareable]).preview === image)
+
+        let privateNow = makeItem(
+            id: 1, appName: "Microsoft Teams", canCapturePreview: false,
+            bundleIdentifier: "com.microsoft.teams2"
+        )
+        try expect(store.hydrated(privateNow, liveItems: [privateNow]).preview == nil)
     }
 
     @MainActor static func duplicateSignatureCannotSupplyRecreatedSibling() throws {
