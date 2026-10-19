@@ -27,6 +27,9 @@ enum WindowEligibilityPolicyTests {
         ("HostedWindowSurface/keepsUniqueHelperSurface", keepsUniqueHelperSurface),
         ("WindowLayerEligibility/acceptsOnlyNamedFloatingCandidates", acceptsOnlyNamedFloatingCandidates),
         ("WindowLayerEligibility/retainsBackgroundedPluginWithVisibleHost", retainsBackgroundedPluginWithVisibleHost),
+        ("WindowLayerEligibility/acceptsBelowNormalStandardCandidate", acceptsBelowNormalStandardCandidate),
+        ("AXWindowEligibility/belowNormalRequiresFreshStandardMatch", belowNormalRequiresFreshStandardMatch),
+        ("AXWindowEligibility/belowNormalRejectsAmbiguousMatches", belowNormalRejectsAmbiguousMatches),
         ("AXWindowEligibility/filtersUnmatchedAuxiliarySurface", filtersUnmatchedAuxiliarySurface),
         ("AXWindowEligibility/filtersDuplicateSystemDialogSurfaces", filtersDuplicateSystemDialogSurfaces),
         ("AXWindowEligibility/keepsMatchedUntitledWindow", keepsMatchedUntitledWindow),
@@ -585,6 +588,54 @@ enum WindowEligibilityPolicyTests {
         try expect(!WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: normalLayer))
         try expect(WindowLayerEligibilityPolicy.canCaptureState(layer: floatingLayer))
         try expect(!WindowLayerEligibilityPolicy.canCaptureState(layer: 8))
+    }
+
+    @MainActor static func acceptsBelowNormalStandardCandidate() throws {
+        // Live Claude main window: layer -1, onscreen, AXStandardWindow.
+        try expect(WindowLayerEligibilityPolicy.canConsider(layer: -1, title: ""))
+        try expect(WindowLayerEligibilityPolicy.canCaptureState(layer: -1))
+        try expect(!WindowLayerEligibilityPolicy.canConsider(layer: -2, title: "Desktop"))
+        try expect(!WindowLayerEligibilityPolicy.canCaptureState(layer: -2))
+        try expect(!WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
+            layer: -1, isOnScreen: false, hostHasOnScreenWindow: true
+        ))
+    }
+
+    @MainActor static func belowNormalRequiresFreshStandardMatch() throws {
+        let window = makeItem(id: 90554, pid: 32502, title: "",
+                              bounds: CGRect(x: 18, y: 105, width: 1803, height: 1228))
+        let normal = makeItem(id: 2, pid: 32502, title: "Other")
+        try expect(AXWindowEligibilityPolicy.requiresValidation(
+            [window], requiredStandardWindowIDs: [window.id]
+        ))
+        let standard = AXTopLevelWindowCandidate(title: nil, frame: window.bounds, isStandardWindow: true)
+        try expectEqual(AXWindowEligibilityPolicy.filteredItems(
+            [window], candidates: [standard], requiredStandardWindowIDs: [window.id]
+        ).map(\.id), [window.id])
+        let invalidCandidates: [[AXTopLevelWindowCandidate]?] = [
+            nil, [],
+            [AXTopLevelWindowCandidate(title: nil, frame: window.bounds, isSwitcherWindow: false)],
+            [AXTopLevelWindowCandidate(title: nil, frame: window.bounds, isFloatingWindow: true)],
+            [AXTopLevelWindowCandidate(title: nil, frame: normal.bounds, isStandardWindow: true)]
+        ]
+        for candidates in invalidCandidates {
+            try expectEqual(AXWindowEligibilityPolicy.filteredItems(
+                [normal, window], candidates: candidates,
+                trustedFloatingWindowIDs: [window.id], requiredStandardWindowIDs: [window.id]
+            ).map(\.id), [normal.id])
+        }
+    }
+
+    @MainActor static func belowNormalRejectsAmbiguousMatches() throws {
+        let first = makeItem(id: 1, pid: 100, title: "")
+        let second = makeItem(id: 2, pid: 100, title: "")
+        let candidate = AXTopLevelWindowCandidate(title: nil, frame: first.bounds, isStandardWindow: true)
+        try expectEqual(AXWindowEligibilityPolicy.filteredItems(
+            [first, second], candidates: [candidate], requiredStandardWindowIDs: [1, 2]
+        ).count, 0)
+        try expectEqual(AXWindowEligibilityPolicy.filteredItems(
+            [first], candidates: [candidate, candidate], requiredStandardWindowIDs: [1]
+        ).count, 0)
     }
 
     @MainActor static func retainsBackgroundedPluginWithVisibleHost() throws {

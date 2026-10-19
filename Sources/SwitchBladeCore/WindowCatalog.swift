@@ -718,17 +718,20 @@ struct AXTopLevelWindowCandidate: Equatable, Sendable {
     let frame: CGRect
     let isSwitcherWindow: Bool
     let isFloatingWindow: Bool
+    let isStandardWindow: Bool
 
     init(
         title: String?,
         frame: CGRect,
         isSwitcherWindow: Bool = true,
-        isFloatingWindow: Bool = false
+        isFloatingWindow: Bool = false,
+        isStandardWindow: Bool = false
     ) {
         self.title = title
         self.frame = frame
         self.isSwitcherWindow = isSwitcherWindow
         self.isFloatingWindow = isFloatingWindow
+        self.isStandardWindow = isStandardWindow
     }
 }
 
@@ -757,7 +760,7 @@ enum WindowLayerEligibilityPolicy {
     private static let floatingLayer = Int(CGWindowLevelForKey(.floatingWindow))
 
     static func canConsider(layer: Int, title: String) -> Bool {
-        if layer == normalLayer { return true }
+        if layer == normalLayer || requiresStandardAXMatch(layer: layer) { return true }
         guard layer == floatingLayer else { return false }
         return !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -766,8 +769,14 @@ enum WindowLayerEligibilityPolicy {
         layer == floatingLayer
     }
 
+    // Electron can place a real AXStandardWindow just below the normal layer.
+    // Admit only this specific layer, with fresh AX validation at enumeration.
+    static func requiresStandardAXMatch(layer: Int) -> Bool {
+        layer == normalLayer - 1
+    }
+
     static func canCaptureState(layer: Int) -> Bool {
-        layer == normalLayer || layer == floatingLayer
+        layer == normalLayer || layer == floatingLayer || requiresStandardAXMatch(layer: layer)
     }
 
     static func canIncludeInCurrentSpace(
@@ -786,9 +795,10 @@ enum AXWindowEligibilityPolicy {
     /// named and unnamed Chromium-style child surfaces are treated alike.
     static func requiresValidation(
         _ items: [WindowItem],
-        requiredFloatingWindowIDs: Set<CGWindowID> = []
+        requiredFloatingWindowIDs: Set<CGWindowID> = [],
+        requiredStandardWindowIDs: Set<CGWindowID> = []
     ) -> Bool {
-        let requiredIDs = requiredFloatingWindowIDs.intersection(items.map(\.id))
+        let requiredIDs = requiredFloatingWindowIDs.union(requiredStandardWindowIDs).intersection(items.map(\.id))
         let ordinaryItemCount = items.reduce(into: 0) { count, item in
             if !requiredIDs.contains(item.id) { count += 1 }
         }
@@ -803,7 +813,34 @@ enum AXWindowEligibilityPolicy {
         _ items: [WindowItem],
         candidates: [AXTopLevelWindowCandidate]?,
         requiredFloatingWindowIDs: Set<CGWindowID> = [],
-        trustedFloatingWindowIDs: Set<CGWindowID> = []
+        trustedFloatingWindowIDs: Set<CGWindowID> = [],
+        requiredStandardWindowIDs: Set<CGWindowID> = []
+    ) -> [WindowItem] {
+        let standardItems = items.filter { requiredStandardWindowIDs.contains($0.id) }
+        let standardCandidates = (candidates ?? []).filter { $0.isSwitcherWindow && $0.isStandardWindow }
+        // Require an unambiguous frame match in both directions. Unlike floating
+        // plugin windows, these rows never use remembered validation on AX loss.
+        let matches = standardItems.map { matchIndex(for: $0, candidates: standardCandidates) }
+        let counts = Dictionary(matches.compactMap { $0 }.map { ($0, 1) }, uniquingKeysWith: +)
+        var allowedIDs = Set<CGWindowID>(zip(standardItems, matches).compactMap { item, match in
+            guard let match, counts[match] == 1 else { return nil }
+            return item.id
+        })
+        let ordinaryAndFloating = filteredOrdinaryAndFloatingItems(
+            items.filter { !requiredStandardWindowIDs.contains($0.id) },
+            candidates: candidates,
+            requiredFloatingWindowIDs: requiredFloatingWindowIDs,
+            trustedFloatingWindowIDs: trustedFloatingWindowIDs
+        )
+        allowedIDs.formUnion(ordinaryAndFloating.map(\.id))
+        return items.filter { allowedIDs.contains($0.id) }
+    }
+
+    private static func filteredOrdinaryAndFloatingItems(
+        _ items: [WindowItem],
+        candidates: [AXTopLevelWindowCandidate]?,
+        requiredFloatingWindowIDs: Set<CGWindowID>,
+        trustedFloatingWindowIDs: Set<CGWindowID>
     ) -> [WindowItem] {
         let requiredIDs = requiredFloatingWindowIDs.intersection(items.map(\.id))
         let trustedRequiredIDs = trustedFloatingWindowIDs.intersection(requiredIDs)
@@ -1358,6 +1395,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         var rejectedApplicationPIDs = Set<pid_t>()
         var visibleWindowIDs = Set<CGWindowID>()
         var floatingWindowIDs = Set<CGWindowID>()
+        var standardWindowIDs = Set<CGWindowID>()
 
         func applicationResolution(for ownerPID: pid_t) -> WindowApplicationResolution? {
             if let cached = applicationResolutionsByPID[ownerPID] { return cached }
@@ -1458,6 +1496,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             if WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: layer) {
                 floatingWindowIDs.insert(windowID)
             }
+            if WindowLayerEligibilityPolicy.requiresStandardAXMatch(layer: layer) {
+                standardWindowIDs.insert(windowID)
+            }
             visibleWindowIDs.insert(windowID)
 
             return WindowItem(
@@ -1484,7 +1525,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
         let filteredVisibleItems = filterAuxiliaryWindowSurfaces(
             HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems),
-            requiredFloatingWindowIDs: floatingWindowIDs
+            requiredFloatingWindowIDs: floatingWindowIDs,
+            requiredStandardWindowIDs: standardWindowIDs
         )
         rememberConcreteWindows(
             filteredVisibleItems,
@@ -1533,9 +1575,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
 
     private func filterAuxiliaryWindowSurfaces(
         _ items: [WindowItem],
-        requiredFloatingWindowIDs: Set<CGWindowID>
+        requiredFloatingWindowIDs: Set<CGWindowID>,
+        requiredStandardWindowIDs: Set<CGWindowID>
     ) -> [WindowItem] {
-        let requiredIDs = requiredFloatingWindowIDs.intersection(items.map(\.id))
+        let requiredIDs = requiredFloatingWindowIDs.union(requiredStandardWindowIDs).intersection(items.map(\.id))
         guard AXIsProcessTrusted() else {
             return items.filter { !requiredIDs.contains($0.id) }
         }
@@ -1557,7 +1600,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             guard let siblings = itemsByPID[item.windowProcessIdentifier],
                   AXWindowEligibilityPolicy.requiresValidation(
                       siblings,
-                      requiredFloatingWindowIDs: requiredIDs
+                      requiredFloatingWindowIDs: requiredFloatingWindowIDs,
+                      requiredStandardWindowIDs: requiredStandardWindowIDs
                   ) else {
                 continue
             }
@@ -1584,7 +1628,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             let trustedFloatingWindowIDs: Set<CGWindowID> = isFrontmostApplication
                 ? []
                 : Set(siblings.compactMap { item in
-                    guard requiredIDs.contains(item.id),
+                    guard requiredFloatingWindowIDs.contains(item.id),
                           rememberedSignatures.contains(ValidatedFloatingWindowSignature(item)) else {
                         return nil
                     }
@@ -1597,12 +1641,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             let filtered = AXWindowEligibilityPolicy.filteredItems(
                 siblings,
                 candidates: candidates,
-                requiredFloatingWindowIDs: requiredIDs,
-                trustedFloatingWindowIDs: trustedFloatingWindowIDs
+                requiredFloatingWindowIDs: requiredFloatingWindowIDs,
+                trustedFloatingWindowIDs: trustedFloatingWindowIDs,
+                requiredStandardWindowIDs: requiredStandardWindowIDs
             )
             if isFrontmostApplication {
                 let validatedSignatures = Set(filtered.compactMap { item in
-                    requiredIDs.contains(item.id)
+                    requiredFloatingWindowIDs.contains(item.id)
                         ? ValidatedFloatingWindowSignature(item)
                         : nil
                 })
@@ -1701,7 +1746,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             title: title,
             frame: CGRect(origin: point, size: size),
             isSwitcherWindow: subrole != (kAXSystemDialogSubrole as String),
-            isFloatingWindow: subrole == (kAXFloatingWindowSubrole as String)
+            isFloatingWindow: subrole == (kAXFloatingWindowSubrole as String),
+            isStandardWindow: subrole == (kAXStandardWindowSubrole as String)
         )
     }
 

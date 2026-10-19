@@ -202,6 +202,16 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `selection_action_dispatch` / `previous_switch_dispatch`, `panel_show`,
   `capture_previews`, `activation_ax_*`, `activation_app_activate`, and
   `activation_frontmost_observed`; app activation alone is not enough evidence.
+- **A visible standard window is missing (for example Claude)** → inspect the live
+  CG window layer as well as AX subrole/frame. Electron can expose a real main
+  window at normal layer minus one (`-1`). `WindowLayerEligibilityPolicy` admits
+  that exact layer for enumeration/capture, but listing requires a fresh,
+  unambiguous AXStandardWindow frame match within the existing AX scan budget.
+  Missing, ambiguous or nonstandard AX evidence excludes it; floating-window
+  remembered validation cannot authorize it. Other negative layers remain
+  excluded, and current-Space membership and sharing/privacy rules still apply.
+  Regressions: `WindowLayerEligibility/acceptsBelowNormalStandardCandidate` and
+  `AXWindowEligibility/belowNormal*`.
 - **Window scope feels wrong** → Settings → Behavior → Window scope. Choices are
   current Space, all Spaces, and current app.
 - **Windows land in the wrong order / at the tail** → with performance logging on
