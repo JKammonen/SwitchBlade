@@ -84,6 +84,13 @@ final class MockWindowCatalog: WindowSnapshotProviding, @unchecked Sendable {
         return snapshot
     }
 
+    var snapshotFocusedWindow: WindowItem?
+
+    func snapshotVisibleOnlyWithFocus() -> VisibleWindowSnapshot {
+        let focus = snapshotFocusedWindow
+        return VisibleWindowSnapshot(items: snapshotVisibleOnly(), focusedWindow: focus)
+    }
+
     func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> MinimizedWindowSnapshot {
         withLock { _minimizedSnapshotStartCount += 1 }
         var remainingDelay = minimizedSnapshotDelayNanoseconds

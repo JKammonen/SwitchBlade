@@ -34,11 +34,19 @@ struct MinimizedWindowSnapshot {
     }
 }
 
+/// Carries focus provenance with the exact membership scan that observed it.
+/// A cached first row is not evidence of the window focused before panel show.
+struct VisibleWindowSnapshot {
+    let items: [WindowItem]
+    let focusedWindow: WindowItem?
+}
+
 /// Window-listing dependency for SwitcherStore. Concrete WindowCatalog conforms;
 /// tests inject a mock to drive snapshot contents without touching real CGWindow
 /// or ScreenCaptureKit APIs.
 protocol WindowSnapshotProviding: Sendable {
     func snapshotVisibleOnly() -> [WindowItem]
+    func snapshotVisibleOnlyWithFocus() -> VisibleWindowSnapshot
     func snapshotMinimized(cancellation: CooperativeCancellationToken) async -> MinimizedWindowSnapshot
     /// Resolves the AX-focused window of `pid` against a fresh visible
     /// snapshot. nil when AX fails or the match is ambiguous.
@@ -59,6 +67,12 @@ protocol WindowSnapshotProviding: Sendable {
     /// Drops cached ScreenCaptureKit content after lifecycle events that can
     /// make SCWindow references stale (sleep/wake, display reconfiguration).
     func invalidateContentCache(reason: String) async
+}
+
+extension WindowSnapshotProviding {
+    func snapshotVisibleOnlyWithFocus() -> VisibleWindowSnapshot {
+        VisibleWindowSnapshot(items: snapshotVisibleOnly(), focusedWindow: nil)
+    }
 }
 
 /// Keeps confirmed app focus separate from verified selected-window focus.

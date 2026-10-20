@@ -1298,10 +1298,14 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// windows, bounded by the 0.25 s messaging timeout and reported as
     /// `ax_ms` in the `frontmost_focus_normalize` metric.
     func snapshotVisibleOnly() -> [WindowItem] {
+        snapshotVisibleOnlyWithFocus().items
+    }
+
+    func snapshotVisibleOnlyWithFocus() -> VisibleWindowSnapshot {
         PerformanceDiagnostics.$correlationID.withValue(PerformanceDiagnostics.correlationID ?? UUID().uuidString) {
-            let items = snapshotInternal(includeMinimized: false).visible
-            PerformanceDiagnostics.recordWindowOrder("catalog_visible_order", items: items, fields: [:])
-            return items
+            let result = snapshotInternal(includeMinimized: false)
+            PerformanceDiagnostics.recordWindowOrder("catalog_visible_order", items: result.visible, fields: [:])
+            return VisibleWindowSnapshot(items: result.visible, focusedWindow: result.focusedWindow)
         }
     }
 
@@ -1345,9 +1349,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private struct SnapshotResult {
         let visible: [WindowItem]
         let minimized: [WindowItem]
+        var focusedWindow: WindowItem? = nil
     }
 
-    private func snapshotInternal(includeMinimized: Bool) -> SnapshotResult {
+    private func snapshotInternal(includeMinimized: Bool, windowOwnerPID: pid_t? = nil) -> SnapshotResult {
         // .optionOnScreenOnly when restricting to current Space — macOS only
         // returns windows it considers on-screen, which excludes other Spaces.
         // .optionAll lets windows from other Spaces through.
@@ -1355,11 +1360,14 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let listOptions: CGWindowListOption = windowScope == .currentSpace
             ? [.optionOnScreenOnly, .excludeDesktopElements]
             : [.optionAll, .excludeDesktopElements]
-        guard let primaryRawList = CGWindowListCopyWindowInfo(
+        guard let rawPrimaryList = CGWindowListCopyWindowInfo(
             listOptions,
             kCGNullWindowID
         ) as? [[String: Any]] else {
             return SnapshotResult(visible: [], minimized: [])
+        }
+        let primaryRawList = rawPrimaryList.filter {
+            windowOwnerPID == nil || ($0[kCGWindowOwnerPID as String] as? Int32) == windowOwnerPID
         }
         var rawList = primaryRawList
         if windowScope == .currentSpace,
@@ -1371,6 +1379,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 $0[kCGWindowNumber as String] as? UInt32
             })
             for entry in allWindows {
+                guard windowOwnerPID == nil || (entry[kCGWindowOwnerPID as String] as? Int32) == windowOwnerPID else { continue }
                 guard let windowID = entry[kCGWindowNumber as String] as? UInt32,
                       !includedWindowIDs.contains(windowID),
                       let layer = entry[kCGWindowLayer as String] as? Int else {
@@ -1386,7 +1395,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             }
         }
 
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let frontmostPID = windowOwnerPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
         let runningApplicationSnapshot = Self.runningApplicationSnapshot()
         let runningApplications = runningApplicationSnapshot.applications
         let runningApplicationsByPID = runningApplicationSnapshot.applicationsByProcessIdentifier
@@ -1526,19 +1535,22 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let filteredVisibleItems = filterAuxiliaryWindowSurfaces(
             HostedWindowSurfacePolicy.filteringMirroredHostedSurfaces(visibleItems),
             requiredFloatingWindowIDs: floatingWindowIDs,
-            requiredStandardWindowIDs: standardWindowIDs
+            requiredStandardWindowIDs: standardWindowIDs,
+            updateValidationCache: windowOwnerPID == nil
         )
-        rememberConcreteWindows(
-            filteredVisibleItems,
-            runningApplicationsByPID: runningApplicationsByPID
-        )
-        let applicationFallbacks = applicationFallbackItems(
+        if windowOwnerPID == nil {
+            rememberConcreteWindows(
+                filteredVisibleItems,
+                runningApplicationsByPID: runningApplicationsByPID
+            )
+        }
+        let applicationFallbacks = windowOwnerPID == nil ? applicationFallbackItems(
             representedApplicationPIDs: Set(filteredVisibleItems.map(\.pid)),
             runningApplications: runningApplications,
             frontmostPID: frontmostPID,
             scope: windowScope,
             hiddenAppTokens: HiddenAppFilterState.normalizedTokens
-        )
+        ) : []
         let minimizedSnapshot = includeMinimized
             ? minimizedItems(
                 excluding: visibleWindowIDs,
@@ -1561,22 +1573,23 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 "application_fallbacks": .int(applicationFallbacks.count),
                 "concrete_visible": .int(filteredVisibleItems.count),
                 "minimized": .int(minimized.count),
-                "scope": .string(windowScope.rawValue)
+                "scope": .string(windowScope.rawValue),
+                "focus_only": .bool(windowOwnerPID != nil)
             ]
         )
-        return SnapshotResult(
-            visible: normalizeFrontmostWindowOrder(
-                visibleAndApplicationFallbacks,
-                frontmostPID: frontmostPID
-            ),
-            minimized: minimized
+        var focusedWindow: WindowItem?
+        let normalized = normalizeFrontmostWindowOrder(
+            visibleAndApplicationFallbacks, frontmostPID: windowOwnerPID == nil ? frontmostPID : nil,
+            focusedWindow: &focusedWindow
         )
+        return SnapshotResult(visible: normalized, minimized: minimized, focusedWindow: focusedWindow)
     }
 
     private func filterAuxiliaryWindowSurfaces(
         _ items: [WindowItem],
         requiredFloatingWindowIDs: Set<CGWindowID>,
-        requiredStandardWindowIDs: Set<CGWindowID>
+        requiredStandardWindowIDs: Set<CGWindowID>,
+        updateValidationCache: Bool = true
     ) -> [WindowItem] {
         let requiredIDs = requiredFloatingWindowIDs.union(requiredStandardWindowIDs).intersection(items.map(\.id))
         guard AXIsProcessTrusted() else {
@@ -1587,10 +1600,12 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let itemsByPID = Dictionary(grouping: items, by: \.windowProcessIdentifier)
         let liveWindowPIDs = Set(itemsByPID.keys)
         let frontmostWindowPIDs = Set(items.filter(\.isFrontmostApp).map(\.windowProcessIdentifier))
-        validatedFloatingWindowSignatures.withValue { signaturesByPID in
-            signaturesByPID = signaturesByPID.filter { liveWindowPIDs.contains($0.key) }
-            for pid in frontmostWindowPIDs {
-                signaturesByPID.removeValue(forKey: pid)
+        if updateValidationCache {
+            validatedFloatingWindowSignatures.withValue { signaturesByPID in
+                signaturesByPID = signaturesByPID.filter { liveWindowPIDs.contains($0.key) }
+                for pid in frontmostWindowPIDs {
+                    signaturesByPID.removeValue(forKey: pid)
+                }
             }
         }
         let rememberedSignaturesByPID = validatedFloatingWindowSignatures.value
@@ -1645,7 +1660,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 trustedFloatingWindowIDs: trustedFloatingWindowIDs,
                 requiredStandardWindowIDs: requiredStandardWindowIDs
             )
-            if isFrontmostApplication {
+            if updateValidationCache, isFrontmostApplication {
                 let validatedSignatures = Set(filtered.compactMap { item in
                     requiredFloatingWindowIDs.contains(item.id)
                         ? ValidatedFloatingWindowSignature(item)
@@ -1758,7 +1773,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// window and move it ahead of its logical app siblings so slot 0 is the
     /// window that actually has focus. Hosted helper windows keep their helper
     /// PID for AX while `WindowItem.pid` identifies the regular app.
-    private func normalizeFrontmostWindowOrder(_ items: [WindowItem], frontmostPID: pid_t?) -> [WindowItem] {
+    private func normalizeFrontmostWindowOrder(
+        _ items: [WindowItem], frontmostPID: pid_t?, focusedWindow: inout WindowItem?
+    ) -> [WindowItem] {
+        focusedWindow = nil
         guard let frontmostPID, let frontmostItem = items.first(where: { $0.isFrontmostApp }) else {
             PerformanceDiagnostics.record("frontmost_focus_normalize", fields: [
                 "outcome": .string("skipped-no-frontmost"), "snapshot_count": .int(items.count)
@@ -1790,6 +1808,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 focusedFrame: $0.frame
             )
         }
+        focusedWindow = focused
         let normalized = focused.map {
             Self.promotingWindow($0.id, in: items, beforeSiblingsOf: frontmostItem.pid)
         } ?? items
@@ -1825,8 +1844,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let siblings = items.filter {
             $0.windowProcessIdentifier == pid && !$0.isMinimized
         }
-        guard let first = siblings.first else { return nil }
-        guard siblings.count > 1 else { return first }
+        guard !siblings.isEmpty else { return nil }
 
         var candidates = siblings
         if let focusedTitle, !focusedTitle.isEmpty {
@@ -1867,6 +1885,34 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         PerformanceDiagnostics.$correlationID.withValue(PerformanceDiagnostics.correlationID ?? UUID().uuidString) {
             resolveFocusedWindowItem(pid: pid)
         }
+    }
+
+    /// The observer retained this exact AX window before deactivation. Never
+    /// re-read AXFocusedWindow here: Outlook may already report its main window.
+    func observedWindowItem(pid: pid_t, window: AXUIElement) -> WindowItem? {
+        AXUIElementSetMessagingTimeout(window, 0.05)
+        guard axString(kAXRoleAttribute, on: window) == kAXWindowRole,
+              axString(kAXSubroleAttribute, on: window) != kAXSystemDialogSubrole else { return nil }
+        var windowPID: pid_t = 0
+        guard AXUIElementGetPid(window, &windowPID) == .success else { return nil }
+        let title = axString(kAXTitleAttribute, on: window)
+        let frame = axFrame(on: window)
+        return PerformanceDiagnostics.$context.withValue("foreground-window-focus") {
+            Self.observedWindowMatch(
+                in: snapshotInternal(includeMinimized: false, windowOwnerPID: windowPID).visible,
+                logicalPID: pid, windowPID: windowPID, focusedTitle: title, focusedFrame: frame
+            )
+        }
+    }
+
+    static func observedWindowMatch(
+        in items: [WindowItem], logicalPID: pid_t, windowPID: pid_t,
+        focusedTitle: String?, focusedFrame: CGRect?
+    ) -> WindowItem? {
+        guard let item = focusedWindowMatch(
+            in: items, pid: windowPID, focusedTitle: focusedTitle, focusedFrame: focusedFrame
+        ), item.pid == logicalPID else { return nil }
+        return item
     }
 
     private func resolveFocusedWindowItem(pid: pid_t) -> WindowItem? {

@@ -288,6 +288,8 @@ enum CaptureTimeoutTests {
             outlookCalendar,
             makeItem(id: 2, pid: 200, appName: "Browser", bundleIdentifier: "com.example.browser")
         ]
+        catalog.snapshotFocusedWindow = outlookInbox
+        // The fresh scan confirms Inbox before the panel activates.
         // Before the programmatic activation, Inbox is the real user focus.
         // After activation, simulate Outlook reporting a different sibling.
         // Production code must sample before the activator runs, not after.
@@ -306,7 +308,8 @@ enum CaptureTimeoutTests {
 
         try expectEqual(tracker.recentWindowIDs, [2, 1])
         try expectEqual(tracker.identityOnlyRankIdentities, [])
-        try expectEqual(catalog.focusedWindowItemCallCount, 1)
+        try expectEqual(catalog.focusedWindowItemCallCount, 0,
+                        "confirmed pre-panel source must not be resampled after panel activation")
     }
 
     /// An external activation (click, Dock) names only the app. The store

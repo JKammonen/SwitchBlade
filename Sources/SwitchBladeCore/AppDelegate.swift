@@ -11,7 +11,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var store = SwitcherStore(
         catalog: windowCatalog,
         activator: windowActivator,
-        permissionService: permissionService
+        permissionService: permissionService,
+        windowFocusObserver: WindowFocusObserver(catalog: windowCatalog)
     )
     private var panelController: SwitcherPanelController?
     private var hotkeyMonitor: HotkeyMonitor?

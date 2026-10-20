@@ -21,6 +21,15 @@ actor WindowActionCoordinator {
     }
 }
 
+/// Serialize observation scans so rapid same-app focus events cannot fan out
+/// concurrent AX walks. Cancelled queued observations do no work.
+private actor WindowFocusResolutionLane {
+    func resolve(_ capture: WindowFocusCapture) -> WindowItem? {
+        guard !Task.isCancelled else { return nil }
+        return capture.resolve()
+    }
+}
+
 /// Observable store backing the SwitcherView. Holds the visible items + the
 /// current selection and coordinates between the catalog (window listing),
 /// activator (window activation/close/quit/hide), and permission service.
@@ -157,9 +166,10 @@ final class SwitcherStore: ObservableObject {
 
     private final class InFlightVisibleSnapshot {
         let diagnosticID: String
-        let task: Task<[WindowItem], Never>
+        let startedUptime = ProcessInfo.processInfo.systemUptime
+        let task: Task<VisibleWindowSnapshot, Never>
 
-        init(diagnosticID: String, task: Task<[WindowItem], Never>) {
+        init(diagnosticID: String, task: Task<VisibleWindowSnapshot, Never>) {
             self.diagnosticID = diagnosticID
             self.task = task
         }
@@ -167,6 +177,27 @@ final class SwitcherStore: ObservableObject {
 
     private var openDiagnosticID = UUID().uuidString
     private var lastReturnedSnapshotDiagnosticID: String?
+    private var lastReturnedSnapshotFocus: WindowItem?
+    private var lastReturnedSnapshotStartedUptime: TimeInterval = 0
+    private var openRequestedUptime: TimeInterval = 0
+    /// Exact source focus observed before this open's panel can deactivate it.
+    /// This is open-scoped evidence, never cached membership or a late AX guess.
+    private struct OpenSourceFocus {
+        let openID: String
+        let settingsGeneration: Int
+        let item: WindowItem
+    }
+    private var sourceFocusBeforePanel: OpenSourceFocus?
+    private let windowFocusObserver: WindowFocusObserving?
+    private struct ForegroundFocus {
+        let id = UUID()
+        let pid: pid_t
+        let task: Task<WindowItem?, Never>
+    }
+    private var foregroundFocus: ForegroundFocus?
+    private var focusHistoryGeneration = 0
+    private var focusMembershipInvalidatedAt: TimeInterval?
+    private let focusResolutionLane = WindowFocusResolutionLane()
 
     private final class PanelShowTimer: @unchecked Sendable {
         let workItem: DispatchWorkItem
@@ -192,6 +223,7 @@ final class SwitcherStore: ObservableObject {
         catalog: WindowSnapshotProviding,
         activator: WindowActivating,
         permissionService: PermissionProviding,
+        windowFocusObserver: WindowFocusObserving? = nil,
         userDefaults: UserDefaults = .standard,
         previewCache: PreviewCacheStore = PreviewCacheStore(),
         mruTracker: MRUTracker? = nil,
@@ -206,6 +238,7 @@ final class SwitcherStore: ObservableObject {
         switchBladePID: pid_t = getpid()
     ) {
         self.catalog = catalog
+        self.windowFocusObserver = windowFocusObserver
         self.activator = activator
         self.permissionService = permissionService
         self.permissionState = permissionService.currentState()
@@ -220,6 +253,10 @@ final class SwitcherStore: ObservableObject {
         self.workspaceNotificationCenter = workspaceNotificationCenter
         self.currentAppPID = initialFrontmostAppPID
         self.switchBladePID = switchBladePID
+        windowFocusObserver?.onFocus = { [weak self] capture in
+            self?.handleWindowFocus(capture)
+        }
+        windowFocusObserver?.observe(pid: initialFrontmostAppPID)
 
         activationObserver = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -261,6 +298,9 @@ final class SwitcherStore: ObservableObject {
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
                 let backgroundedPID = currentAppPID
+                let departingFocus = foregroundFocus
+                foregroundFocus = nil
+                focusHistoryGeneration &+= 1
                 // Do NOT discard the backgrounded app's cached preview here.
                 // Dropping it made that app — usually the next Cmd+Tab target —
                 // flash its icon for a beat until a fresh capture landed. Keep the
@@ -279,7 +319,7 @@ final class SwitcherStore: ObservableObject {
                    backgroundedPID != switchBladePID {
                     scheduleBackgroundedWindowRankUpgrade(
                         pid: backgroundedPID,
-                        expectedCurrentPID: pid
+                        expectedCurrentPID: pid, capturedFocus: departingFocus
                     )
                 }
             }
@@ -295,6 +335,7 @@ final class SwitcherStore: ObservableObject {
                 scheduleFocusedWindowRankUpgrade(pid: pid)
             }
         }
+        windowFocusObserver?.observe(pid: pid == switchBladePID ? nil : currentAppPID)
         // Opportunistic cache warmup — gated on recent-use so we don't burn
         // cycles for users who haven't touched the switcher in a while.
         guard Date().timeIntervalSince(lastSwitcherUse) < activationWarmupWindow else { return }
@@ -324,6 +365,9 @@ final class SwitcherStore: ObservableObject {
         let current = state ?? permissionService.currentState()
         guard current != permissionState else { return false }
         permissionState = current
+        if !isSwitching, current.hasAccessibility {
+            windowFocusObserver?.observe(pid: currentAppPID)
+        }
         return true
     }
 
@@ -477,11 +521,13 @@ final class SwitcherStore: ObservableObject {
         cancelPanelShow()
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
+        openRequestedUptime = ProcessInfo.processInfo.systemUptime
         pendingOpenCycleDelta = forward ? 1 : -1
         activeOpenRequestedAt = pendingOpenRequestedAt
         enterResolving(commitWhenReady: false)
 
         openDiagnosticID = UUID().uuidString
+        sourceFocusBeforePanel = nil
         PerformanceDiagnostics.record("open_cache_decision", fields: [
             "open_id": .string(openDiagnosticID),
             "cached_count": .int(cachedOpenItems.count),
@@ -492,6 +538,10 @@ final class SwitcherStore: ObservableObject {
         ])
 
         if !cachedOpenItems.isEmpty {
+            if focusMembershipInvalidatedAt != nil {
+                openFromFreshSnapshotOffMain()
+                return
+            }
             if cachedOpenItemsNeedResnapshot {
                 if let rebasedItems = rebasedCachedOpenItemsForCurrentApp() {
                     Logger.switcher.info(
@@ -1207,8 +1257,23 @@ final class SwitcherStore: ObservableObject {
         let backgroundedPID = sourceAppPID.flatMap { pid in
             pid != item.pid && pid != switchBladePID ? pid : nil
         }
-        let backgroundedFocusBeforeActivation = LockedValue<WindowItem?>(nil)
+        foregroundFocus = nil
+        focusHistoryGeneration &+= 1
+        let originalSourceFocus = sourceFocusBeforePanel.flatMap { capture -> OpenSourceFocus? in
+            guard capture.openID == openDiagnosticID, capture.settingsGeneration == settingsGeneration,
+                  capture.item.pid == sourceAppPID else { return nil }
+            return capture
+        }
+        let capturedSource = originalSourceFocus.flatMap { capture -> WindowItem? in
+            capture.item.pid == backgroundedPID ? capture.item : nil
+        }
+        let panelMayHaveChangedSourceFocus = isVisible && liveItems.filter { $0.pid == sourceAppPID }.count > 1
+        let backgroundedFocusBeforeActivation = LockedValue<WindowItem?>(capturedSource)
         let focusDiagnosticID = UUID().uuidString
+        if let capturedSource {
+            recordFocusRankDecision(item: capturedSource, diagnosticID: focusDiagnosticID,
+                                    context: "pre-panel-source-focus", outcome: "used-for-selection")
+        }
         let activationRequestID = item.pid != currentAppPID
             ? markActivationRequest(
                 pid: item.pid,
@@ -1222,7 +1287,7 @@ final class SwitcherStore: ObservableObject {
         )
         let started = startWindowAction(
             operation: {
-                if let backgroundedPID {
+                if capturedSource == nil, !panelMayHaveChangedSourceFocus, let backgroundedPID {
                     backgroundedFocusBeforeActivation.value = Self.diagnosticFocusedWindow(
                         catalog: catalog, pid: backgroundedPID,
                         diagnosticID: focusDiagnosticID, context: "pre-activation-backgrounded-focus"
@@ -1243,7 +1308,8 @@ final class SwitcherStore: ObservableObject {
                     activationRequestID: activationRequestID,
                     backgroundedFocusBeforeActivation: backgroundedFocusBeforeActivation.value,
                     focusDiagnosticID: focusDiagnosticID,
-                    backgroundedFocusWasRequested: backgroundedPID != nil
+                    backgroundedFocusWasRequested: backgroundedPID != nil,
+                    originalSourceFocus: originalSourceFocus
                 )
             }
         )
@@ -1335,7 +1401,8 @@ final class SwitcherStore: ObservableObject {
         activationRequestID: UUID?,
         backgroundedFocusBeforeActivation: WindowItem?,
         focusDiagnosticID: String,
-        backgroundedFocusWasRequested: Bool
+        backgroundedFocusWasRequested: Bool,
+        originalSourceFocus: OpenSourceFocus?
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
         guard result != .failed else {
@@ -1357,6 +1424,12 @@ final class SwitcherStore: ObservableObject {
                     "window_id": .int(Int(item.id))
                 ]
             )
+            if let originalSourceFocus,
+               originalSourceFocus.openID == openDiagnosticID,
+               originalSourceFocus.settingsGeneration == settingsGeneration,
+               currentAppPID == sourceAppPID || currentAppPID == item.pid {
+                sourceFocusBeforePanel = originalSourceFocus
+            }
             if dismissedBeforeCompletion {
                 applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
                 enterPreviewHidden(stale: false)
@@ -1383,6 +1456,10 @@ final class SwitcherStore: ObservableObject {
             currentAppPID = item.pid
         }
 
+        if selectionStillOwnsFocus, result == .selectedTarget {
+            foregroundFocus = ForegroundFocus(pid: item.pid, task: Task { item })
+        }
+        windowFocusObserver?.observe(pid: currentAppPID)
         let rememberStart = Date()
         if result == .selectedTarget {
             mruTracker.rememberSelection(
@@ -1474,6 +1551,10 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func invalidateDisplayCachesForSettingsChange() {
+        sourceFocusBeforePanel = nil
+        foregroundFocus = nil
+        focusHistoryGeneration &+= 1
+        lastReturnedSnapshotFocus = nil
         settingsGeneration &+= 1
         previewGeneration += 1
         previewLoadTask?.cancel()
@@ -1552,6 +1633,7 @@ final class SwitcherStore: ObservableObject {
     // `phase` in its didSet; `isSwitching` is derived (`phase != .idle`).
 
     private func enterIdle() {
+        sourceFocusBeforePanel = nil
         phase = .idle
     }
 
@@ -1759,11 +1841,32 @@ final class SwitcherStore: ObservableObject {
             self.pendingOpenRequestedAt = nil
 
             let snapshotStart = Date()
-            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain(priority: .userInitiated)
+            var visibleSnapshot = await self.snapshotVisibleOnlyOffMain(priority: .userInitiated)
+            // A warmup may have observed another sibling before this hotkey.
+            // Reuse its membership for single-window apps, but resolve fresh
+            // focus for a multi-window source before our panel can deactivate it.
+            if self.lastReturnedSnapshotStartedUptime < self.openRequestedUptime,
+               visibleSnapshot.filter({ $0.pid == self.currentAppPID }).count > 1 {
+                guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
+                visibleSnapshot = await self.snapshotVisibleOnlyOffMain(
+                    priority: .userInitiated, minimumStartUptime: self.openRequestedUptime
+                )
+            }
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
 
             guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
 
+            if let focused = self.lastReturnedSnapshotFocus,
+               self.lastReturnedSnapshotStartedUptime >= self.openRequestedUptime,
+               focused.pid == self.currentAppPID, !focused.isApplicationFallback,
+               visibleSnapshot.contains(where: { $0.id == focused.id && $0.pid == focused.pid }) {
+                self.sourceFocusBeforePanel = OpenSourceFocus(
+                    openID: self.openDiagnosticID, settingsGeneration: self.settingsGeneration, item: focused
+                )
+                self.recordFocusRankDecision(item: focused,
+                    diagnosticID: self.lastReturnedSnapshotDiagnosticID ?? UUID().uuidString,
+                    context: "pre-panel-source-focus", outcome: "captured")
+            }
             let orderStart = Date()
             self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
             let snapshotOrderedItems = self.orderItems(
@@ -2346,25 +2449,31 @@ final class SwitcherStore: ObservableObject {
             self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
                 context: "system-activation-focus", outcome: "accepted")
             self.mruTracker.trackFocusedWindowActivation(item)
+            self.foregroundFocus = ForegroundFocus(pid: item.pid, task: Task { item })
         }
     }
 
     /// Resolve the exact window the previous app left focused. A newly-created
     /// sibling can be absent from the young open-items cache, so waiting for a
     /// background warmup would discover it only as an unranked snapshot
-    /// fallback. AX retains the focused window after the app backgrounds; the
-    /// result is accepted only while the same successor app is still current.
-    private func scheduleBackgroundedWindowRankUpgrade(pid: pid_t, expectedCurrentPID: pid_t) {
+    /// fallback. Prefer the AX element captured while foreground: the focused
+    /// attribute may change on deactivation. Legacy probes are only a fallback
+    /// when there was no usable observation. A newer transition invalidates both.
+    private func scheduleBackgroundedWindowRankUpgrade(
+        pid: pid_t, expectedCurrentPID: pid_t, capturedFocus: ForegroundFocus? = nil
+    ) {
         backgroundedFocusRankTask?.cancel()
         let catalog = self.catalog
         let diagnosticID = UUID().uuidString
+        let historyGeneration = focusHistoryGeneration
         backgroundedFocusRankTask = Task { @MainActor [weak self] in
-            let item = await Task.detached(priority: .utility) {
+            let confirmed = await capturedFocus?.task.value
+            let item = if let confirmed, confirmed.pid == pid { confirmed } else { await Task.detached(priority: .utility) {
                 Self.diagnosticFocusedWindow(catalog: catalog, pid: pid, diagnosticID: diagnosticID,
                                              context: "backgrounded-app-focus")
-            }.value
+            }.value }
             guard let self else { return }
-            guard !Task.isCancelled, self.currentAppPID == expectedCurrentPID, !self.isVisible, !self.isSwitching else {
+            guard !Task.isCancelled, self.focusHistoryGeneration == historyGeneration, self.currentAppPID == expectedCurrentPID, !self.isVisible, !self.isSwitching else {
                 self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
                     context: "backgrounded-app-focus", outcome: Task.isCancelled ? "discarded-cancelled" : "discarded-state-changed")
                 return
@@ -2377,6 +2486,51 @@ final class SwitcherStore: ObservableObject {
             self.recordFocusRankDecision(item: item, diagnosticID: diagnosticID,
                 context: "backgrounded-app-focus", outcome: "accepted")
             self.mruTracker.trackBackgroundedWindowFocus(item)
+            PerformanceDiagnostics.record("backgrounded_focus_source", fields: [
+                "pid": .int(Int(item.pid)), "window_id": .int(Int(item.id)),
+                "source": .string(confirmed != nil ? "foreground-capture" : "post-transition-probe")
+            ])
+        }
+    }
+
+    /// Same-app window changes have no NSWorkspace activation notification.
+    /// Keep the captured AX element as departure evidence, including while its
+    /// concrete CG match is still resolving. A late probe cannot replace it.
+    private func handleWindowFocus(_ capture: WindowFocusCapture) {
+        guard capture.pid == currentAppPID, capture.pid != switchBladePID,
+              !isSwitching, !isVisible, windowActionTask == nil else { return }
+        focusedRankUpgradeTask?.cancel()
+        if capture.invalidatesMembership {
+            cachedOpenItemsNeedResnapshot = true
+            focusMembershipInvalidatedAt = ProcessInfo.processInfo.systemUptime
+        }
+        foregroundFocus?.task.cancel()
+        let lane = focusResolutionLane
+        let evidence = ForegroundFocus(pid: capture.pid, task: Task.detached(priority: .utility) {
+            await lane.resolve(capture)
+        })
+        foregroundFocus = evidence
+        let generation = focusHistoryGeneration
+        Task { @MainActor [weak self] in
+            let item = await evidence.task.value
+            guard let self, self.foregroundFocus?.id == evidence.id,
+                  self.focusHistoryGeneration == generation,
+                  self.currentAppPID == capture.pid, !self.isSwitching, !self.isVisible,
+                  self.windowActionTask == nil else { return }
+            guard let item, item.pid == capture.pid, !item.isApplicationFallback else {
+                // A captured element can disappear before CG enumeration.
+                // Keep the existing incoming-app upgrade available on failure.
+                self.scheduleFocusedWindowRankUpgrade(pid: capture.pid)
+                return
+            }
+            PerformanceDiagnostics.record("foreground_window_focus", fields: [
+                "pid": .int(Int(item.pid)), "window_id": .int(Int(item.id))
+            ])
+            self.mruTracker.trackFocusedWindowActivation(item, context: "foreground-window-focus")
+            if !self.cachedOpenItems.contains(where: { $0.id == item.id && $0.pid == item.pid }) {
+                self.cachedOpenItemsNeedResnapshot = true
+                self.focusMembershipInvalidatedAt = ProcessInfo.processInfo.systemUptime
+            }
         }
     }
 
@@ -2433,12 +2587,13 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func snapshotVisibleOnlyOffMain(
-        priority: TaskPriority = .utility
+        priority: TaskPriority = .utility,
+        minimumStartUptime: TimeInterval = 0
     ) async -> [WindowItem] {
-        if let inFlightVisibleSnapshot {
-            let items = await inFlightVisibleSnapshot.task.value
-            recordReturnedSnapshot(inFlightVisibleSnapshot, coalesced: true)
-            return items
+        if let inFlightVisibleSnapshot, inFlightVisibleSnapshot.startedUptime >= minimumStartUptime {
+            let result = await inFlightVisibleSnapshot.task.value
+            recordReturnedSnapshot(inFlightVisibleSnapshot, focus: result.focusedWindow, coalesced: true)
+            return result.items
         }
 
         let catalog = self.catalog
@@ -2447,23 +2602,28 @@ final class SwitcherStore: ObservableObject {
             diagnosticID: diagnosticID,
             task: Task.detached(priority: priority) {
                 PerformanceDiagnostics.$correlationID.withValue(diagnosticID) {
-                    catalog.snapshotVisibleOnly()
+                    catalog.snapshotVisibleOnlyWithFocus()
                 }
             }
         )
         self.inFlightVisibleSnapshot = inFlightVisibleSnapshot
-        let visibleItems = await inFlightVisibleSnapshot.task.value
+        let result = await inFlightVisibleSnapshot.task.value
         if self.inFlightVisibleSnapshot === inFlightVisibleSnapshot {
             self.inFlightVisibleSnapshot = nil
         }
-        recordReturnedSnapshot(inFlightVisibleSnapshot, coalesced: false)
-        return visibleItems
+        recordReturnedSnapshot(inFlightVisibleSnapshot, focus: result.focusedWindow, coalesced: false)
+        return result.items
     }
 
-    private func recordReturnedSnapshot(_ snapshot: InFlightVisibleSnapshot, coalesced: Bool) {
+    private func recordReturnedSnapshot(_ snapshot: InFlightVisibleSnapshot, focus: WindowItem?, coalesced: Bool) {
         // Main-actor callers inspect/rank the returned array synchronously
         // before their next suspension, including coalesced consumers.
         lastReturnedSnapshotDiagnosticID = snapshot.diagnosticID
+        lastReturnedSnapshotFocus = focus
+        lastReturnedSnapshotStartedUptime = snapshot.startedUptime
+        if let invalidatedAt = focusMembershipInvalidatedAt, snapshot.startedUptime >= invalidatedAt {
+            focusMembershipInvalidatedAt = nil
+        }
         PerformanceDiagnostics.$correlationID.withValue(snapshot.diagnosticID) {
             PerformanceDiagnostics.record("snapshot_returned", fields: [
                 "open_id": .string(openDiagnosticID),

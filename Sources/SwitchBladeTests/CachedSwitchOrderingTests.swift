@@ -18,6 +18,12 @@ enum CachedSwitchOrderingTests {
         ("CachedSwitch/snapReconcilesHistoryAndCachedFrontmost", snapReconcilesHistory),
         ("CachedSwitch/failedSnapPreservesHistoryAndMRU", failedSnapPreservesHistory),
         ("CachedSwitch/multiWindowSourceRetainsExactFocusedSiblingRank", multiWindowSourceRetainsFocusedRank),
+        ("CachedSwitch/panelActivationDoesNotReplaceOriginalSourceWindow", panelActivationDoesNotReplaceOriginalSourceWindow),
+        ("CachedSwitch/sourceFocusSurvivesFailedActionRetry", sourceFocusSurvivesFailedActionRetry),
+        ("CachedSwitch/sourceFocusDoesNotSurviveSpaceChange", sourceFocusDoesNotSurviveSpaceChange),
+        ("CachedSwitch/sourceFocusDoesNotSurviveCancellation", sourceFocusDoesNotSurviveCancellation),
+        ("CachedSwitch/coalescedWarmupCannotSupplyOldSourceFocus", coalescedWarmupCannotSupplyOldSourceFocus),
+        ("CachedSwitch/unconfirmedSourceDoesNotPromotePostPanelSibling", unconfirmedSourceDoesNotPromotePostPanelSibling),
         ("CachedSwitch/newerExternalActivationSurvivesOlderCompletion", newerActivationSurvivesCompletion),
         ("CachedSwitch/sameAppSelectionPreservesPreviousApp", sameAppSelectionPreservesHistory),
         ("CachedSwitch/failedActivationPreservesHistoryAndMRU", failedActivationPreservesHistory)
@@ -171,6 +177,114 @@ enum CachedSwitchOrderingTests {
         store.switchToPreviousApplication()
         try await waitUntil { !activator.base.activatedApplicationPIDs.isEmpty }
         try expectEqual(activator.base.activatedApplicationPIDs, [100])
+    }
+
+    private enum SourceFocusScenario { case normal, failedRetry, spaceChange, cancelAndReopen, coalescedWarmup, noEvidence }
+
+    @MainActor private static func panelActivationDoesNotReplaceOriginalSourceWindow() async throws {
+        try await assertSourceFocus(.normal)
+    }
+
+    @MainActor private static func sourceFocusSurvivesFailedActionRetry() async throws {
+        try await assertSourceFocus(.failedRetry)
+    }
+
+    @MainActor private static func sourceFocusDoesNotSurviveSpaceChange() async throws {
+        try await assertSourceFocus(.spaceChange)
+    }
+
+    @MainActor private static func sourceFocusDoesNotSurviveCancellation() async throws {
+        try await assertSourceFocus(.cancelAndReopen)
+    }
+
+    @MainActor private static func coalescedWarmupCannotSupplyOldSourceFocus() async throws {
+        try await assertSourceFocus(.coalescedWarmup)
+    }
+
+    @MainActor private static func unconfirmedSourceDoesNotPromotePostPanelSibling() async throws {
+        try await assertSourceFocus(.noEvidence)
+    }
+
+    @MainActor private static func assertSourceFocus(_ scenario: SourceFocusScenario) async throws {
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (store, catalog, activator, _) = makeStore(mruTracker: tracker, initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let booking = makeItem(id: 1, pid: 100, title: "Booking", isFrontmostApp: true)
+        let main = makeItem(id: 16, pid: 100, title: "Calendar", isFrontmostApp: true)
+        let others = (2...15).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100)) }
+        let windows = [booking] + others + [main]
+        for item in windows.reversed() { tracker.trackFocusedWindowActivation(item) }
+        catalog.visibleItems = windows
+        catalog.snapshotFocusedWindow = scenario == .noEvidence ? nil : booking
+        catalog.focusedWindowItemsByPID[100] = booking
+        store.onShow = {
+            // Panel activation can change the source app's AX-focused sibling.
+            catalog.focusedWindowItemsByPID[100] = main
+        }
+        let completion = selectionCompletionProbe()
+        defer { completion.restore() }
+        let usedSources = LockedValue<[Int]>([])
+        let oldObserver = PerformanceDiagnostics.testObserver.value
+        PerformanceDiagnostics.testObserver.value = { event, fields in
+            oldObserver?(event, fields)
+            if event == "focus_rank_decision",
+               case .string("pre-panel-source-focus")? = fields["context"],
+               case .string("used-for-selection")? = fields["outcome"],
+               case .int(let id)? = fields["window_id"] {
+                usedSources.withValue { $0.append(id) }
+            }
+        }
+        defer { PerformanceDiagnostics.testObserver.value = oldObserver }
+        var warmup: Task<Void, Never>?
+        if scenario == .coalescedWarmup {
+            catalog.visibleSnapshotDelayNanoseconds = 50_000_000
+            catalog.snapshotFocusedWindow = main
+            warmup = Task { await store.warmPreviewCache(context: "old-focus-before-hotkey") }
+            try await waitUntil { catalog.visibleSnapshotCount == 1 }
+            catalog.snapshotFocusedWindow = booking
+        }
+        store.requestCycle(forward: true)
+        try await waitUntil { store.isVisible }
+        if scenario == .coalescedWarmup {
+            await warmup?.value
+            try expectEqual(catalog.visibleSnapshotCount, 2,
+                            "multi-window warmup predating the open needs fresh focus before panel show")
+        }
+        if scenario == .spaceChange || scenario == .cancelAndReopen {
+            catalog.snapshotFocusedWindow = nil
+            catalog.visibleItems = [main] + others + [booking]
+            if scenario == .spaceChange {
+                await store.handleActiveSpaceChange()
+            } else {
+                store.cancel()
+                store.requestCycle(forward: true)
+            }
+            try await waitUntil { store.isVisible }
+        }
+        store.selectedID = 2
+        if scenario == .failedRetry { activator.activationSucceeds = false }
+        store.commitSelection()
+        try await waitUntil { completion.completed.value }
+        if scenario == .failedRetry {
+            try expect(store.isVisible, "failure must retain the recovery panel")
+            completion.completed.value = false
+            activator.activationSucceeds = true
+            store.commitSelection()
+            try await waitUntil { completion.completed.value }
+        }
+        let order = tracker.orderedForDisplay(from: windows.map { $0.withFrontmostState($0.pid == 200) })
+        let sourceWasInvalidated = scenario == .spaceChange || scenario == .cancelAndReopen
+        try expectEqual(Array(order.prefix(2).map(\.id)), [2, scenario == .cancelAndReopen ? 16 : 1],
+                        "source history must use this open's valid pre-panel focus, including recovery retries")
+        if sourceWasInvalidated || scenario == .noEvidence {
+            try expect(usedSources.value.isEmpty, "invalidated/unconfirmed source cannot be used as pre-panel evidence")
+        } else {
+            try expect(!usedSources.value.isEmpty && usedSources.value.allSatisfy { $0 == 1 })
+        }
+        if !sourceWasInvalidated {
+            try expectEqual(order.last?.id, main.id, "unvisited sibling must retain its own rank")
+            try expectEqual(catalog.focusedWindowItemCallCount, 0, "confirmed source needs no post-panel AX rescan")
+        }
     }
 
     @MainActor private static func multiWindowSourceRetainsFocusedRank() async throws {

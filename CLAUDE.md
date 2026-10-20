@@ -65,6 +65,7 @@ SwitcherPanelController  ──►  NSPanel + NSHostingView (SwiftUI SwitcherVie
 | `PermissionService` | Preflight checks for Accessibility + Screen Recording. Never calls `CGRequest*`. |
 | `SwitcherPanelController` | NSPanel host. CAShapeLayer mask for antialiased corners. Picks cursor's screen. |
 | `HotkeyMonitor` | CGEventTap + NSEvent monitors for Cmd+Tab plus modifier + left-mouse previous-app shortcut. |
+| `WindowFocusObserver` | One active-app AX observer; captures same-app focused windows before deactivation, with off-main owner-scoped resolution. |
 | `MRUTracker` | In-memory rank entries that keep windowID, app/title signature, and app identity together; persisted recent bundle IDs (UserDefaults, cap 30). Recovers single-window apps by app identity when ID/title churns; refuses to guess among multiple same-app windows. |
 | `PreviewCacheStore` | Two-level LRU (windowID + signature). Capacity 40. Stale-while-revalidate. |
 | `ClickOutsideMonitor` | Global + local mouse-down monitors. Closes panel on click outside card. |
@@ -278,6 +279,59 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   handled like a failure (hidden open becomes the visible recovery panel) and
   must never leave the open phase `resolving`, which used to swallow every later
   Cmd+Tab until a Space change. Regressions: `WindowActionLane/*`.
+- **New same-app booking/editor enters without a recent window rank** →
+  NSWorkspace activation events do not cover focus changes within the already
+  active app. `WindowFocusObserver` watches the foreground app's AX focus,
+  main-window and creation notifications and captures the actually focused AX
+  element before deactivation; creation/main status alone is never focus proof. Its
+  retained element is resolved off-main against that owner's eligible CG rows;
+  it never re-reads the outgoing app's changed focused-window attribute. Only
+  one observation scan runs at a time, and cancelled queued scans do no work.
+  `SwitcherStore` records concrete focus history and prefers captured departure
+  evidence to a late outgoing-app probe. A newer transition, selected-window
+  action, settings or Space change invalidates older results. Native registration
+  and focus diagnostics contain PID/window IDs only.
+  AX registration can return `cannotComplete` during activation (observed in
+  signed Outlook use). `WindowFocusRegistration` retries once after 150 ms,
+  cancels on a newer app, and never polls. Successful subscriptions stay active
+  while only missing coverage is retried; `window_focus_subscriptions` logs each
+  notification's result and `window_focus_observer` logs attempt/duration.
+  A focus notification invalidates main-only cached membership immediately,
+  including the rebased-cache shortcut; only a scan started after that event can
+  clear this invalidation. Initial observation of an already cached window keeps
+  the single-window cached fast path; an initially unknown window invalidates
+  membership once resolved. Unresolved captures can retry on later notifications;
+  an incoming AX upgrade also preserves confirmed departure evidence. Opening
+  does not wait for observation resolution and a fresh
+  AX-confirmed scan wins over earlier focus history. The matcher must
+  verify title/frame even for one enumerated window: enumeration can omit the
+  actual focused sibling, so a singleton is not proof of identity.
+  Regressions: `WindowFocusHistoryTests` (17 real-scale rows, no native UI),
+  `CatalogFocus/focusedWindowMatch_missingFocusedSiblingDoesNotMatchMain`.
+- **Source-focus history can use the wrong sibling after panel activation** →
+  `pre-activation-backgrounded-focus` runs after panel activation. Preserve
+  AX-confirmed focus from the exact fresh visible scan before showing the panel
+  using `VisibleWindowSnapshot.focusedWindow`. Bind it to this open/settings
+  generation and prefer it for cross-app selection history. An old coalesced
+  multi-window scan is refreshed before panel show. Without confirmed pre-panel
+  focus, a visible multi-window source must not promote a late AX sibling.
+  Cancel/new open/settings/Space discard the capture; failed-action recovery
+  retains it for retry. Same-app actions do not background the captured source.
+  Tests in `CachedSwitchOrderingTests` await the selection completion diagnostic:
+  `!isSwitching` can mean only that the panel hid before its AX action finished.
+  Native proof boundary: an authorized two-minute Outlook test of the initial
+  observer version reproduced a real unsaved booking falling from slot 0 to
+  slot 6/16 after a main-only cached open. The first AX registration had returned
+  `cannotComplete`; the later activation registered successfully. A subsequent
+  cross-app round trip kept that same booking at slot 1 and activated it exactly.
+  This verifies a concrete missing-focus/membership path, not every intermittent
+  Outlook case. After renewed explicit window-control permission, the final
+  signed producer passed real booking checks: all three Outlook subscriptions
+  registered successfully; same-app main-to-booking changes captured each exact
+  window; cross-app departure retained the booking and the return selector kept
+  it at slot 1 and activated it exactly. The transient registration retry is
+  covered by deterministic tests; that transient error did not recur in the
+  final native run. This bounded replay does not prove every intermittent case.
 - **Window-targeted self-activation changes a sibling's rank** → capture the
   backgrounded app's exact AX focus before SwitchBlade raises/focuses the target.
   The later app-activation notification must not rescan post-transition AX focus
