@@ -288,9 +288,22 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `unknown` (unreadable focused window) is never a mismatch or a success. The
   system-wide AX element is not used: its messaging timeout is process-wide.
   `selection_action_dispatch.queue_ms`/`execution_ms` separate lane wait from
-  the action. A verified result that completes after a newer external
-  activation does not call `rememberSelection`. The double-modifier window
-  path inherits the stricter result. Regressions: `ActivationVerification/*`.
+  the action. A completion is stale when any app other than the target (or
+  SwitchBlade) activated after the action started, including a return to the
+  source app: it then neither calls `rememberSelection` nor rewrites app
+  history. PID equality alone missed that return. `activation_request`, all
+  off-main activation rows and `selection_action_dispatch`/`_failed` share one
+  `correlation_id` (context `selection-<action>` off-main). The double-modifier window
+  path inherits the stricter result. Raising has a lower bar than exact
+  confirmation: the chosen AX window must itself carry the row's title or a
+  frame within 12 pt. Closest-frame/first-candidate guesses are not
+  unminimized, raised or focused (`raise_withheld`, reason
+  `raise-withheld-*`); the app is still activated. Observed cause
+  (2026-10-21): one app's AXWindows listed a single window for three minutes
+  while WindowServer showed two current-Space rows, and the old matcher raised
+  the listed sibling for the other row. Whether that row was a real window
+  omitted by AX or a secondary surface is unresolved. Regressions:
+  `ActivationVerification/*`.
 - **Cmd+Tab does nothing, or release activates nothing** → look for
   `selection_action_refused`. The single window-action lane stays busy while
   detached AX work finishes, even after `hide()` dropped the caller task. The

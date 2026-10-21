@@ -13,6 +13,9 @@ enum ActivationVerificationTests {
         ("ActivationVerification/siblingFocused_isApplicationOnly", siblingFocusedIsApplicationOnly),
         ("ActivationVerification/blindSpot_matchedSiblingFocusIsNotIdentityProof", matchedSiblingFocusIsNotIdentityProof),
         ("ActivationVerification/blindSpot_titleTakeoverRemainsUndetected", titleTakeoverRemainsUndetected),
+        ("ActivationVerification/raise_closestFrameGuessIsNotRaised", closestFrameGuessIsNotRaised),
+        ("ActivationVerification/raise_untitledGuessIsNotRaised", untitledGuessIsNotRaised),
+        ("ActivationVerification/raise_directEvidenceNeedsOwnTitleOrFrame", directEvidenceNeedsOwnTitleOrFrame),
         ("ActivationVerification/boundedCandidateScan_isWeakEvidence", boundedCandidateScanIsWeak),
         ("ActivationVerification/unreadableCandidateTitle_isWeakEvidence", unreadableCandidateTitleIsWeak),
         ("ActivationVerification/evidence_closestFrameAndFirstCandidateAreNeverUnique", closestFrameAndFirstCandidateAreNeverUnique),
@@ -30,7 +33,9 @@ enum ActivationVerificationTests {
         ("ActivationVerification/store_sameAppApplicationOnlyKeepsRanks", storeSameAppApplicationOnlyKeepsRanks),
         ("ActivationVerification/store_verifiedSelectionIsRemembered", storeVerifiedSelectionIsRemembered),
         ("ActivationVerification/store_lateVerifiedResultCannotOverrideNewerFocus", storeLateVerifiedResultCannotOverrideNewerFocus),
-        ("ActivationVerification/store_dispatchSeparatesQueueAndExecution", storeDispatchSeparatesQueueAndExecution)
+        ("ActivationVerification/store_dispatchSeparatesQueueAndExecution", storeDispatchSeparatesQueueAndExecution),
+        ("ActivationVerification/store_returnToSourceBeforeCompletionIsNotOverridden", storeReturnToSourceIsNotOverridden),
+        ("ActivationVerification/store_oneCorrelationIDSpansRequestVerificationAndDispatch", storeOneCorrelationID)
     ]
 
     // MARK: - Fixtures
@@ -133,22 +138,66 @@ enum ActivationVerificationTests {
         try expectEqual(string(fields, "result_reason"), "matched-element-other-window-focused")
     }
 
-    /// Intended A, matched B, focused B. The focus check passes for B, which
-    /// proves only that B got focus; weak match evidence keeps the result
-    /// app-level. The old rule called this an exact selection.
+    /// Intended A, matched B, focused B. A was renamed and B sits exactly in
+    /// A's old frame, so B is raised on direct frame evidence and really gets
+    /// focus. That proves only that B got focus; the contradicted title keeps
+    /// the result app-level. The old rule called this an exact selection.
     @MainActor static func matchedSiblingFocusIsNotIdentityProof() throws {
-        // A was renamed and no longer appears; B is merely the closest frame.
         let candidates = [candidate("X", CGRect(x: 2000, y: 0, width: 300, height: 200)),
-                          candidate("B", frameB)]
+                          candidate("B", frameA)]
         let activator = activator(candidates: candidates, focusedIndex: 1)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
-        try expectEqual(string(fields, "match_reason"), "closest-frame-no-title")
+        try expectEqual(string(fields, "match_reason"), "frame-close")
+        try expectEqual(bool(fields, "raise_withheld"), false, "an exact frame is direct evidence for raising")
         try expectEqual(string(fields, "matched_element_focus"), "matched-element-focused",
                         "the matched element B really has focus")
         try expectEqual(result, .applicationOnly, "B's focus is not evidence that A was identified")
         try expectEqual(string(fields, "match_evidence_basis"), "title-not-found")
         try expectEqual(string(fields, "legacy_result"), "selected-target")
+    }
+
+    /// Live shape from 2026-10-21: the selected row was absent from AXWindows,
+    /// which listed one window with another title elsewhere on screen. The old
+    /// matcher raised that sibling as "closest-frame-no-title".
+    @MainActor static func closestFrameGuessIsNotRaised() throws {
+        for candidates in [[candidate("B", frameB)],
+                           [candidate("X", CGRect(x: 2000, y: 0, width: 300, height: 200)), candidate("B", frameB)]] {
+            let samples = LockedValue(0)
+            let activator = WindowActivator(
+                activateApplicationOverride: { _ in true },
+                matchCandidatesOverride: { _ in (candidates, candidates.count) },
+                focusSampleOverride: { _, _ in samples.withValue { $0 += 1 }; return sample(matched: true) }
+            )
+            var result: WindowActivationResult?
+            let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
+            try expectEqual(string(fields, "match_reason"), "closest-frame-no-title")
+            try expectEqual(bool(fields, "raise_withheld"), true, "a guess must not be raised")
+            try expectEqual(result, .applicationOnly, "the app still activates")
+            try expectEqual(string(fields, "result_reason"), "raise-withheld-title-not-found")
+            try expectEqual(string(fields, "legacy_result"), "selected-target", "old rule raised and confirmed it")
+            try expectEqual(samples.value, 0, "nothing was raised, so there is no matched element to observe")
+        }
+    }
+
+    @MainActor static func untitledGuessIsNotRaised() throws {
+        let activator = activator(candidates: [candidate("X", frameB), candidate("Y", CGRect(x: 2000, y: 0, width: 300, height: 200))],
+                                  focusedIndex: 0)
+        var result: WindowActivationResult?
+        let fields = verificationFields { result = activator.activateWithResult(target(title: "")) }
+        try expectEqual(bool(fields, "raise_withheld"), true)
+        try expectEqual(result, .applicationOnly)
+    }
+
+    static func directEvidenceNeedsOwnTitleOrFrame() throws {
+        let item = target(title: "A")
+        try expect(WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate("A", frameB)))
+        try expect(WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate("Renamed", frameA)))
+        try expect(!WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate("B", frameB)))
+        try expect(!WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate(nil, nil)))
+        let untitled = target(title: "")
+        try expect(!WindowActivator.chosenCandidateHasDirectEvidence(for: untitled, candidate: candidate("", frameB)),
+                   "an empty title is not a title match")
     }
 
     /// Known limit: when sibling B takes over A's exact title, the match is
@@ -465,6 +514,61 @@ enum ActivationVerificationTests {
             guard case .double(let value)? = fields[key] else { return try expect(false, "missing \(key)") }
             try expectGreaterThanOrEqual(value, 0.0)
         }
+    }
+
+    /// Codex review of 07d987f: the user returned to the source app while the
+    /// action ran. PID equality saw "source is current" and promoted the old
+    /// selection ahead of the source window.
+    @MainActor static func storeReturnToSourceIsNotOverridden() async throws {
+        let catalog = MockWindowCatalog()
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let started = LockedValue(false)
+        let gate = Gate()
+        let activator = WindowActivator(
+            activateApplicationOverride: { _ in
+                started.value = true
+                return gate.semaphore.wait(timeout: .now() + 2) == .success
+            },
+            matchCandidatesOverride: { _ in ([candidate("W2", frameA), candidate("W3", frameB)], 2) },
+            focusSampleOverride: { _, index in sample(matched: index == 0) }
+        )
+        let store = makeStore(activator: activator, tracker: tracker, catalog: catalog)
+        defer { gate.semaphore.signal(); store.cancel() }
+        for item in crossAppWindows.reversed() { tracker.trackFocusedWindowActivation(item) }
+        catalog.visibleItems = crossAppWindows
+        try expectEqual(tracker.recentWindowIDs, [1, 2, 3])
+        var ranksBeforeCompletion: [CGWindowID] = []
+        let fields = try await commitAndWait(store, selecting: 2, whileRunning: {
+            store.handleAppActivation(pid: 200)
+            store.handleAppActivation(pid: 100)
+            ranksBeforeCompletion = tracker.recentWindowIDs
+        }, started: started, gate: gate)
+        try expectEqual(string(fields, "result"), "selected-target")
+        try expectEqual(tracker.recentWindowIDs, ranksBeforeCompletion,
+                        "the newer return to the source app must keep its place")
+        try expect(tracker.recentWindowIDs.first != 2)
+    }
+
+    @MainActor static func storeOneCorrelationID() async throws {
+        let catalog = MockWindowCatalog()
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let store = makeStore(activator: targetApp(focusedIndex: 0), tracker: tracker, catalog: catalog)
+        defer { store.cancel() }
+        catalog.visibleItems = crossAppWindows
+        let rows = LockedValue<[String: [String: PerformanceMetricValue]]>([:])
+        let previous = PerformanceDiagnostics.testObserver.value
+        PerformanceDiagnostics.testObserver.value = { event, fields in
+            previous?(event, fields)
+            if ["activation_request", "activation_verification"].contains(event) { rows.withValue { $0[event] = fields } }
+        }
+        defer { PerformanceDiagnostics.testObserver.value = previous }
+        let dispatch = try await commitAndWait(store, selecting: 2)
+        let id = string(dispatch, "correlation_id")
+        try expectNotNil(id, "dispatch row needs the operation ID")
+        try expectEqual(string(rows.value["activation_verification"], "correlation_id"), id,
+                        "off-main verification must carry the same operation ID")
+        try expectEqual(string(rows.value["activation_request"], "correlation_id"), id)
+        try expectEqual(string(rows.value["activation_verification"], "diagnostic_context"), "selection-activate")
     }
 
     @MainActor private static func waitUntil(_ predicate: () -> Bool) async throws {

@@ -196,6 +196,10 @@ final class SwitcherStore: ObservableObject {
     }
     private var foregroundFocus: ForegroundFocus?
     private var focusHistoryGeneration = 0
+    /// Recent app activations in notification order. A selection completing
+    /// after another app activated is stale even if that app is its source.
+    private var appActivationSequence = 0
+    private var recentAppActivations: [(sequence: Int, pid: pid_t)] = []
     private var focusMembershipInvalidatedAt: TimeInterval?
     private let focusResolutionLane = WindowFocusResolutionLane()
 
@@ -294,6 +298,9 @@ final class SwitcherStore: ObservableObject {
     /// callable directly from tests so the notification queue / RunLoop
     /// plumbing doesn't have to be exercised under XCTest.
     func handleAppActivation(pid: pid_t) {
+        appActivationSequence &+= 1
+        recentAppActivations.append((appActivationSequence, pid))
+        if recentAppActivations.count > 32 { recentAppActivations.removeFirst() }
         let pendingSelfActivation = recordObservedActivationIfNeeded(pid: pid)
         if pid != switchBladePID, !isVisible, !isSwitching {
             if currentAppPID != pid {
@@ -1276,13 +1283,20 @@ final class SwitcherStore: ObservableObject {
             recordFocusRankDecision(item: capturedSource, diagnosticID: focusDiagnosticID,
                                     context: "pre-panel-source-focus", outcome: "used-for-selection")
         }
+        // One ID ties the request, the off-main activation/verification and
+        // the completion rows of this selection together.
+        let actionDiagnosticID = UUID().uuidString
+        let actionContext = "selection-\(actionName)"
+        let activationSequenceAtStart = appActivationSequence
         let activationRequestID = item.pid != currentAppPID
-            ? markActivationRequest(
-                pid: item.pid,
-                context: "selection-\(actionName)",
-                source: actionSource,
-                windowID: item.id
-            )
+            ? PerformanceDiagnostics.$correlationID.withValue(actionDiagnosticID) {
+                markActivationRequest(
+                    pid: item.pid,
+                    context: actionContext,
+                    source: actionSource,
+                    windowID: item.id
+                )
+            }
             : nil
         Logger.switcher.info(
             "Begin selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
@@ -1298,7 +1312,9 @@ final class SwitcherStore: ObservableObject {
                     )
                 }
                 let executionStart = Date()
-                let result = action(activator, target)
+                let result = PerformanceDiagnostics.$correlationID.withValue(actionDiagnosticID) {
+                    PerformanceDiagnostics.$context.withValue(actionContext) { action(activator, target) }
+                }
                 executionTiming.withValue { $0.executionMs = Date().timeIntervalSince(executionStart) * 1000 }
                 return result
             },
@@ -1317,7 +1333,9 @@ final class SwitcherStore: ObservableObject {
                     focusDiagnosticID: focusDiagnosticID,
                     backgroundedFocusWasRequested: backgroundedPID != nil,
                     originalSourceFocus: originalSourceFocus,
-                    executionTiming: executionTiming.value
+                    executionTiming: executionTiming.value,
+                    activationSequenceAtStart: activationSequenceAtStart,
+                    actionDiagnosticID: actionDiagnosticID
                 )
             }
         )
@@ -1411,7 +1429,9 @@ final class SwitcherStore: ObservableObject {
         focusDiagnosticID: String,
         backgroundedFocusWasRequested: Bool,
         originalSourceFocus: OpenSourceFocus?,
-        executionTiming: (queueMs: Double?, executionMs: Double?)
+        executionTiming: (queueMs: Double?, executionMs: Double?),
+        activationSequenceAtStart: Int,
+        actionDiagnosticID: String
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
         let timingFields: [String: PerformanceMetricValue] = [
@@ -1427,16 +1447,18 @@ final class SwitcherStore: ObservableObject {
             Logger.switcher.notice(
                 "Selection action failed action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public); preserving state"
             )
-            PerformanceDiagnostics.record(
-                "selection_action_failed",
-                fields: timingFields.merging([
-                    "action": .string(actionName),
-                    "action_ms": .double(actionMs),
-                    "pid": .int(Int(item.pid)),
-                    "source": .string(actionSource),
-                    "window_id": .int(Int(item.id))
-                ]) { _, new in new }
-            )
+            PerformanceDiagnostics.$correlationID.withValue(actionDiagnosticID) {
+                PerformanceDiagnostics.record(
+                    "selection_action_failed",
+                    fields: timingFields.merging([
+                        "action": .string(actionName),
+                        "action_ms": .double(actionMs),
+                        "pid": .int(Int(item.pid)),
+                        "source": .string(actionSource),
+                        "window_id": .int(Int(item.id))
+                    ]) { _, new in new }
+                )
+            }
             if let originalSourceFocus,
                originalSourceFocus.openID == openDiagnosticID,
                originalSourceFocus.settingsGeneration == settingsGeneration,
@@ -1461,7 +1483,11 @@ final class SwitcherStore: ObservableObject {
         // still switching. Success must reconcile history and cache itself.
         // A notification already processed for this target keeps its previous
         // app; a newer external activation must not be overwritten here.
-        let selectionStillOwnsFocus = currentAppPID == sourceAppPID || currentAppPID == item.pid
+        // PID equality alone cannot see a return to the source app while the
+        // action ran; any newer non-target activation makes this result stale.
+        let newerActivationElsewhere = hasAppActivation(since: activationSequenceAtStart, otherThan: item.pid)
+        let selectionStillOwnsFocus = !newerActivationElsewhere
+            && (currentAppPID == sourceAppPID || currentAppPID == item.pid)
         if selectionStillOwnsFocus, currentAppPID != item.pid {
             if let currentAppPID, currentAppPID != switchBladePID {
                 previousAppPID = currentAppPID
@@ -1524,26 +1550,37 @@ final class SwitcherStore: ObservableObject {
         let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
         let preHideMs = scheduledAt.timeIntervalSince(actionStart) * 1000
         let totalPrepareMs = Date().timeIntervalSince(actionStart) * 1000
-        PerformanceDiagnostics.record(
-            "selection_action_dispatch",
-            fields: timingFields.merging([
-                "action": .string(actionName),
-                "action_ms": .double(actionMs),
-                "cache_sync_ms": .double(cacheSyncMs),
-                "dispatch_delay_ms": .double(dispatchDelayMs),
-                "hide_ms": .double(dispatchDelayMs),
-                "pid": .int(Int(item.pid)),
-                "pre_hide_ms": .double(preHideMs),
-                "remember_ms": .double(rememberMs),
-                "result": .string(result.rawValue),
-                "source": .string(actionSource),
-                "total_prepare_ms": .double(totalPrepareMs),
-                "window_id": .int(Int(item.id))
-            ]) { _, new in new }
-        )
+        PerformanceDiagnostics.$correlationID.withValue(actionDiagnosticID) {
+            PerformanceDiagnostics.record(
+                "selection_action_dispatch",
+                fields: timingFields.merging([
+                    "action": .string(actionName),
+                    "action_ms": .double(actionMs),
+                    "cache_sync_ms": .double(cacheSyncMs),
+                    "dispatch_delay_ms": .double(dispatchDelayMs),
+                    "hide_ms": .double(dispatchDelayMs),
+                    "pid": .int(Int(item.pid)),
+                    "pre_hide_ms": .double(preHideMs),
+                    "remember_ms": .double(rememberMs),
+                    "result": .string(result.rawValue),
+                    "source": .string(actionSource),
+                    "total_prepare_ms": .double(totalPrepareMs),
+                    "window_id": .int(Int(item.id))
+                ]) { _, new in new }
+            )
+        }
         Logger.switcher.info(
             "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
         )
+    }
+
+    private func hasAppActivation(since sequence: Int, otherThan targetPID: pid_t) -> Bool {
+        guard appActivationSequence != sequence else { return false }
+        // Entries older than the log cannot be checked; treat overflow as newer focus.
+        guard let oldest = recentAppActivations.first, oldest.sequence <= sequence + 1 else { return true }
+        return recentAppActivations.contains {
+            $0.sequence > sequence && $0.pid != targetPID && $0.pid != switchBladePID
+        }
     }
 
     private func syncCachedOpenStateAfterSelection(_ item: WindowItem, liveItems: [WindowItem]) {

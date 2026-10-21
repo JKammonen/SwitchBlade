@@ -100,10 +100,22 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let candidateCount: Int
         let candidateTotal: Int
         let axResults: [String: Int]
+        /// The match was only a closest/fallback guess, so nothing was
+        /// unminimized, raised or focused.
+        var raiseWithheld = false
 
         static func unmatched(candidateTotal: Int = -1) -> Self {
             Self(targeted: false, element: nil, matchedIndex: nil, evidence: .weak("no-match"),
                  matchReason: "none", candidateCount: -1, candidateTotal: candidateTotal, axResults: [:])
+        }
+
+        static func withheld(
+            matchedIndex: Int, evidence: WindowMatchEvidence, matchReason: String,
+            candidateCount: Int, candidateTotal: Int
+        ) -> Self {
+            Self(targeted: false, element: nil, matchedIndex: matchedIndex, evidence: evidence,
+                 matchReason: matchReason, candidateCount: candidateCount, candidateTotal: candidateTotal,
+                 axResults: [:], raiseWithheld: true)
         }
     }
 
@@ -161,11 +173,12 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             : .notObserved
         let classification = Self.classifyActivation(
             applicationActivated: activated, targeted: targeting.targeted,
-            evidence: targeting.evidence, focus: focus.outcome
+            evidence: targeting.evidence, focus: focus.outcome, raiseWithheld: targeting.raiseWithheld
         )
         let result = classification.result
+        // The pre-verification rule raised every match, including withheld guesses.
         let legacyResult: WindowActivationResult = activated
-            ? (targeting.targeted ? .selectedTarget : .applicationOnly)
+            ? (targeting.targeted || targeting.raiseWithheld ? .selectedTarget : .applicationOnly)
             : .failed
         var fields: [String: PerformanceMetricValue] = [
             "window_id": .int(Int(item.id)),
@@ -190,7 +203,8 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             "activation_total_ms": .double((ProcessInfo.processInfo.systemUptime - start) * 1000),
             "legacy_result": .string(legacyResult.rawValue),
             "result": .string(result.rawValue),
-            "result_reason": .string(classification.reason)
+            "result_reason": .string(classification.reason),
+            "raise_withheld": .bool(targeting.raiseWithheld)
         ]
         if let sample = focus.lastSample {
             fields["target_application_active_at_check"] = .bool(sample.targetApplicationActive)
@@ -212,9 +226,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         applicationActivated: Bool,
         targeted: Bool,
         evidence: WindowMatchEvidence,
-        focus: MatchedElementFocus
+        focus: MatchedElementFocus,
+        raiseWithheld: Bool = false
     ) -> (result: WindowActivationResult, reason: String) {
         guard applicationActivated else { return (.failed, "application-activation-unconfirmed") }
+        guard !raiseWithheld else { return (.applicationOnly, "raise-withheld-\(evidence.basis)") }
         guard targeted else { return (.applicationOnly, "ax-targeting-failed") }
         guard evidence.isUnique else { return (.applicationOnly, "match-evidence-\(evidence.basis)") }
         guard focus == .focused else { return (.applicationOnly, "matched-element-\(focus.rawValue)") }
@@ -267,6 +283,20 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
         guard evidenceIndex == chosenIndex else { return .weak("decision-differs-from-evidence") }
         return .unique(basis)
+    }
+
+    /// Raising needs the chosen window itself to carry the selected row's
+    /// title or frame. Closest-frame and first-candidate picks have neither,
+    /// so raising them would put an arbitrary sibling forward. This is a
+    /// weaker bar than `matchEvidence`: a stale title with an unchanged frame
+    /// still raises, but such a result is not confirmed as exact.
+    static func chosenCandidateHasDirectEvidence(
+        for item: WindowActionTarget,
+        candidate: WindowMatchCandidate
+    ) -> Bool {
+        if !item.title.isEmpty, candidate.title == item.title { return true }
+        if let frame = candidate.frame, framesAreClose(frame, item.bounds) { return true }
+        return false
     }
 
     static func classifyFocusSample(_ sample: MatchedElementFocusSample) -> MatchedElementFocus {
@@ -541,6 +571,32 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
         let matchMs = Date().timeIntervalSince(matchStart) * 1000
         let window = match.element
+        let evidence = Self.matchEvidence(
+            for: item, candidates: match.candidates, chosenIndex: match.decision.index,
+            candidateScanIsComplete: match.candidateCount == match.candidateTotal
+        )
+        guard Self.chosenCandidateHasDirectEvidence(
+            for: item, candidate: match.candidates[match.decision.index]
+        ) else {
+            PerformanceDiagnostics.record(
+                "activation_ax_target",
+                fields: [
+                    "candidate_count": .int(match.candidateCount),
+                    "match_ms": .double(matchMs),
+                    "pid": .int(Int(item.pid)),
+                    "raise_withheld": .bool(true),
+                    "targeted": .bool(false),
+                    "window_pid": .int(Int(item.windowProcessIdentifier)),
+                    "window_id": .int(Int(item.id))
+                ]
+            )
+            Logger.activator.notice(
+                "AX raise withheld pid=\(item.pid, privacy: .public) windowID=\(item.id, privacy: .public) reason=\(match.decision.reason, privacy: .public) evidence=\(evidence.basis, privacy: .public)"
+            )
+            return .withheld(matchedIndex: match.decision.index, evidence: evidence,
+                             matchReason: match.decision.reason, candidateCount: match.candidateCount,
+                             candidateTotal: match.candidateTotal)
+        }
 
         var unminimizeResult: AXError?
         var unminimizeMs: Double?
@@ -609,10 +665,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             targeted: targeted,
             element: window,
             matchedIndex: match.decision.index,
-            evidence: Self.matchEvidence(
-                for: item, candidates: match.candidates, chosenIndex: match.decision.index,
-                candidateScanIsComplete: match.candidateCount == match.candidateTotal
-            ),
+            evidence: evidence,
             matchReason: match.decision.reason,
             candidateCount: match.candidateCount,
             candidateTotal: match.candidateTotal,
@@ -638,10 +691,17 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 for: item, candidates: injected.candidates,
                 preferNonMainOnTies: item.isFrontmostApp, candidateScanIsComplete: complete
             ) else { return .unmatched(candidateTotal: injected.total) }
+            let evidence = Self.matchEvidence(for: item, candidates: injected.candidates,
+                                              chosenIndex: decision.index, candidateScanIsComplete: complete)
+            guard Self.chosenCandidateHasDirectEvidence(
+                for: item, candidate: injected.candidates[decision.index]
+            ) else {
+                return .withheld(matchedIndex: decision.index, evidence: evidence, matchReason: decision.reason,
+                                 candidateCount: injected.candidates.count, candidateTotal: injected.total)
+            }
             return ActivationTargeting(
                 targeted: true, element: nil, matchedIndex: decision.index,
-                evidence: Self.matchEvidence(for: item, candidates: injected.candidates,
-                                             chosenIndex: decision.index, candidateScanIsComplete: complete),
+                evidence: evidence,
                 matchReason: decision.reason, candidateCount: injected.candidates.count,
                 candidateTotal: injected.total, axResults: [:]
             )
