@@ -272,6 +272,25 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `PartialActivationTests` covers visible/prepared/resolving release, history,
   exact-window MRU preservation, backgrounded-window order, fresh sibling order
   and newer external focus.
+- **Is a "selected-target" switch really the chosen window?** → read
+  `activation_verification`. `selectedTarget` needs three separate facts:
+  confirmed app activation; unique match evidence (complete AX candidate scan,
+  every title/frame the rule depends on readable, and the matcher chose the
+  `unique-title`, `unique-title-frame` or `unique-untitled-frame` window); and
+  that matched AX element observed as the owner process's focused window
+  (`matched_element_focus`, 150 ms soft budget, 15 ms polling, no stability
+  floor, no corrective raise or retry). Anything else is `applicationOnly`
+  with `result_reason`; `legacy_result` shows the pre-verification rule.
+  Closest-frame, first-candidate and singleton matches are never unique.
+  `matched-element-focused` proves only that the *matched* element got focus,
+  not that the match was the selected row. Undetectable with this data model:
+  a sibling that took over the selected title (or exact frame when untitled).
+  `unknown` (unreadable focused window) is never a mismatch or a success. The
+  system-wide AX element is not used: its messaging timeout is process-wide.
+  `selection_action_dispatch.queue_ms`/`execution_ms` separate lane wait from
+  the action. A verified result that completes after a newer external
+  activation does not call `rememberSelection`. The double-modifier window
+  path inherits the stricter result. Regressions: `ActivationVerification/*`.
 - **Cmd+Tab does nothing, or release activates nothing** → look for
   `selection_action_refused`. The single window-action lane stays busy while
   detached AX work finishes, even after `hide()` dropped the caller task. The

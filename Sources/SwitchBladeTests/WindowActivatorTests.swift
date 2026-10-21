@@ -4,6 +4,11 @@ import Foundation
 
 enum WindowActivatorTests {
 
+    /// Exact-window success now also needs the matched element observed in focus.
+    private static let matchedFocus = WindowActivator.MatchedElementFocusSample(
+        targetApplicationActive: true, focusedWindowError: 0, focusedWindowIsMatchedElement: true
+    )
+
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("WindowActivator/strictMatchingRejectsTruncatedCandidates", strictMatchingRejectsTruncatedCandidates),
         ("WindowActivator/axScreensUsePrimaryDisplayOrigin", axScreensUsePrimaryDisplayOrigin),
@@ -324,7 +329,8 @@ enum WindowActivatorTests {
                 activatedPIDs.append(pid)
                 return true
             },
-            isApplicationActiveOverride: { _ in true }
+            isApplicationActiveOverride: { _ in true },
+            focusSampleOverride: { _, _ in matchedFocus }
         )
 
         let succeeded = activator.activate(makeItem(id: 2, pid: 100, title: "Sibling", isFrontmostApp: true).actionTarget)
@@ -347,7 +353,8 @@ enum WindowActivatorTests {
                         steps.append("app:\(pid)")
                         return activationSucceeded
                     },
-                    isApplicationActiveOverride: { _ in false }
+                    isApplicationActiveOverride: { _ in false },
+                    focusSampleOverride: { _, _ in matchedFocus }
                 )
                 let expected: WindowActivationResult = activationSucceeded
                     ? (raised ? .selectedTarget : .applicationOnly) : .failed
@@ -370,7 +377,8 @@ enum WindowActivatorTests {
             activateApplicationOverride: { pid in
                 activatedPIDs.append(pid)
                 return true
-            }
+            },
+            focusSampleOverride: { _, _ in matchedFocus }
         )
 
         let succeeded = activator.activate(makeItem(id: 3, pid: 200, title: "Background", isFrontmostApp: false).actionTarget)
@@ -391,7 +399,8 @@ enum WindowActivatorTests {
             activateApplicationOverride: { pid in
                 activatedPIDs.append(pid)
                 return true
-            }
+            },
+            focusSampleOverride: { _, _ in matchedFocus }
         )
 
         let item = makeItem(
@@ -501,11 +510,17 @@ enum WindowActivatorTests {
             var steps: [String] = []
             let activator = WindowActivator(
                 raiseWindowOverride: { _ in steps.append("window"); return raised },
-                activateApplicationOverride: { _ in steps.append("app"); return activated }
+                activateApplicationOverride: { _ in steps.append("app"); return activated },
+                focusSampleOverride: { _, _ in matchedFocus }
             )
             try expectEqual(activator.activateWithResult(makeItem(id: 2, pid: 200).actionTarget), expected)
             try expectEqual(steps, ["window", "app"], "AX targeting must still precede app activation")
         }
+        // Accepted AX calls plus an active app, without observed focus of the
+        // matched element, are app-level success only.
+        let unobserved = WindowActivator(raiseWindowOverride: { _ in true },
+                                         activateApplicationOverride: { _ in true })
+        try expectEqual(unobserved.activateWithResult(makeItem(id: 2, pid: 200).actionTarget), .applicationOnly)
     }
 
     static func activationResultChecksFrontmostState() throws {

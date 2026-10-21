@@ -1269,6 +1269,8 @@ final class SwitcherStore: ObservableObject {
         }
         let panelMayHaveChangedSourceFocus = isVisible && liveItems.filter { $0.pid == sourceAppPID }.count > 1
         let backgroundedFocusBeforeActivation = LockedValue<WindowItem?>(capturedSource)
+        // Lane wait and the action itself, measured inside the detached work.
+        let executionTiming = LockedValue<(queueMs: Double?, executionMs: Double?)>((nil, nil))
         let focusDiagnosticID = UUID().uuidString
         if let capturedSource {
             recordFocusRankDecision(item: capturedSource, diagnosticID: focusDiagnosticID,
@@ -1287,13 +1289,18 @@ final class SwitcherStore: ObservableObject {
         )
         let started = startWindowAction(
             operation: {
+                let operationStart = Date()
+                executionTiming.withValue { $0.queueMs = operationStart.timeIntervalSince(actionStart) * 1000 }
                 if capturedSource == nil, !panelMayHaveChangedSourceFocus, let backgroundedPID {
                     backgroundedFocusBeforeActivation.value = Self.diagnosticFocusedWindow(
                         catalog: catalog, pid: backgroundedPID,
                         diagnosticID: focusDiagnosticID, context: "pre-activation-backgrounded-focus"
                     )
                 }
-                return action(activator, target)
+                let executionStart = Date()
+                let result = action(activator, target)
+                executionTiming.withValue { $0.executionMs = Date().timeIntervalSince(executionStart) * 1000 }
+                return result
             },
             completion: { [weak self] result in
                 self?.completeSelectionAction(
@@ -1309,7 +1316,8 @@ final class SwitcherStore: ObservableObject {
                     backgroundedFocusBeforeActivation: backgroundedFocusBeforeActivation.value,
                     focusDiagnosticID: focusDiagnosticID,
                     backgroundedFocusWasRequested: backgroundedPID != nil,
-                    originalSourceFocus: originalSourceFocus
+                    originalSourceFocus: originalSourceFocus,
+                    executionTiming: executionTiming.value
                 )
             }
         )
@@ -1402,9 +1410,14 @@ final class SwitcherStore: ObservableObject {
         backgroundedFocusBeforeActivation: WindowItem?,
         focusDiagnosticID: String,
         backgroundedFocusWasRequested: Bool,
-        originalSourceFocus: OpenSourceFocus?
+        originalSourceFocus: OpenSourceFocus?,
+        executionTiming: (queueMs: Double?, executionMs: Double?)
     ) {
         let actionMs = Date().timeIntervalSince(actionStart) * 1000
+        let timingFields: [String: PerformanceMetricValue] = [
+            "queue_ms": .double(executionTiming.queueMs ?? -1),
+            "execution_ms": .double(executionTiming.executionMs ?? -1)
+        ]
         guard result != .failed else {
             recordFocusRankDecision(item: backgroundedFocusBeforeActivation, diagnosticID: focusDiagnosticID,
                                     context: "pre-activation-backgrounded-focus", outcome: "discarded-action-failed")
@@ -1416,13 +1429,13 @@ final class SwitcherStore: ObservableObject {
             )
             PerformanceDiagnostics.record(
                 "selection_action_failed",
-                fields: [
+                fields: timingFields.merging([
                     "action": .string(actionName),
                     "action_ms": .double(actionMs),
                     "pid": .int(Int(item.pid)),
                     "source": .string(actionSource),
                     "window_id": .int(Int(item.id))
-                ]
+                ]) { _, new in new }
             )
             if let originalSourceFocus,
                originalSourceFocus.openID == openDiagnosticID,
@@ -1461,7 +1474,9 @@ final class SwitcherStore: ObservableObject {
         }
         windowFocusObserver?.observe(pid: currentAppPID)
         let rememberStart = Date()
-        if result == .selectedTarget {
+        // A verified result that completes after a newer external activation
+        // must not move the old selection ahead of that newer focus.
+        if result == .selectedTarget, selectionStillOwnsFocus {
             mruTracker.rememberSelection(
                 item.id,
                 in: liveItems,
@@ -1511,7 +1526,7 @@ final class SwitcherStore: ObservableObject {
         let totalPrepareMs = Date().timeIntervalSince(actionStart) * 1000
         PerformanceDiagnostics.record(
             "selection_action_dispatch",
-            fields: [
+            fields: timingFields.merging([
                 "action": .string(actionName),
                 "action_ms": .double(actionMs),
                 "cache_sync_ms": .double(cacheSyncMs),
@@ -1524,7 +1539,7 @@ final class SwitcherStore: ObservableObject {
                 "source": .string(actionSource),
                 "total_prepare_ms": .double(totalPrepareMs),
                 "window_id": .int(Int(item.id))
-            ]
+            ]) { _, new in new }
         )
         Logger.switcher.info(
             "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
