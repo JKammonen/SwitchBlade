@@ -92,6 +92,10 @@ enum WindowFocusHistoryTests {
         let f = Fixture()
         let gate = LockedValue(false)
         defer { gate.value = true; f.store.cancel() }
+        // Fake PIDs have no NSRunningApplication bundle. Seed the same live
+        // identity evidence a real bundled incoming app supplies immediately,
+        // before racing its concrete upgrade against departure resolution.
+        await f.store.warmPreviewCache(context: "pending-focus-cache")
         f.observer.emit(f.booking, gate: gate)
         f.depart()
         gate.value = true

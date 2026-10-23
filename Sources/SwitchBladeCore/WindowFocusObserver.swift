@@ -5,11 +5,14 @@ import ApplicationServices
 /// element off-main even if the app reports another focused window later.
 struct WindowFocusCapture: Sendable {
     let pid: pid_t
+    let diagnosticID: String
     let invalidatesMembership: Bool
     let resolve: @Sendable () -> WindowItem?
 
-    init(pid: pid_t, invalidatesMembership: Bool = true, resolve: @escaping @Sendable () -> WindowItem?) {
+    init(pid: pid_t, invalidatesMembership: Bool = true, diagnosticID: String = UUID().uuidString,
+         resolve: @escaping @Sendable () -> WindowItem?) {
         self.pid = pid
+        self.diagnosticID = diagnosticID
         self.invalidatesMembership = invalidatesMembership
         self.resolve = resolve
     }
@@ -18,7 +21,17 @@ struct WindowFocusCapture: Sendable {
 @MainActor
 protocol WindowFocusObserving: AnyObject {
     var onFocus: ((WindowFocusCapture) -> Void)? { get set }
+    var shouldCaptureFocus: (() -> Bool)? { get set }
     func observe(pid: pid_t?)
+    func cancelPendingFocusReads()
+}
+
+extension WindowFocusObserving {
+    var shouldCaptureFocus: (() -> Bool)? {
+        get { nil }
+        set { }
+    }
+    func cancelPendingFocusReads() { }
 }
 
 /// AX registration can fail with cannotComplete during app activation. Retry
@@ -41,7 +54,13 @@ final class WindowFocusRegistration {
     }
 
     func observe(pid: pid_t?) {
-        if desiredPID == pid, registeredPID == pid || retryTask != nil { return }
+        let unchanged = desiredPID == pid && (registeredPID == pid || retryTask != nil)
+        PerformanceDiagnostics.record("focus_observer_request", fields: [
+            "pid": .int(Int(pid ?? -1)), "previous_desired_pid": .int(Int(desiredPID ?? -1)),
+            "registered_pid": .int(Int(registeredPID ?? -1)), "retry_pending": .bool(retryTask != nil),
+            "outcome": .string(unchanged ? "unchanged" : (pid == nil ? "stop" : "register"))
+        ])
+        if unchanged { return }
         generation &+= 1
         retryTask?.cancel()
         retryTask = nil
@@ -100,9 +119,17 @@ struct WindowFocusSubscriptions {
 @MainActor
 final class WindowFocusObserver: WindowFocusObserving {
     var onFocus: ((WindowFocusCapture) -> Void)?
+    var shouldCaptureFocus: (() -> Bool)?
     private let catalog: WindowCatalog
     private var registration: Registration?
     private var observedPID: pid_t?
+    private lazy var captureDriver = WindowFocusReadRecovery(
+        frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        isAllowed: { [weak self] in self?.shouldCaptureFocus?() ?? (self != nil) },
+        read: { [weak self] request in
+            self?.readFocus(request) ?? .failure(.invalidUIElement, "discarded-no-registration")
+        }, deliver: { [weak self] capture in self?.onFocus?(capture) }
+    )
     private lazy var registrationDriver = WindowFocusRegistration(
         attempt: { [weak self] pid, attempt in
             self?.installObservation(pid: pid, attemptIndex: attempt) ?? .failure
@@ -132,9 +159,12 @@ final class WindowFocusObserver: WindowFocusObserving {
     init(catalog: WindowCatalog) { self.catalog = catalog }
 
     func observe(pid: pid_t?) {
+        cancelPendingFocusReads()
         observedPID = pid == getpid() ? nil : pid
         registrationDriver.observe(pid: observedPID)
     }
+
+    func cancelPendingFocusReads() { captureDriver.cancel(reason: "observer-or-action-change") }
 
     private func installObservation(pid: pid_t, attemptIndex: Int) -> AXError {
         guard AXIsProcessTrusted() else { return .apiDisabled }
@@ -145,10 +175,11 @@ final class WindowFocusObserver: WindowFocusObserving {
             let application = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(application, 0.05)
             var observer: AXObserver?
-            let status = AXObserverCreate(pid, { _, _, _, context in
+            let status = AXObserverCreate(pid, { _, _, notification, context in
                 guard let context else { return }
                 MainActor.assumeIsolated {
-                    Unmanaged<WindowFocusObserver>.fromOpaque(context).takeUnretainedValue().captureFocus()
+                    Unmanaged<WindowFocusObserver>.fromOpaque(context).takeUnretainedValue()
+                        .captureFocus(trigger: WindowFocusObserver.diagnosticTrigger(notification as String))
                 }
             }, &observer)
             guard status == .success, let observer else { return status == .success ? .failure : status }
@@ -171,26 +202,48 @@ final class WindowFocusObserver: WindowFocusObserving {
             if registration == nil {
                 registration = candidate
                 CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(candidate.observer), .commonModes)
+                captureFocus(invalidatesMembership: false, trigger: "registration")
             }
-            captureFocus(invalidatesMembership: false)
+            // A subscription retry only repairs coverage. A new read here
+            // could outlive a self-action's cancellation and rank its sibling.
         }
         if attemptIndex == 0, results.contains(.cannotComplete) { return .cannotComplete }
         return candidate.subscriptions.registered.isEmpty ? (results.first ?? .failure) : .success
     }
 
-    private func captureFocus(invalidatesMembership: Bool = true) {
-        guard let pid = observedPID, let registration,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+    private static func diagnosticTrigger(_ notification: String) -> String {
+        switch notification {
+        case kAXFocusedWindowChangedNotification: return "focused-window-changed"
+        case kAXMainWindowChangedNotification: return "main-window-changed"
+        case kAXWindowCreatedNotification: return "window-created"
+        default: return "other-notification"
+        }
+    }
+
+    private func captureFocus(invalidatesMembership: Bool = true, trigger: String) {
+        guard let pid = observedPID else { return }
+        captureDriver.capture(pid: pid, trigger: trigger, invalidatesMembership: invalidatesMembership)
+    }
+
+    private func readFocus(_ request: WindowFocusReadRecovery.Request) -> WindowFocusReadRecovery.Result {
+        guard observedPID == request.pid, let registration else {
+            return .failure(.invalidUIElement, "discarded-no-registration")
+        }
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
+        let error = AXUIElementCopyAttributeValue(
             registration.application, kAXFocusedWindowAttribute as CFString, &value
-        ) == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID(),
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+        )
+        guard error == .success else { return .failure(error, "ax-error") }
+        guard let value else { return .failure(.success, "missing-value") }
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return .failure(.success, "unexpected-value-type")
+        }
         let window = value as! AXUIElement
         let captured = CapturedWindow(element: window)
         let catalog = catalog
-        onFocus?(WindowFocusCapture(pid: pid, invalidatesMembership: invalidatesMembership, resolve: {
-            catalog.observedWindowItem(pid: pid, window: captured.element)
+        return .captured(WindowFocusCapture(pid: request.pid, invalidatesMembership: request.invalidatesMembership,
+                                            diagnosticID: request.diagnosticID, resolve: {
+            catalog.observedWindowItem(pid: request.pid, window: captured.element)
         }))
     }
 }

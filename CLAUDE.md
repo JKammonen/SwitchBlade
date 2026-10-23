@@ -234,6 +234,19 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   across a snapshot/focus probe, including coalesced snapshot consumers.
   `frontmost_focus_normalize` reports matched/chosen IDs and unresolved/skipped
   outcomes; `focus_rank_decision` says whether the result was accepted or discarded.
+  For lost recent use, follow `app_activation_received` / `_processed` (including
+  suppressed activations), `focus_observer_request` / `_capture`,
+  `observed_window_resolution`, `foreground_focus_resolution` and
+  `foreground_focus_decision`. Capture resolution and accepted MRU share a
+  `correlation_id`; a fallback upgrade names its `parent_correlation_id`.
+  `mru_system_activation` distinguishes an unavailable app identity from a
+  recorded coarse rank. Debug-only `focus_tracking_sample` compares the actual
+  frontmost PID with tracked history once per second, emitting changes and a
+  30-second heartbeat without AX/CG scans or history changes. It can miss
+  sub-second visits. `selection_focus_ownership` and
+  `previous_switch_focus_ownership` expose late completions and activation order.
+  Investigation, confirmed loss paths and proof limits:
+  [FOCUS_TRACKING_DIAGNOSTICS.md](FOCUS_TRACKING_DIAGNOSTICS.md).
   Sequence and monotonic emission time are captured before asynchronous writes;
   file order and wall-clock write timestamps alone are not causal order.
   Rows contain IDs/state/reasons only. Logging remains debug-only, size-bounded,
@@ -247,6 +260,12 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   while the panel was still hidden. An already-processed target notification,
   same-app selection, or failed action must not corrupt previous-app history;
   a newer external activation must survive an older action completion.
+  External activations received while resolving/visible still update app
+  history and coarse MRU immediately, without reordering the displayed list.
+  Their exact AX upgrade waits until idle and the committed action lane is
+  free; own panel activation preserves that pending upgrade. Verified selection
+  supersedes it without a post-transition sibling scan. A stale completion
+  updates neither the selected rank nor its outgoing source rank.
   `CachedSwitchOrderingTests` covers those paths without real window actions.
   A delayed minimized merge keeps surviving
   displayed rows in their existing relative order and retains selection by ID;
@@ -328,6 +347,20 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   cancels on a newer app, and never polls. Successful subscriptions stay active
   while only missing coverage is retried; `window_focus_subscriptions` logs each
   notification's result and `window_focus_observer` logs attempt/duration.
+  A successful registration does not guarantee a successful focused-window
+  read: signed Outlook callbacks also returned `cannotComplete` (-25204).
+  `WindowFocusReadRecovery` retries only that read error, at most three times
+  after 150/350/700 ms. One sequence is shared by all notification kinds;
+  newer notifications supersede it. Each read checks foreground PID and store
+  eligibility before and after AX IPC. Observer changes, panel opening and
+  either window-action lane cancel pending reads, including same-PID actions.
+  Capture retains the exact AX element; main/created windows are never inferred
+  as focused. Subscription-only registration retries do not start another read
+  after an existing observer was attached. `focus_observer_capture` includes
+  attempt, correlation, AX error, cancellation and exhaustion without titles.
+  Regressions: `WindowFocusReadRecoveryTests` includes 19-row history and a
+  same-app action race. Deterministic recovery is verified; the intermittent
+  native Outlook failure must recur to prove that path in the signed app.
   A focus notification invalidates main-only cached membership immediately,
   including the rebased-cache shortcut; only a scan started after that event can
   clear this invalidation. Initial observation of an already cached window keeps

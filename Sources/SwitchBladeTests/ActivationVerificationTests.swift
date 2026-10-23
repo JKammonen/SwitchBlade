@@ -536,6 +536,9 @@ enum ActivationVerificationTests {
         defer { gate.semaphore.signal(); store.cancel() }
         for item in crossAppWindows.reversed() { tracker.trackFocusedWindowActivation(item) }
         catalog.visibleItems = crossAppWindows
+        // The previous fixture left this probe nil, bypassing the stale
+        // outgoing-source update even though the selected rank was protected.
+        catalog.focusedWindowItemsByPID[100] = crossAppWindows[0]
         try expectEqual(tracker.recentWindowIDs, [1, 2, 3])
         var ranksBeforeCompletion: [CGWindowID] = []
         let fields = try await commitAndWait(store, selecting: 2, whileRunning: {

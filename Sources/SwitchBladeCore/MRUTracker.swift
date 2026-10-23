@@ -289,6 +289,12 @@ final class MRUTracker {
     ) {
         let identity = bundleIdentifier.flatMap { $0.isEmpty ? nil : $0 }
             ?? liveItems.first(where: { $0.pid == pid }).map(appIdentity(for:))
+        PerformanceDiagnostics.record("mru_system_activation", fields: [
+            "pid": .int(Int(pid)), "live_count": .int(liveItems.count),
+            "outcome": .string(identity == nil ? "no-app-identity" : "identity-only-recorded"),
+            "identity_source": .string(bundleIdentifier?.isEmpty == false ? "bundle-argument" :
+                (identity != nil ? "live-item" : "unavailable"))
+        ])
         guard let identity else { return }
 
         recentRanks.removeAll { rank in

@@ -1890,18 +1890,42 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     /// The observer retained this exact AX window before deactivation. Never
     /// re-read AXFocusedWindow here: Outlook may already report its main window.
     func observedWindowItem(pid: pid_t, window: AXUIElement) -> WindowItem? {
+        let start = ProcessInfo.processInfo.systemUptime
+        var outcome = "invalid-role-or-system-dialog"
+        var windowPID: pid_t = 0
+        var ownerError = AXError.success
+        var candidateCount = 0
+        var matchedID: CGWindowID = 0
+        var titleAvailable = false
+        var frameAvailable = false
+        defer {
+            PerformanceDiagnostics.record("observed_window_resolution", fields: [
+                "pid": .int(Int(pid)), "window_pid": .int(Int(windowPID)),
+                "outcome": .string(outcome), "owner_error": .int(Int(ownerError.rawValue)),
+                "candidate_count": .int(candidateCount), "window_id": .int(Int(matchedID)),
+                "title_available": .bool(titleAvailable), "frame_available": .bool(frameAvailable),
+                "milliseconds": .double((ProcessInfo.processInfo.systemUptime - start) * 1_000)
+            ])
+        }
         AXUIElementSetMessagingTimeout(window, 0.05)
         guard axString(kAXRoleAttribute, on: window) == kAXWindowRole,
               axString(kAXSubroleAttribute, on: window) != kAXSystemDialogSubrole else { return nil }
-        var windowPID: pid_t = 0
-        guard AXUIElementGetPid(window, &windowPID) == .success else { return nil }
+        ownerError = AXUIElementGetPid(window, &windowPID)
+        guard ownerError == .success else { outcome = "owner-unresolved"; return nil }
         let title = axString(kAXTitleAttribute, on: window)
         let frame = axFrame(on: window)
+        titleAvailable = title != nil
+        frameAvailable = frame != nil
         return PerformanceDiagnostics.$context.withValue("foreground-window-focus") {
-            Self.observedWindowMatch(
-                in: snapshotInternal(includeMinimized: false, windowOwnerPID: windowPID).visible,
+            let candidates = snapshotInternal(includeMinimized: false, windowOwnerPID: windowPID).visible
+            candidateCount = candidates.count
+            let match = Self.observedWindowMatch(
+                in: candidates,
                 logicalPID: pid, windowPID: windowPID, focusedTitle: title, focusedFrame: frame
             )
+            outcome = match != nil ? "matched" : (candidates.isEmpty ? "no-visible-candidates" : "no-unambiguous-match")
+            matchedID = match?.id ?? 0
+            return match
         }
     }
 
@@ -1955,8 +1979,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         let appElement = AXUIElementCreateApplication(pid)
         _ = AXUIElementSetMessagingTimeout(appElement, axTimeoutSeconds)
         var rawValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &rawValue) == .success,
-              let rawValue,
+        let error = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &rawValue)
+        let outcome = error != .success ? "ax-error" : (rawValue == nil ? "missing-value" :
+            (CFGetTypeID(rawValue!) != AXUIElementGetTypeID() ? "unexpected-value-type" : "resolved"))
+        PerformanceDiagnostics.record("focused_ax_read", fields: [
+            "pid": .int(Int(pid)), "ax_error": .int(Int(error.rawValue)), "outcome": .string(outcome)
+        ])
+        guard error == .success, let rawValue,
               CFGetTypeID(rawValue) == AXUIElementGetTypeID() else {
             return nil
         }

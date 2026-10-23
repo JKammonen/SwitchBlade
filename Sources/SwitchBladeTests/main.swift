@@ -29,6 +29,8 @@ func runAll() async -> Int {
         ("SwitcherStore",           SwitcherStoreTests.all),
         ("CachedSwitchOrdering",     CachedSwitchOrderingTests.all),
         ("WindowFocusHistory",        WindowFocusHistoryTests.all),
+        ("WindowFocusReadRecovery",   WindowFocusReadRecoveryTests.all),
+        ("FocusTrackingDiagnostics",  FocusTrackingDiagnosticsTests.all),
         ("PartialActivation",        PartialActivationTests.all),
         ("ActivationVerification",   ActivationVerificationTests.all),
         ("WindowActionLane",         WindowActionLaneTests.all),
