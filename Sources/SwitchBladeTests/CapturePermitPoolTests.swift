@@ -1,9 +1,11 @@
+import AppKit
 import Darwin
 import Foundation
 @testable import SwitchBladeCore
 
 enum CapturePermitPoolTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("CapturePermitPool/primaryExhaustionLeavesBoundedRecoveryLane", primaryExhaustionLeavesBoundedRecoveryLane),
         ("CapturePermitPool/thirdAcquireWaitsForRelease", thirdAcquireWaitsForRelease),
         ("CapturePermitPool/contendedAcquiresDoNotStrandWaiters", contendedAcquiresDoNotStrandWaiters),
         ("CapturePermitPool/softTimeoutRetainsPermitUntilUnderlyingWorkReturns", softTimeoutRetainsPermitUntilUnderlyingWorkReturns),
@@ -14,6 +16,45 @@ enum CapturePermitPoolTests {
         ("AXScanBudget/capsApplicationsWindowsAndElapsedTime", axScanBudgetCapsAllDimensions),
         ("WindowActionCoordinator/holdsLaneUntilDetachedWorkReturns", windowActionCoordinatorHoldsLane)
     ]
+
+    @MainActor static func primaryExhaustionLeavesBoundedRecoveryLane() async throws {
+        let primary = WindowCatalog.processCapturePermitPool
+        let fallback = WindowCatalog.processFallbackPermitPool
+        var heldPrimary = 0
+        while primary.tryAcquire() { heldPrimary += 1 }
+        defer { for _ in 0..<heldPrimary { primary.release() } }
+        try expectEqual(heldPrimary, 6)
+        // Match the live 25-window snapshot with every SCKit slot occupied.
+        for id in 1...25 {
+            let outcome = await WindowCatalog.captureWithRecovery(windowID: CGWindowID(id), primary: {
+                switch await SCContentCache.runPermitBoundOperation(
+                    permitPool: primary, timeoutMs: 50, operation: { true }) {
+                case .resourceLimited: return .resourceLimited
+                default: return .failed
+                }
+            }, fallback: {
+                switch await SCContentCache.runPermitBoundOperation(
+                    permitPool: fallback, timeoutMs: 50, operation: { true }) {
+                case .completed: return .success(NSImage(size: NSSize(width: 10, height: 10)))
+                case .timedOut: return .timedOut
+                case .resourceLimited: return .resourceLimited
+                }
+            })
+            try expect(outcome.image != nil, "Primary starvation must leave all 25 recovery captures reachable")
+        }
+        var heldFallback = 0
+        while fallback.tryAcquire() { heldFallback += 1 }
+        defer { for _ in 0..<heldFallback { fallback.release() } }
+        try expectEqual(heldFallback, 6, "Recovery has its own finite process-wide budget")
+        let started = LockedValue(false)
+        let blocked = await SCContentCache.runPermitBoundOperation(
+            permitPool: fallback, timeoutMs: 50, operation: { started.value = true; return true })
+        if case .resourceLimited = blocked {} else {
+            try expect(false, "Full recovery lane must reject further work")
+        }
+        try expect(!started.value)
+        try expect(!primary.tryAcquire(), "Recovery must never release a still-owned primary slot")
+    }
 
     @MainActor static func thirdAcquireWaitsForRelease() async throws {
         let pool = CapturePermitPool(limit: 2)

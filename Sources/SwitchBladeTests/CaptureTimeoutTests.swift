@@ -6,6 +6,11 @@ import Foundation
 enum CaptureTimeoutTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("CaptureRecovery/timedOutPrimaryUsesFallback", timedOutPrimaryUsesFallback),
+        ("CaptureRecovery/exhaustedPrimaryUsesFallback", exhaustedPrimaryUsesFallback),
+        ("CaptureRecovery/cancelledPrimarySkipsFallback", cancelledPrimarySkipsFallback),
+        ("CaptureRecovery/retryTimeoutUsesFallback", retryTimeoutUsesFallback),
+        ("CaptureRecovery/successSkipsFallback", successSkipsFallback),
         ("CaptureRecovery/missingContentUsesFallback", missingContentUsesFallback),
         ("CaptureRecovery/missingContentRejectsPrivateFrame", missingContentRejectsPrivateFrame),
         ("CaptureRecovery/missingContentRequiresPermission", missingContentRequiresPermission),
@@ -35,6 +40,56 @@ enum CaptureTimeoutTests {
         ("CaptureStability/explicitOffscreenAllowanceIsExact", captureStability_explicitOffscreenAllowanceIsExact),
         ("CaptureStability/missingOnScreenStateRequiresExplicitAllowance", captureStability_missingOnScreenStateRequiresExplicitAllowance)
     ]
+
+    static func timedOutPrimaryUsesFallback() async throws {
+        let calls = LockedValue(0)
+        let outcome = await WindowCatalog.captureWithRecovery(windowID: 1, primary: {
+            calls.withValue { $0 += 1 }
+            return .timedOut
+        }, fallback: { .success(NSImage(size: NSSize(width: 10, height: 10))) })
+        try expect(outcome.image != nil, "A timed-out SCKit operation must leave CG recovery reachable")
+        try expectEqual(calls.value, 1, "Do not retry the blocked SCKit operation")
+    }
+
+    static func exhaustedPrimaryUsesFallback() async throws {
+        let outcome = await WindowCatalog.captureWithRecovery(windowID: 1,
+            primary: { .resourceLimited },
+            fallback: { .success(NSImage(size: NSSize(width: 10, height: 10))) })
+        try expect(outcome.image != nil, "Exhausted SCKit slots must not suppress reserved CG recovery")
+    }
+
+    static func cancelledPrimarySkipsFallback() async throws {
+        let called = LockedValue(false)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await WindowCatalog.captureWithRecovery(windowID: 1,
+                primary: { .timedOut }, fallback: {
+                    called.withValue { $0 = true }
+                    return .success(NSImage(size: NSSize(width: 10, height: 10)))
+                })
+        }
+        let outcome = await task.value
+        try expect(outcome.image == nil, "Cancelled batch must not recover a stale preview")
+        try expect(!called.value, "Cancellation must skip fallback work")
+    }
+
+    static func retryTimeoutUsesFallback() async throws {
+        let calls = LockedValue(0)
+        let outcome = await WindowCatalog.captureWithRecovery(windowID: 1, primary: {
+            calls.withValue { $0 += 1; return $0 == 1 ? .failed : .timedOut }
+        }, fallback: { .success(NSImage(size: NSSize(width: 10, height: 10))) })
+        try expect(outcome.image != nil, "Retry timeout must still allow CG recovery")
+        try expectEqual(calls.value, 2)
+    }
+
+    static func successSkipsFallback() async throws {
+        let called = LockedValue(false)
+        let outcome = await WindowCatalog.captureWithRecovery(windowID: 1,
+            primary: { .success(NSImage(size: NSSize(width: 10, height: 10))) },
+            fallback: { called.value = true; return .failed })
+        try expect(outcome.image != nil)
+        try expect(!called.value, "A successful primary must not add fallback work")
+    }
 
     static func missingContentCapture(sharingState: Int, permission: Bool = true) async -> [CGWindowID: NSImage] {
         let catalog = WindowCatalog(captureTestHooks: .init(

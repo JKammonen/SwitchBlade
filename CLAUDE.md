@@ -183,6 +183,18 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   records failure domain/code without private error text; `capture_previews`
   includes `sc_content_available`. `CaptureRecovery/*` tests exercise the actual
   capture path with missing content, private frames and denied permission.
+- **Display reconnect leaves previews missing** → a populated SC window list and
+  a valid recording grant do not prove that SCKit captures complete. Inspect
+  `capture_previews.first_timeouts` and `first_resource_limited`. A soft timeout
+  retains its SCKit permit until the underlying call returns. `captureWithRecovery`
+  skips further SCKit retries on timeout/exhaustion and tries CG fallback through
+  an independent process-wide pool (six SCKit + six CG calls maximum). Never
+  reset either pool on display changes: blocked calls still own their slots.
+  Cancellation and the batch's identity/privacy/geometry/visibility gates still
+  apply. `fallback_successes` reports returned fallback images before stability
+  rejection. Recovery tests cover timeout, exhausted slots, retry timeout,
+  cancellation, and a 25-window snapshot with all SCKit slots occupied. Physical
+  display reconnect remains a separate signed-app integration check.
 - **Slow previews after idle** → check first-batch latency and retry/soft-timeout
   counts in the performance log before attributing missing images to latency.
 - **Cmd+Tab falls through to the macOS switcher, then SwitchBlade works again** →

@@ -350,7 +350,7 @@ private struct MinimizedSnapshotContext: Hashable, Sendable {
     let hiddenAppTokens: Set<HiddenAppToken>
 }
 
-private struct WindowCaptureOutcome {
+struct WindowCaptureOutcome {
     let windowID: CGWindowID
     let image: NSImage?
     let firstAttempt: SCContentCache.CaptureAttemptResult
@@ -1145,7 +1145,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         "com.openai.sky.CUAService" // Software cursor overlays, not user windows.
     ]
 
-    private static let processCapturePermitPool = CapturePermitPool(limit: 6)
+    // Independent bounded lanes: stalled SCKit calls cannot starve CG recovery.
+    // At most twelve platform calls can outlive their soft timeouts process-wide.
+    static let processCapturePermitPool = CapturePermitPool(limit: 6)
+    static let processFallbackPermitPool = CapturePermitPool(limit: 6)
     private static let auxiliaryWindowAXTimeoutSeconds: Float = 0.05
     private static let maximumAuxiliaryValidationApplications = 8
     private static let maximumAuxiliaryValidationWindows = 64
@@ -2067,6 +2070,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             var secondAttemptTimeouts = 0
             var secondAttemptFailures = 0
             var secondAttemptResourceLimits = 0
+            var fallbackSuccesses = 0
             var fallbackTimeouts = 0
             var fallbackFailures = 0
             var fallbackResourceLimits = 0
@@ -2077,140 +2081,17 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 nextIndex += 1
                 nonisolated(unsafe) let capturedWindow = window
                 group.addTask {
-                    // Retry only a completed failure. A timed-out framework call
-                    // still owns its global permit until Apple's API returns, so
-                    // starting another call for the same window would compound
-                    // the stall this limiter exists to contain.
-                    let first = await SCContentCache.captureWithSoftTimeout(
-                        window: capturedWindow,
-                        maxDim: maxDim,
-                        timeoutMs: captureTimeoutMs,
-                        permitPool: permitPool
-                    )
-                    if case .success(let image) = first {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: image,
-                            firstAttempt: first,
-                            secondAttempt: nil,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    if Task.isCancelled {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: nil,
-                            firstAttempt: first,
-                            secondAttempt: nil,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    if case .timedOut = first {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: nil,
-                            firstAttempt: first,
-                            secondAttempt: nil,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    if case .resourceLimited = first {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: nil,
-                            firstAttempt: first,
-                            secondAttempt: nil,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    let reason: String = switch first {
-                    case .failed: "failed"
-                    case .success: "succeeded" // unreachable; success returned above
-                    case .timedOut: "timed out" // returned above
-                    case .resourceLimited: "resource limited" // returned above
-                    }
-                    Logger.capture.notice(
-                        "First capture \(reason, privacy: .public) for windowID=\(windowID, privacy: .public) — retrying"
-                    )
-                    let second = await SCContentCache.captureWithSoftTimeout(
-                        window: capturedWindow,
-                        maxDim: maxDim,
-                        timeoutMs: captureTimeoutMs,
-                        permitPool: permitPool
-                    )
-                    if case .success(let image) = second {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: image,
-                            firstAttempt: first,
-                            secondAttempt: second,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    if Task.isCancelled {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: nil,
-                            firstAttempt: first,
-                            secondAttempt: second,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    if case .timedOut = second {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: nil,
-                            firstAttempt: first,
-                            secondAttempt: second,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    if case .resourceLimited = second {
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: nil,
-                            firstAttempt: first,
-                            secondAttempt: second,
-                            fallbackAttempt: nil
-                        )
-                    }
-                    let fallback = await self.previewFallback(
+                    await Self.captureWithRecovery(
                         windowID: windowID,
-                        maxDim: maxDim,
-                        timeoutMs: fallbackTimeoutMs,
-                        permitPool: permitPool
-                    )
-                    if case .success(let image) = fallback {
-                        Logger.capture.notice(
-                            "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — SCKit retry also failed"
-                        )
-                        return WindowCaptureOutcome(
-                            windowID: windowID,
-                            image: image,
-                            firstAttempt: first,
-                            secondAttempt: second,
-                            fallbackAttempt: fallback
-                        )
-                    }
-                    if case .timedOut = fallback {
-                        Logger.capture.error(
-                            "CGWindowList fallback timed out for windowID=\(windowID, privacy: .public)"
-                        )
-                    } else if case .resourceLimited = fallback {
-                        Logger.capture.notice(
-                            "CGWindowList fallback skipped by global capture limit for windowID=\(windowID, privacy: .public)"
-                        )
-                    } else {
-                        Logger.capture.error(
-                            "All capture attempts failed for windowID=\(windowID, privacy: .public)"
-                        )
-                    }
-                    return WindowCaptureOutcome(
-                        windowID: windowID,
-                        image: nil,
-                        firstAttempt: first,
-                        secondAttempt: second,
-                        fallbackAttempt: fallback
+                        primary: {
+                            await SCContentCache.captureWithSoftTimeout(
+                                window: capturedWindow, maxDim: maxDim,
+                                timeoutMs: captureTimeoutMs, permitPool: permitPool)
+                        },
+                        fallback: {
+                            await self.previewFallback(windowID: windowID, maxDim: maxDim,
+                                timeoutMs: fallbackTimeoutMs, permitPool: Self.processFallbackPermitPool)
+                        }
                     )
                 }
 
@@ -2251,7 +2132,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 if let fallbackAttempt = captureResult.fallbackAttempt {
                     switch fallbackAttempt {
                     case .success:
-                        break
+                        fallbackSuccesses += 1
                     case .failed:
                         fallbackFailures += 1
                     case .timedOut:
@@ -2276,7 +2157,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                                 windowID: wid,
                                 maxDim: maxDim,
                                 timeoutMs: fallbackTimeoutMs,
-                                permitPool: permitPool
+                                permitPool: Self.processFallbackPermitPool
                             )
                             return (wid, fallback)
                         }
@@ -2284,6 +2165,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     for await (windowID, fallback) in fallbackGroup {
                         switch fallback {
                         case .success(let image):
+                            fallbackSuccesses += 1
                             Logger.capture.notice(
                                 "CGWindowList fallback used for windowID=\(windowID, privacy: .public) — not in SCShareableContent"
                             )
@@ -2335,6 +2217,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     "fallback_failures": .int(fallbackFailures),
                     "fallback_resource_limited": .int(fallbackResourceLimits),
                     "fallback_timeouts": .int(fallbackTimeouts),
+                    "fallback_successes": .int(fallbackSuccesses),
                     "second_failures": .int(secondAttemptFailures),
                     "second_resource_limited": .int(secondAttemptResourceLimits),
                     "second_timeouts": .int(secondAttemptTimeouts),
@@ -2909,13 +2792,47 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         return CGRect(origin: point, size: size)
     }
 
+    /// Shared per-window pipeline; batch acceptance still validates identity,
+    /// sharing state, geometry and visibility before publishing any image.
+    static func captureWithRecovery(
+        windowID: CGWindowID,
+        primary: @Sendable () async -> SCContentCache.CaptureAttemptResult,
+        fallback: @Sendable () async -> FallbackAttemptResult
+    ) async -> WindowCaptureOutcome {
+        let first = await primary()
+        if case .success(let image) = first {
+            return WindowCaptureOutcome(windowID: windowID, image: image,
+                firstAttempt: first, secondAttempt: nil, fallbackAttempt: nil)
+        }
+        var second: SCContentCache.CaptureAttemptResult?
+        if !Task.isCancelled, case .failed = first {
+            second = await primary()
+            if case .success(let image) = second {
+                return WindowCaptureOutcome(windowID: windowID, image: image,
+                    firstAttempt: first, secondAttempt: second, fallbackAttempt: nil)
+            }
+        }
+        guard !Task.isCancelled else {
+            return WindowCaptureOutcome(windowID: windowID, image: nil,
+                firstAttempt: first, secondAttempt: second, fallbackAttempt: nil)
+        }
+        // Do not retry a timed-out SCKit call: it still owns its permit.
+        // CG recovery uses a separate bounded lane even when SCKit is full.
+        let recovered = await fallback()
+        let image: NSImage?
+        if case .success(let value) = recovered { image = value } else { image = nil }
+        return WindowCaptureOutcome(windowID: windowID, image: image,
+            firstAttempt: first, secondAttempt: second, fallbackAttempt: recovered)
+    }
+
     // CGWindowListCreateImage is deprecated in macOS 14 but still functional.
-    // Used as a last-resort fallback when both SCKit capture attempts time out
-    // or fail: SCKit can be flaky on off-screen / multi-Space / recently-created
+    // Used after SCKit timeout/resource exhaustion or two completed failures.
+    // SCKit can be flaky on off-screen / multi-Space / recently-created
     // windows, while the legacy API often succeeds where SCKit stalls. The
     // fallback itself is UX-bounded. If the legacy API wedges, its underlying
-    // work retains one global permit until it really returns, preventing later
-    // batches from accumulating more than the fixed process-wide limit.
+    // work retains one fallback permit until it really returns. This lane is
+    // independent of the equally bounded SCKit lane; neither is reset on a
+    // display change, so repeated reconnects cannot accumulate orphaned work.
     private static func captureFallbackWithSoftTimeout(
         windowID: CGWindowID,
         maxDim: Int,
