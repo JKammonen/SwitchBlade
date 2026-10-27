@@ -541,7 +541,7 @@ final class SwitcherStore: ObservableObject {
               settingsGeneration == generation,
               !isVisible,
               !isSwitching else { return }
-        recordRejectedBlackFrames(classifications)
+        recordRejectedBlankFrames(classifications)
         let acceptedPreviews = previewCache.record(
             previews,
             liveItems: cacheItems,
@@ -3063,26 +3063,33 @@ final class SwitcherStore: ObservableObject {
         // generation: the panel may have hidden or reopened during the decode.
         let classifications = await PreviewCacheStore.classifyCapturedFrames(previews)
         guard isVisible, previewGeneration == generation else { return }
-        recordRejectedBlackFrames(classifications)
+        recordRejectedBlankFrames(classifications)
         let acceptedPreviews = previewCache.record(
             previews,
             liveItems: items,
             classifications: classifications
         )
         items = items.map { item in
-            acceptedPreviews[item.windowID].map { item.withPreview($0) } ?? item
+            if classifications.fullyTransparentIDs.contains(item.windowID) {
+                return item.withPreview(nil)
+            }
+            return acceptedPreviews[item.windowID].map { item.withPreview($0) } ?? item
         }
     }
 
-    private func recordRejectedBlackFrames(_ classifications: PreviewFrameClassifications) {
+    private func recordRejectedBlankFrames(_ classifications: PreviewFrameClassifications) {
         let rejectedCount = classifications.uniformlyBlackIDs.count
-        guard rejectedCount > 0 else { return }
+        let transparentCount = classifications.fullyTransparentIDs.count
+        guard rejectedCount > 0 || transparentCount > 0 else { return }
         Logger.capture.notice(
-            "Rejected \(rejectedCount, privacy: .public) uniformly black preview frame(s)"
+            "Rejected blank previews: black=\(rejectedCount, privacy: .public), transparent=\(transparentCount, privacy: .public)"
         )
         PerformanceDiagnostics.record(
             "preview_frame_validation",
-            fields: ["uniformly_black_rejected": .int(rejectedCount)]
+            fields: [
+                "uniformly_black_rejected": .int(rejectedCount),
+                "fully_transparent_rejected": .int(transparentCount)
+            ]
         )
     }
 

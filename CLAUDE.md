@@ -183,6 +183,18 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   records failure domain/code without private error text; `capture_previews`
   includes `sc_content_available`. `CaptureRecovery/*` tests exercise the actual
   capture path with missing content, private frames and denied permission.
+- **Outlook tile shows only the dark gradient** → a successful capture can be
+  fully transparent. In a live comparison, protected mail produced an empty
+  whole-window capture while an already-read ordinary message captured normally.
+  `PreviewCacheStore.frameQuality` distinguishes fully transparent pixels from
+  real translucent content, confirming emptiness at native resolution if the
+  small sample is empty. These frames clear every matching cached image and
+  suppress stale previews embedded in open-item snapshots until a fresh usable
+  capture arrives. The visible tile uses the existing app-icon placeholder.
+  Do not force CG recovery for transparent success: it can be content protection.
+  `preview_frame_validation.fully_transparent_rejected` records counts only.
+  Tests cover empty cache, stale/embedded previews, reopen, recovery, and real
+  translucent pixels. This is distinct from timeout/resource recovery below.
 - **Display reconnect leaves previews missing** → a populated SC window list and
   a valid recording grant do not prove that SCKit captures complete. Inspect
   `capture_previews.first_timeouts` and `first_resource_limited`. A soft timeout

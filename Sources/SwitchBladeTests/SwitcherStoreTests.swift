@@ -5,6 +5,7 @@ import Carbon.HIToolbox
 enum SwitcherStoreTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("Store/transparentCaptureClearsDisplayedAndReopenedPreview", transparentCaptureClearsDisplayedAndReopenedPreview),
         ("Store/freshOpenUsesMRUBeforeEmptyMerge", freshOpenUsesMRUBeforeEmptyMerge),
         ("Store/minimizedMergePreservesVisibleOrderAndSelection", minimizedMergePreservesVisibleOrderAndSelection),
         ("Store/minimizedOnlyPanelRetainsUnavailableThenClosesWhenEmpty", minimizedOnlyPanelRetainsUnavailableThenClosesWhenEmpty),
@@ -127,6 +128,30 @@ enum SwitcherStoreTests {
     ]
 
     // MARK: cycle / show
+
+    @MainActor static func transparentCaptureClearsDisplayedAndReopenedPreview() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldMode }
+        let (store, catalog, _, _) = makeStore(activationWarmupWindow: -1)
+        let good = makeRasterPreview()
+        catalog.visibleItems = [makeItem(id: 1, pid: 100)]
+        catalog.previewsToReturn = [1: good]
+        await store.warmPreviewCache(context: "seed")
+        catalog.previewsToReturn = [1: makeRasterPreview(alpha: 0)]
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+        try expect(store.isVisible)
+        try expectNil(store.items.first?.preview, "A protected/empty capture must remove even an already displayed good frame")
+        store.cancel()
+        await runPendingMainTasks()
+        catalog.previewsToReturn = [:]
+        store.requestCycle(forward: true)
+        await runPendingMainTasks()
+        try expectNil(store.items.first?.preview, "Cached reopen must not resurrect the rejected frame")
+        store.cancel()
+    }
 
     @MainActor static func cycle_showsPanel() async throws {
         let (store, catalog, _, _) = makeStore()

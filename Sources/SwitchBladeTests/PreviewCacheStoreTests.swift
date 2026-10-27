@@ -25,6 +25,8 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/hydrated_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowNoAppIdentityGuess),
         ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
         ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate),
+        ("PreviewCache/transparentFrameClearsCachedAndEmbeddedPreview", transparentFrameClearsCachedAndEmbeddedPreview),
+        ("PreviewCache/translucentContentRemainsUsable", translucentContentRemainsUsable),
         ("PreviewCache/mostlyWhiteDetection", mostlyWhiteDetection),
         ("PreviewCache/uniformBlackDetection_keepsDarkDetailUsable", uniformBlackDetectionKeepsDarkDetailUsable),
         ("PreviewCache/uniformBlackCapture_remainsRejected", uniformBlackCaptureRemainsRejected),
@@ -506,6 +508,31 @@ enum PreviewCacheStoreTests {
         try expectNil(store.hydrated(a, liveItems: [a, b, c]).preview)
         try expect(store.hydrated(b, liveItems: [a, b, c]).preview != nil)
         try expect(store.hydrated(c, liveItems: [a, b, c]).preview != nil)
+    }
+
+    @MainActor static func transparentFrameClearsCachedAndEmbeddedPreview() async throws {
+        let empty = makeRasterPreview(alpha: 0)
+        try expect(PreviewCacheStore.frameQuality(empty) != .usable, "Transparent pixels are not a usable preview")
+        let classifications = await PreviewCacheStore.classifyCapturedFrames([1: empty])
+        let item = makeItem(id: 1)
+        let store = PreviewCacheStore()
+        try expect(store.record([1: empty], liveItems: [item], classifications: classifications).isEmpty)
+        try expectNil(store.hydrated(item, liveItems: [item]).preview)
+        let good = makeRasterPreview()
+        store.record([1: good], liveItems: [item])
+        try expect(store.record([1: empty], liveItems: [item], classifications: classifications).isEmpty)
+        try expectNil(store.hydrated(item.withPreview(good), liveItems: [item]).preview,
+            "Transparent capture must clear stale embedded images as well as every cache key")
+        store.record([1: good], liveItems: [item])
+        try expect(store.hydrated(item, liveItems: [item]).preview === good,
+            "A later visible capture must restore normal previews")
+    }
+
+    @MainActor static func translucentContentRemainsUsable() throws {
+        try expectEqual(PreviewCacheStore.frameQuality(makeRasterPreview(alpha: 128)), .usable)
+        try expectEqual(PreviewCacheStore.frameQuality(makeRasterPreview(alpha: 1)), .usable)
+        try expectEqual(PreviewCacheStore.frameQuality(makeRasterPreview(alpha: 0, singleVisiblePixel: true)), .usable,
+            "Native-resolution confirmation must preserve detail missed by the small sample")
     }
 
     @MainActor static func mostlyWhiteDetection() throws {

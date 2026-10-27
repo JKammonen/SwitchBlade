@@ -5,13 +5,16 @@ enum PreviewFrameQuality: Sendable, Equatable {
     case usable
     case mostlyWhite
     case uniformlyBlack
+    case fullyTransparent
 }
 
 struct PreviewFrameClassifications: Sendable {
+    var fullyTransparentIDs: Set<CGWindowID> = []
     var mostlyWhiteIDs: Set<CGWindowID> = []
     var uniformlyBlackIDs: Set<CGWindowID> = []
 
     func quality(for windowID: CGWindowID) -> PreviewFrameQuality {
+        if fullyTransparentIDs.contains(windowID) { return .fullyTransparent }
         if uniformlyBlackIDs.contains(windowID) { return .uniformlyBlack }
         if mostlyWhiteIDs.contains(windowID) { return .mostlyWhite }
         return .usable
@@ -46,6 +49,9 @@ final class PreviewCacheStore {
     /// Window IDs whose last capture was mostly-white and was deferred once.
     /// A second consecutive white capture for the same window is then accepted
     /// as genuine content. Pruned to live windows on every `record`.
+    // Empty capture can be intentional content protection. Suppress embedded
+    // stale images too, until fresh visible pixels are accepted for this ID.
+    private var transparentWindowIDs: Set<CGWindowID> = []
     private var whiteDeferredIDs: Set<CGWindowID> = []
     private let retainedPreviewMaxAge: TimeInterval
     private let now: () -> Date
@@ -85,7 +91,8 @@ final class PreviewCacheStore {
         // Teams) must not show pixels captured while it was still shareable.
         // Minimized rows are never live-capturable; their privacy gate is the
         // title redaction above, and retained previews stay valid for them.
-        guard !item.isTitleRedacted, !item.isApplicationFallback,
+        guard !transparentWindowIDs.contains(item.windowID),
+              !item.isTitleRedacted, !item.isApplicationFallback,
               item.canCapturePreview || item.isMinimized else {
             return item.withPreview(nil)
         }
@@ -153,6 +160,13 @@ final class PreviewCacheStore {
         for (windowID, image) in previews {
             guard let item = itemsByID[windowID] else { continue }
             let quality = classifications?.quality(for: windowID) ?? Self.frameQuality(image)
+            if quality == .fullyTransparent {
+                // Outlook can return transparent pixels while showing protected
+                // mail. Do not retain or resurrect the previous window content.
+                invalidate([item])
+                transparentWindowIDs.insert(windowID)
+                continue
+            }
             if quality == .uniformlyBlack {
                 // SCKit can occasionally report success with a fully black frame.
                 // Never let that frame replace a known-good stale preview or become
@@ -178,6 +192,7 @@ final class PreviewCacheStore {
                 whiteDeferredIDs.remove(windowID)
             }
             whiteDeferredIDs.remove(windowID)
+            transparentWindowIDs.remove(windowID)
             let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
             byRecentlySeenWindowIdentity[windowIdentity(for: item)] = cached
@@ -222,6 +237,7 @@ final class PreviewCacheStore {
         byRecentlySeenSignature.keepOnly([])
         byAppProcessIdentity.keepOnly([])
         whiteDeferredIDs.removeAll()
+        transparentWindowIDs.removeAll()
     }
 
     private func keepOnlyLive(_ items: [WindowItem]) {
@@ -235,6 +251,7 @@ final class PreviewCacheStore {
                 .map(appProcessIdentity(for:))
         ))
         whiteDeferredIDs.formIntersection(liveWindowIDs)
+        transparentWindowIDs.formIntersection(liveWindowIDs)
     }
 
     private func signature(for item: WindowItem) -> String {
@@ -284,6 +301,8 @@ final class PreviewCacheStore {
                     result.mostlyWhiteIDs.insert(windowID)
                 case .uniformlyBlack:
                     result.uniformlyBlackIDs.insert(windowID)
+                case .fullyTransparent:
+                    result.fullyTransparentIDs.insert(windowID)
                 }
             }
             return result
@@ -321,11 +340,13 @@ final class PreviewCacheStore {
         context.interpolationQuality = .low
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
+        var visibleSamples = 0
         var opaqueSamples = 0
         var whiteSamples = 0
         var nearBlackSamples = 0
         for index in stride(from: 0, to: pixels.count, by: 4) {
             let alpha = pixels[index + 3]
+            if alpha > 0 { visibleSamples += 1 }
             guard alpha > 245 else { continue }
             opaqueSamples += 1
             let red = pixels[index]
@@ -339,6 +360,19 @@ final class PreviewCacheStore {
             }
         }
 
+        if visibleSamples == 0 {
+            // Confirm at native resolution: a tiny visible element can disappear
+            // from the 16x16 sample. Never equate translucency with empty pixels.
+            var nativePixels = [UInt8](repeating: 0, count: cgImage.width * cgImage.height * 4)
+            guard let nativeContext = CGContext(data: &nativePixels,
+                width: cgImage.width, height: cgImage.height, bitsPerComponent: 8,
+                bytesPerRow: cgImage.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return .usable }
+            nativeContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+            return stride(from: 3, to: nativePixels.count, by: 4).contains {
+                nativePixels[$0] > 0
+            } ? .usable : .fullyTransparent
+        }
         guard opaqueSamples > 0 else { return .usable }
         if Double(whiteSamples) / Double(opaqueSamples) > 0.97 {
             return .mostlyWhite

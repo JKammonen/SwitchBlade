@@ -414,3 +414,27 @@ func makeKeyDownEvent(
         keyCode: UInt16(keyCode)
     )!
 }
+
+/// Real premultiplied pixels; unlike NSImage(size:), this exercises frame decoding.
+func makeRasterPreview(alpha: UInt8 = 255, black: Bool = false, singleVisiblePixel: Bool = false) -> NSImage {
+    let side = singleVisiblePixel ? 320 : 32
+    var pixels = [UInt8](repeating: 0, count: side * side * 4)
+    for i in stride(from: 0, to: pixels.count, by: 4) {
+        pixels[i] = black ? 0 : alpha / 4
+        pixels[i + 1] = black ? 0 : alpha / 2
+        pixels[i + 2] = black ? 0 : alpha
+        pixels[i + 3] = alpha
+    }
+    if singleVisiblePixel {
+        pixels[0] = 64
+        pixels[1] = 128
+        pixels[2] = 255
+        pixels[3] = 255
+    }
+    let provider = CGDataProvider(data: Data(pixels) as CFData)!
+    let image = CGImage(width: side, height: side, bitsPerComponent: 8,
+        bitsPerPixel: 32, bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    return NSImage(cgImage: image, size: NSSize(width: side, height: side))
+}
