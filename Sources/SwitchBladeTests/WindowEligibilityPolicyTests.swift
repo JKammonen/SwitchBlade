@@ -28,6 +28,7 @@ enum WindowEligibilityPolicyTests {
         ("WindowLayerEligibility/acceptsOnlyNamedFloatingCandidates", acceptsOnlyNamedFloatingCandidates),
         ("WindowLayerEligibility/retainsBackgroundedPluginWithVisibleHost", retainsBackgroundedPluginWithVisibleHost),
         ("WindowLayerEligibility/acceptsBelowNormalStandardCandidate", acceptsBelowNormalStandardCandidate),
+        ("AXWindowEligibility/protectedOutlookRequiresFreshStandardMatch", protectedOutlookRequiresFreshStandardMatch),
         ("AXWindowEligibility/belowNormalRequiresFreshStandardMatch", belowNormalRequiresFreshStandardMatch),
         ("AXWindowEligibility/belowNormalRejectsAmbiguousMatches", belowNormalRejectsAmbiguousMatches),
         ("AXWindowEligibility/filtersUnmatchedAuxiliarySurface", filtersUnmatchedAuxiliarySurface),
@@ -599,6 +600,26 @@ enum WindowEligibilityPolicyTests {
         try expect(!WindowLayerEligibilityPolicy.canIncludeInCurrentSpace(
             layer: -1, isOnScreen: false, hostHasOnScreenWindow: true
         ))
+    }
+
+    @MainActor static func protectedOutlookRequiresFreshStandardMatch() throws {
+        let window = makeItem(id: 150416, pid: 73732, appName: "Outlook", title: "Inbox",
+            canCapturePreview: false, isTitleRedacted: true,
+            bounds: CGRect(x: 115, y: 62, width: 2446, height: 1200), bundleIdentifier: "com.microsoft.Outlook")
+        let required: Set<CGWindowID> = WindowSharingPolicy.isProtectedOutlook(
+            bundleIdentifier: window.bundleIdentifier, sharingState: 0) ? [window.id] : []
+        try expect(AXWindowEligibilityPolicy.requiresValidation([window], requiredStandardWindowIDs: required))
+        let standard = AXTopLevelWindowCandidate(title: nil, frame: window.bounds, isStandardWindow: true)
+        try expectEqual(AXWindowEligibilityPolicy.filteredItems([window], candidates: [standard],
+            requiredStandardWindowIDs: required).map(\.id), [window.id])
+        let rejectedCandidates: [[AXTopLevelWindowCandidate]?] = [nil, [], [standard, standard],
+            [AXTopLevelWindowCandidate(title: nil, frame: window.bounds, isSwitcherWindow: false)],
+            [AXTopLevelWindowCandidate(title: nil, frame: window.bounds, isFloatingWindow: true)]]
+        for candidates in rejectedCandidates {
+            try expect(AXWindowEligibilityPolicy.filteredItems([window], candidates: candidates,
+                requiredStandardWindowIDs: required).isEmpty)
+        }
+        try expectEqual(window.displayTitle, "Outlook")
     }
 
     @MainActor static func belowNormalRequiresFreshStandardMatch() throws {

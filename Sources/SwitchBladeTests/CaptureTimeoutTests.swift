@@ -28,6 +28,7 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/warmupDoesNotPushSameAppSiblingToTail", activation_warmupDoesNotPushSameAppSiblingToTail),
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation),
+        ("SpaceChange/retains14VerifiedPreviewsAndRespectsProtection", retains14VerifiedPreviewsAndRespectsProtection),
         ("SpaceChange/nextOpenDropsPreviousSpace", spaceChangeNextOpenDropsPreviousSpace),
         ("SpaceChange/visiblePanelReplacesPreviousSpace", spaceChangeVisiblePanelReplacesPreviousSpace),
         ("SpaceChange/releaseDuringTransitionUsesFreshTarget", spaceChangeReleaseUsesFreshTarget),
@@ -555,6 +556,40 @@ enum CaptureTimeoutTests {
 
         try expectEqual(catalog.invalidateContentCacheCallCount, 1)
         try expectEqual(catalog.lastInvalidationReason, "test display change")
+    }
+
+    @MainActor static func retains14VerifiedPreviewsAndRespectsProtection() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldMode }
+        let (store, catalog, _, _) = makeStore(activationWarmupWindow: -1)
+        let good = makeRasterPreview()
+        catalog.visibleItems = (1...14).map { makeItem(id: UInt32($0), pid: Int32(100 + $0)) }
+        catalog.previewsToReturn = Dictionary(uniqueKeysWithValues: (1...14).map { (UInt32($0), good) })
+        await openSwitcher(store)
+        for _ in 0..<100 where store.items.filter({ $0.preview != nil }).count < 14 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expectEqual(store.items.filter { $0.preview != nil }.count, 14)
+        store.cancel()
+        // A fresh snapshot admits thirteen old windows; one is now protected,
+        // one old row disappeared, and a genuinely new window has no old image.
+        catalog.visibleItems = [makeItem(id: 1, pid: 101, canCapturePreview: false)]
+            + (2...13).map { makeItem(id: UInt32($0), pid: Int32(100 + $0)) }
+            + [makeItem(id: 20, pid: 114)]
+        catalog.previewsToReturn = [:]
+        let priorCaptureCalls = catalog.captureWindowIDCalls.count
+        await store.handleActiveSpaceChange()
+        await openSwitcher(store)
+        try expectEqual(Set(store.items.map(\.id)), Set((1...13).map(UInt32.init) + [20]))
+        try expectEqual(store.items.filter { $0.preview != nil }.count, 12,
+            "Fresh membership must reuse safe previous images before any new captures")
+        try expectNil(store.items.first { $0.id == 1 }?.preview)
+        try expectNil(store.items.first { $0.id == 20 }?.preview)
+        try expect(!catalog.captureWindowIDCalls.dropFirst(priorCaptureCalls).flatMap { $0 }.contains(1),
+            "Protected window must not be recaptured")
+        store.cancel()
     }
 
     @MainActor static func spaceChangeNextOpenDropsPreviousSpace() async throws {

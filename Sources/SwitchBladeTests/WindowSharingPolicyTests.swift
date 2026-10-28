@@ -4,6 +4,8 @@ import CoreGraphics
 enum WindowSharingPolicyTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("WindowSharingPolicy/privateOutlookUsesExactBundleIdentity", privateOutlookUsesExactBundleIdentity),
+        ("WindowSharingPolicy/privateMinimizedOutlookRedactsTitle", privateMinimizedOutlookRedactsTitle),
         ("WindowSharingPolicy/listsShareableWindows", listsShareableWindows),
         ("WindowSharingPolicy/rejectsPrivateNonTeamsWindows", rejectsPrivateNonTeamsWindows),
         ("WindowSharingPolicy/rejectsTeamsSharingIndicator", rejectsTeamsSharingIndicator),
@@ -22,6 +24,25 @@ enum WindowSharingPolicyTests {
         ("WindowSharingStateIndex/retainedOffscreenShareableWindowProvidesFallbackEvidence", retainedOffscreenShareableWindowProvidesFallbackEvidence),
         ("WindowSharingStateIndex/rejectsUnsafeRetainedFallbackEvidence", rejectsUnsafeRetainedFallbackEvidence)
     ]
+
+    @MainActor static func privateOutlookUsesExactBundleIdentity() throws {
+        try expect(WindowSharingPolicy.canListWindow(appName: "Renamed app",
+            bundleIdentifier: "com.microsoft.Outlook", title: "Inbox", sharingState: 0))
+        try expect(!WindowSharingPolicy.canListWindow(appName: "Outlook",
+            bundleIdentifier: "com.microsoft.Outlook", title: "Auxiliary", sharingState: 0, layer: 3))
+        for bundle in [nil, "com.example.outlook", "com.microsoft.Outlook.helper"] as [String?] {
+            try expect(!WindowSharingPolicy.canListWindow(appName: "Microsoft Outlook",
+                bundleIdentifier: bundle, title: "Inbox", sharingState: 0))
+        }
+    }
+
+    @MainActor static func privateMinimizedOutlookRedactsTitle() throws {
+        try expectEqual(WindowSharingPolicy.minimizedTitleDecision(appName: "Outlook",
+            bundleIdentifier: "com.microsoft.Outlook", title: "Protected subject",
+            matchingSharingStates: [0]), .redactTitle)
+        try expect(!WindowSharingPolicy.canCaptureMinimizedPreview(
+            matchedSharingState: 0, titleDecision: .redactTitle))
+    }
 
     @MainActor static func listsShareableWindows() async throws {
         try expect(WindowSharingPolicy.canListWindow(

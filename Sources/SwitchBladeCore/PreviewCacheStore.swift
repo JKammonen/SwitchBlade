@@ -46,12 +46,10 @@ final class PreviewCacheStore {
     private var byRecentlySeenSignature: LRUDictionary<String, CachedPreview>
     /// Bounded history prevents partial snapshots from forgetting title collisions.
     private var ambiguousSignatures: LRUDictionary<String, Date>
-    /// Window IDs whose last capture was mostly-white and was deferred once.
-    /// A second consecutive white capture for the same window is then accepted
-    /// as genuine content. Pruned to live windows on every `record`.
     // Empty capture can be intentional content protection. Suppress embedded
     // stale images too, until fresh visible pixels are accepted for this ID.
     private var transparentWindowIDs: Set<CGWindowID> = []
+    /// Consecutive white captures are deferred once, then accepted as content.
     private var whiteDeferredIDs: Set<CGWindowID> = []
     private let retainedPreviewMaxAge: TimeInterval
     private let now: () -> Date
@@ -73,6 +71,7 @@ final class PreviewCacheStore {
 
     struct CachedPreview {
         let image: NSImage
+        let ownerPID: pid_t
         let bounds: CGRect
         let capturedAt: Date
     }
@@ -88,7 +87,7 @@ final class PreviewCacheStore {
     /// macOS, so there's no risk of showing the wrong window's image.
     func hydrated(_ item: WindowItem, liveItems: [WindowItem]) -> WindowItem {
         // A visible non-capturable window (sharingState 0, allowed only for
-        // Teams) must not show pixels captured while it was still shareable.
+        // Teams or AX-verified Outlook) must not show pixels captured while it was still shareable.
         // Minimized rows are never live-capturable; their privacy gate is the
         // title redaction above, and retained previews stay valid for them.
         guard !transparentWindowIDs.contains(item.windowID),
@@ -96,7 +95,7 @@ final class PreviewCacheStore {
               item.canCapturePreview || item.isMinimized else {
             return item.withPreview(nil)
         }
-        if let cached = byID[item.windowID] {
+        if let cached = byID[item.windowID], cached.ownerPID == item.windowProcessIdentifier {
             return item.withPreview(cached.image)
         }
         if item.isMinimized,
@@ -193,7 +192,8 @@ final class PreviewCacheStore {
             }
             whiteDeferredIDs.remove(windowID)
             transparentWindowIDs.remove(windowID)
-            let cached = CachedPreview(image: image, bounds: item.bounds, capturedAt: now())
+            let cached = CachedPreview(image: image, ownerPID: item.windowProcessIdentifier,
+                bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
             byRecentlySeenWindowIdentity[windowIdentity(for: item)] = cached
             if !hasRecentAmbiguity(item) {
@@ -227,6 +227,16 @@ final class PreviewCacheStore {
         byRecentlySeenSignature.removeAll { recentSignatures.contains($0) }
         byAppProcessIdentity.removeAll { appProcessIdentities.contains($0) }
         whiteDeferredIDs.subtract(windowIDs)
+    }
+
+    /// Membership is re-enumerated after Space changes. Keep only concrete
+    /// window-ID/owner pixels; cross-ID title/app aliases belong to the old Space.
+    func prepareForSpaceChange() {
+        bySignature.keepOnly([])
+        byRecentlySeenWindowIdentity.keepOnly([])
+        byRecentlySeenSignature.keepOnly([])
+        byAppProcessIdentity.keepOnly([])
+        whiteDeferredIDs.removeAll()
     }
 
     func removeAll() {

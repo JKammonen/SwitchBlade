@@ -427,7 +427,11 @@ enum WindowSharingPolicy {
         case exclude
     }
 
-    static func canListWindow(appName: String, bundleIdentifier: String?, title: String, sharingState: Int) -> Bool {
+    static func isProtectedOutlook(bundleIdentifier: String?, sharingState: Int) -> Bool {
+        sharingState == 0 && bundleIdentifier == "com.microsoft.Outlook"
+    }
+
+    static func canListWindow(appName: String, bundleIdentifier: String?, title: String, sharingState: Int, layer: Int = 0) -> Bool {
         if isMicrosoftTeams(appName: appName, bundleIdentifier: bundleIdentifier),
            title.trimmingCharacters(in: .whitespacesAndNewlines)
             .localizedCaseInsensitiveContains("sharing indicator") {
@@ -436,6 +440,8 @@ enum WindowSharingPolicy {
 
         guard sharingState == 0 else { return true }
         return isMicrosoftTeams(appName: appName, bundleIdentifier: bundleIdentifier)
+            || (isProtectedOutlook(bundleIdentifier: bundleIdentifier, sharingState: sharingState)
+                && layer == Int(CGWindowLevelForKey(.normalWindow)))
     }
 
     static func minimizedTitleDecision(
@@ -448,6 +454,9 @@ enum WindowSharingPolicy {
         guard !trimmedTitle.isEmpty else { return .exclude }
         guard let matchingSharingStates,
               !matchingSharingStates.isEmpty else {
+            return .redactTitle
+        }
+        if bundleIdentifier == "com.microsoft.Outlook", matchingSharingStates.contains(0) {
             return .redactTitle
         }
         return matchingSharingStates.contains {
@@ -1501,14 +1510,21 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 appName: applicationResolution.appName,
                 applicationResolution: applicationResolution,
                 title: title,
-                sharingState: sharingState
+                sharingState: sharingState,
+                layer: layer
             ) else {
                 return nil
             }
+            let protectedOutlook = WindowSharingPolicy.isProtectedOutlook(
+                bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier,
+                sharingState: sharingState
+            )
             if WindowLayerEligibilityPolicy.requiresFloatingAXMatch(layer: layer) {
                 floatingWindowIDs.insert(windowID)
             }
-            if WindowLayerEligibilityPolicy.requiresStandardAXMatch(layer: layer) {
+            if protectedOutlook || WindowLayerEligibilityPolicy.requiresStandardAXMatch(layer: layer) {
+                // A capture-protected Outlook row is admitted only after a fresh,
+                // unambiguous AXStandardWindow match in the existing bounded scan.
                 standardWindowIDs.insert(windowID)
             }
             visibleWindowIDs.insert(windowID)
@@ -1523,7 +1539,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     || applicationResolution.windowProcessIdentifier == frontmostPID,
                 isMinimized: false,
                 canCapturePreview: sharingState != 0,
-                isTitleRedacted: false,
+                isTitleRedacted: protectedOutlook,
                 preview: nil,
                 icon: IconNaming.named(
                     applicationResolution.hostApplication.icon,
@@ -1575,6 +1591,9 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             fields: [
                 "application_fallbacks": .int(applicationFallbacks.count),
                 "concrete_visible": .int(filteredVisibleItems.count),
+                "protected_outlook": .int(filteredVisibleItems.filter {
+                    $0.bundleIdentifier == "com.microsoft.Outlook" && !$0.canCapturePreview
+                }.count),
                 "minimized": .int(minimized.count),
                 "scope": .string(windowScope.rawValue),
                 "focus_only": .bool(windowOwnerPID != nil)
@@ -2284,14 +2303,14 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         appName: String,
         applicationResolution: WindowApplicationResolution,
         title: String,
-        sharingState: Int
+        sharingState: Int,
+        layer: Int
     ) -> Bool {
         // sharingState == kCGWindowSharingNone (0) means macOS may refuse to
         // capture a preview for the window. Most such windows are privacy /
-        // DRM / autofill surfaces and should stay hidden. Microsoft Teams is
-        // the important exception: real meeting/chat windows can use this
-        // sharing state, and switching to them is more important than showing
-        // a live preview. Those tiles fall back to the app-icon treatment.
+        // DRM / autofill surfaces and should stay hidden. Teams can remain
+        // switchable, and exact-bundle Outlook layer-0 rows additionally require
+        // fresh standard AX evidence. Neither exception permits preview capture.
         let windowApplication = applicationResolution.windowApplication
         let hostApplication = applicationResolution.hostApplication
         guard WindowEligibilityPolicy.canIncludeWindowApplication(
@@ -2306,7 +2325,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             appName: appName,
             bundleIdentifier: hostApplication.bundleIdentifier,
             title: title,
-            sharingState: sharingState
+            sharingState: sharingState,
+            layer: layer
         ) else {
             return false
         }
@@ -2618,6 +2638,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                             title: title
                         )
                 )
+                if titleDecision == .redactTitle,
+                   applicationResolution.hostApplication.bundleIdentifier == "com.microsoft.Outlook",
+                   axString(kAXSubroleAttribute, on: window) != kAXStandardWindowSubrole {
+                    return nil
+                }
                 if titleDecision == .exclude {
                     retentionDeniedProcessIDs.insert(scanCandidate.windowProcessIdentifier)
                     return nil

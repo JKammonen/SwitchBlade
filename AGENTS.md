@@ -23,7 +23,7 @@ This file is **repo-specific delta only**. Shared workflow, `Rules of Engagement
 
 1. No `SCStream`. Stay with per-call `SCScreenshotManager.captureImage`.
 2. Soft timeout, not hard timeout. Do not rename or overclaim the behavior.
-3. No `sharingState=0` windows except Microsoft Teams.
+3. No `sharingState=0` windows except Microsoft Teams and exact-bundle Outlook normal-layer windows with a fresh unambiguous AXStandardWindow match. Protected Outlook is icon-only with a redacted title; never capture it.
 4. Local signing cert, not ad-hoc signing.
 5. Custom test runner, not XCTest / swift-testing. Run `swift run SwitchBladeTests`.
 6. Wake / screen-params path needs both invalidation and warmup; sleep invalidates only.

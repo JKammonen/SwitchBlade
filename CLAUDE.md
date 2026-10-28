@@ -78,8 +78,9 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 
 1. No SCStream — user rejected continuous capture pipeline.
 2. Soft timeout, not hard — comments are honest that SCKit may ignore cancellation.
-3. No `sharingState=0` windows except Microsoft Teams — Teams must remain switchable,
-   other private/DRM/autofill surfaces stay filtered.
+3. `sharingState=0` is normally excluded. Teams and exact-bundle Outlook remain
+   switchable; protected Outlook additionally requires a fresh unambiguous standard
+   AX window match and normal CG layer, uses a redacted title and never captures pixels.
 4. Local signing cert — TCC permissions survive rebuilds.
 5. Custom test runner — Xcode not installed, CLT-only toolchain.
 
@@ -165,9 +166,12 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 - **Fullscreen / Space changes leave old tiles or icon-only cards** → keep the
   intended window scope; switching to all Spaces also admits retained offscreen
   WindowServer surfaces and is not a general fix. `activeSpaceDidChange` now
-  invalidates membership, minimized and preview caches, discards old in-flight
+  invalidates membership and minimized caches, discards old in-flight
   work, and resolves an open switcher again after a 150 ms settling interval.
-  Modifier release during that interval waits for a fresh target. Space work
+  Concrete preview images survive for matching window IDs and owner PIDs in
+  the fresh snapshot; previous-Space title/app aliases are cleared. Privacy gates
+  still suppress protected windows. Modifier release during that interval waits
+  for a fresh target. Space work
   has a separate task from screen-parameter/wake capture warmups. Diagnostics:
   `active_space_changed` followed by current-scope `window_snapshot` events.
   `com.apple.loginwindow` is excluded in every scope. Do not infer that an
@@ -183,6 +187,14 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   records failure domain/code without private error text; `capture_previews`
   includes `sc_content_available`. `CaptureRecovery/*` tests exercise the actual
   capture path with missing content, private frames and denied permission.
+- **Outlook disappears from the list** → inspect its CG row before restarting.
+  A visible standard window can switch to `sharingState=0` while still being a
+  valid activation target. The approved exception is exactly `com.microsoft.Outlook`
+  on the normal CG layer, with a fresh, one-to-one AXStandardWindow frame match.
+  Missing/ambiguous AX proof excludes it. Show only the app name/icon and set
+  `canCapturePreview=false`; do not hydrate old pixels. Minimized protected Outlook
+  requires a standard AX window and retains the same icon/title privacy boundary.
+  `window_snapshot.protected_outlook` counts admitted protected rows.
 - **Outlook tile shows only the dark gradient** → a successful capture can be
   fully transparent. In a live comparison, protected mail produced an empty
   whole-window capture while an already-read ordinary message captured normally.
@@ -207,8 +219,14 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   rejection. Recovery tests cover timeout, exhausted slots, retry timeout,
   cancellation, and a 25-window snapshot with all SCKit slots occupied. Physical
   display reconnect remains a separate signed-app integration check.
-- **Slow previews after idle** → check first-batch latency and retry/soft-timeout
-  counts in the performance log before attributing missing images to latency.
+- **Placeholders after idle** → inspect the preceding `active_space_changed` and
+  `cold_open.cached_hits`, not just capture timing. A Space notification used to
+  clear all previews while hidden warmup recaptured only four: a real 14-window
+  open started with four images. Retain bounded concrete-ID/owner preview pixels
+  through Space invalidation, clear cross-ID aliases, and hydrate only a fresh
+  current-scope snapshot. Settings changes still clear the full preview cache.
+  `SpaceChange/retains14VerifiedPreviewsAndRespectsProtection` covers retained
+  frames, removed/new rows, same-app aliases and newly protected windows.
 - **Cmd+Tab falls through to the macOS switcher, then SwitchBlade works again** →
   with performance logging on debug, read `performance.jsonl` around the gap
   before touching tap heuristics. Rows to look for: `hotkey_passthrough` (tap saw

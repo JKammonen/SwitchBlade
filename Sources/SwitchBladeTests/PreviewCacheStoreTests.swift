@@ -25,6 +25,7 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/hydrated_multiWindowTitleChange_doesNotGuessByAppIdentity", multiWindowNoAppIdentityGuess),
         ("PreviewCache/capacity_evictsOldestSignature_too", capacityEvictsSignature),
         ("PreviewCache/staleWhileRevalidate_returnsCachedDespiteBoundsDrift", staleWhileRevalidate),
+        ("PreviewCache/windowIDReuseDoesNotCrossOwnerProcesses", windowIDReuseDoesNotCrossOwnerProcesses),
         ("PreviewCache/transparentFrameClearsCachedAndEmbeddedPreview", transparentFrameClearsCachedAndEmbeddedPreview),
         ("PreviewCache/translucentContentRemainsUsable", translucentContentRemainsUsable),
         ("PreviewCache/mostlyWhiteDetection", mostlyWhiteDetection),
@@ -533,6 +534,15 @@ enum PreviewCacheStoreTests {
         try expectEqual(PreviewCacheStore.frameQuality(makeRasterPreview(alpha: 1)), .usable)
         try expectEqual(PreviewCacheStore.frameQuality(makeRasterPreview(alpha: 0, singleVisiblePixel: true)), .usable,
             "Native-resolution confirmation must preserve detail missed by the small sample")
+    }
+
+    @MainActor static func windowIDReuseDoesNotCrossOwnerProcesses() throws {
+        let store = PreviewCacheStore()
+        let first = makeItem(id: 1, pid: 101)
+        store.record([1: makeRasterPreview()], liveItems: [first])
+        let reused = makeItem(id: 1, pid: 202)
+        try expectNil(store.hydrated(reused, liveItems: [reused]).preview,
+            "A retained image must belong to the same concrete window owner")
     }
 
     @MainActor static func mostlyWhiteDetection() throws {

@@ -460,7 +460,7 @@ final class SwitcherStore: ObservableObject {
     func handleActiveSpaceChange() async {
         // A fresh-in-time cache can still belong to a different Space. Drop
         // membership and in-flight work before any actor suspension.
-        invalidateDisplayCachesForSettingsChange()
+        invalidateDisplayCachesForSettingsChange(preserveConcretePreviews: true)
         cancelPanelShow()
         let generation = settingsGeneration
         let openID = openDiagnosticID
@@ -1712,7 +1712,7 @@ final class SwitcherStore: ObservableObject {
         return sourceItems.map { previewCache.hydrated($0, liveItems: sourceItems) }
     }
 
-    private func invalidateDisplayCachesForSettingsChange() {
+    private func invalidateDisplayCachesForSettingsChange(preserveConcretePreviews: Bool = false) {
         sourceFocusBeforePanel = nil
         foregroundFocus = nil
         focusHistoryGeneration &+= 1
@@ -1738,7 +1738,11 @@ final class SwitcherStore: ObservableObject {
         cachedOpenItemsUpdatedAt = nil
         minimizedCache = MinimizedWindowCache()
         cachedOpenItemsNeedResnapshot = false
-        previewCache.removeAll()
+        if preserveConcretePreviews {
+            previewCache.prepareForSpaceChange()
+        } else {
+            previewCache.removeAll()
+        }
 
         if SwitchBladeSettings.shared.previewMode == .iconsOnly {
             items = items.map { $0.withPreview(nil) }
