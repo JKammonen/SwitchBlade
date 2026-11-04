@@ -363,6 +363,23 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   windows, contradicted titles, missing identity and activation focus reset.
   Injected candidates use the production rule: concrete targets match by
   window ID only, so title/frame evidence tests use synthetic minimized IDs.
+- **A window lookup fails (`ax-targeting-failed`, `no-match`) or falls back
+  to app-level** → read `activation_ax_match` (debug logging only, diagnostic
+  only: no retry, no stale-element repair). Every activate/close/snap lookup,
+  matched or not, records `lookup_action`, `window_list_outcome`
+  (`read-failed`, `unexpected-type`, `empty`, `listed`) with the raw
+  `window_list_error`, `candidate_total` / `candidate_count` /
+  `candidate_scan_bounded`, `identity_success_count`, `identity_error_counts`
+  (`code:count`, `-2147483648` = identity symbol missing), `target_identity_found`,
+  `other_identity_count`, `process_alive_at_start` / `_at_end` and
+  `windows_ms` / `candidates_ms` / `decision_ms`. A ~250 ms duration alone is
+  not proof of `cannotComplete` or a busy app; a dead process or stale target
+  can look alike. Open case (2026-11-04, pre-diagnostic build): ChatGPT failed
+  13 single-row lookups in about 0 ms and an exited app 4 lookups in about
+  250 ms; both used the single-row app fallback. A bounded retry is to target
+  only the error these rows prove. First run: 25/25 lookups clean; Finder lists
+  one AX window whose identity read returns -25201 (likely its desktop window,
+  inferred). Regressions: `WindowLookupDiagnostics/*`.
 - **Switch reported success but the window did not appear** → read
   `activation_outcome_probe` (debug logging only, diagnostic only: no behavior
   change). About 150 ms after a completed `activate` selection, off the action

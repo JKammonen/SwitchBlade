@@ -34,6 +34,7 @@ func runAll() async -> Int {
         ("PartialActivation",        PartialActivationTests.all),
         ("ActivationVerification",   ActivationVerificationTests.all),
         ("ActivationOutcomeProbe",   ActivationOutcomeProbeTests.all),
+        ("WindowLookupDiagnostics",  WindowLookupDiagnosticsTests.all),
         ("WindowActionLane",         WindowActionLaneTests.all),
         ("MRUPersistence",          MRUPersistenceTests.all),
         ("PerformanceMetrics",      PerformanceMetricsTests.all),

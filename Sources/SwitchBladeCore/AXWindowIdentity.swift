@@ -21,9 +21,16 @@ enum AXWindowIdentity {
     static var isAvailable: Bool { readWindowID != nil }
 
     static func windowID(of element: AXUIElement) -> CGWindowID? {
-        guard let readWindowID else { return nil }
+        read(element).id
+    }
+
+    /// Raw result for diagnostics. `Int32.min` means the symbol is missing;
+    /// success with a zero ID is reported as `AXError.noValue`.
+    static func read(_ element: AXUIElement) -> (id: CGWindowID?, error: Int32) {
+        guard let readWindowID else { return (nil, Int32.min) }
         var id: CGWindowID = 0
-        guard readWindowID(element, &id) == AXError.success.rawValue, id != 0 else { return nil }
-        return id
+        let error = readWindowID(element, &id)
+        guard error == AXError.success.rawValue else { return (nil, error) }
+        return id == 0 ? (nil, AXError.noValue.rawValue) : (id, 0)
     }
 }

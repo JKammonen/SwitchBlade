@@ -488,7 +488,8 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         guard let match = matchingWindow(
             for: appElement,
             item: item,
-            requireUniqueEvidence: true
+            requireUniqueEvidence: true,
+            action: "snap"
         ) else {
             return false
         }
@@ -600,19 +601,10 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         guard let match = matchingWindow(
             for: appElement,
             item: item,
-            preferNonMainOnTies: item.isFrontmostApp
+            preferNonMainOnTies: item.isFrontmostApp,
+            action: "activate"
         ) else {
             let matchMs = Date().timeIntervalSince(matchStart) * 1000
-            PerformanceDiagnostics.record(
-                "activation_ax_match",
-                fields: [
-                    "matched": .bool(false),
-                    "match_ms": .double(matchMs),
-                    "pid": .int(Int(item.pid)),
-                    "window_pid": .int(Int(item.windowProcessIdentifier)),
-                    "window_id": .int(Int(item.id))
-                ]
-            )
             Logger.activator.notice(
                 "AX match failed pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) matchMs=\(matchMs, format: .fixed(precision: 1), privacy: .public)"
             )
@@ -1018,7 +1010,8 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         guard let match = matchingWindow(
             for: appElement,
             item: item,
-            requireUniqueEvidence: true
+            requireUniqueEvidence: true,
+            action: "close"
         ) else {
             return false
         }
@@ -1066,37 +1059,53 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         _ = AXUIElementSetMessagingTimeout(element, Self.axMessagingTimeoutSeconds)
     }
 
-    private func windows(for appElement: AXUIElement) -> [AXUIElement]? {
+    private func windows(for appElement: AXUIElement) -> (windows: [AXUIElement]?, error: AXError, isWindowArray: Bool) {
         var rawValue: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &rawValue)
         guard result == .success, let windows = rawValue as? [AXUIElement] else {
             Logger.activator.notice("AX windows fetch failed result=\(result.rawValue, privacy: .public)")
-            return nil
+            return (nil, result, false)
         }
 
-        return windows
+        return (windows, result, true)
     }
 
     private func matchingWindow(
         for appElement: AXUIElement,
         item: WindowActionTarget,
         preferNonMainOnTies: Bool = false,
-        requireUniqueEvidence: Bool = false
+        requireUniqueEvidence: Bool = false,
+        action: String
     ) -> MatchedWindow? {
+        let ownerPID = item.windowProcessIdentifier
+        let aliveAtStart = WindowLookupDiagnostics.processExists(ownerPID)
         let windowsStart = Date()
-        guard let windows = windows(for: appElement) else {
+        let listRead = windows(for: appElement)
+        let windowsMs = Date().timeIntervalSince(windowsStart) * 1000
+        guard let windows = listRead.windows else {
+            recordLookup(WindowLookupDiagnostics(
+                action: action, windowListError: listRead.error.rawValue,
+                windowListOutcome: WindowLookupDiagnostics.windowListOutcome(
+                    error: listRead.error.rawValue, isWindowArray: listRead.isWindowArray, count: 0),
+                candidateTotal: -1, candidateCount: 0, candidateScanBounded: false, identityReads: [],
+                targetWindowID: item.id, processAliveAtStart: aliveAtStart,
+                processAliveAtEnd: WindowLookupDiagnostics.processExists(ownerPID),
+                windowsMs: windowsMs, candidatesMs: 0, decisionMs: 0, matched: false
+            ), item: item)
             return nil
         }
-        let windowsMs = Date().timeIntervalSince(windowsStart) * 1000
 
         let candidatesStart = Date()
         let candidateDeadline = ProcessInfo.processInfo.systemUptime
             + Self.maximumAXCandidateScanSeconds
         var candidates: [(element: AXUIElement, candidate: WindowMatchCandidate)] = []
+        var identityReads: [(id: CGWindowID?, error: Int32)] = []
         let needsLegacyMetadata = SyntheticWindowID.isSynthetic(item.id)
         for window in windows.prefix(Self.maximumAXCandidateWindows) {
             guard ProcessInfo.processInfo.systemUptime < candidateDeadline else { break }
             applyAXMessagingTimeout(to: window)
+            let identity = AXWindowIdentity.read(window)
+            identityReads.append(identity)
             candidates.append((
                 element: window,
                 candidate: WindowMatchCandidate(
@@ -1104,7 +1113,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                     frame: needsLegacyMetadata ? axFrame(on: window) : nil,
                     isMain: needsLegacyMetadata && axBool(kAXMainAttribute, on: window),
                     isFocused: needsLegacyMetadata && axBool(kAXFocusedAttribute, on: window),
-                    windowID: AXWindowIdentity.windowID(of: window)
+                    windowID: identity.id
                 )
             ))
         }
@@ -1112,30 +1121,26 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let candidateScanWasBounded = candidates.count < windows.count
 
         let decisionStart = Date()
-        if let decision = Self.bestMatchDecision(
+        let decision = Self.bestMatchDecision(
             for: item,
             candidates: candidates.map(\.candidate),
             preferNonMainOnTies: preferNonMainOnTies,
             requireUniqueEvidence: requireUniqueEvidence,
             candidateScanIsComplete: !candidateScanWasBounded,
             requireWindowIdentity: !SyntheticWindowID.isSynthetic(item.id)
-        ) {
-            let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
-            PerformanceDiagnostics.record(
-                "activation_ax_match",
-                fields: [
-                    "candidate_count": .int(candidates.count),
-                    "candidate_scan_bounded": .bool(candidateScanWasBounded),
-                    "candidate_total": .int(windows.count),
-                    "candidates_ms": .double(candidatesMs),
-                    "decision_ms": .double(decisionMs),
-                    "matched": .bool(true),
-                    "pid": .int(Int(item.pid)),
-                    "window_pid": .int(Int(item.windowProcessIdentifier)),
-                    "window_id": .int(Int(item.id)),
-                    "windows_ms": .double(windowsMs)
-                ]
-            )
+        )
+        let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
+        recordLookup(WindowLookupDiagnostics(
+            action: action, windowListError: listRead.error.rawValue,
+            windowListOutcome: WindowLookupDiagnostics.windowListOutcome(
+                error: listRead.error.rawValue, isWindowArray: true, count: windows.count),
+            candidateTotal: windows.count, candidateCount: candidates.count,
+            candidateScanBounded: candidateScanWasBounded, identityReads: identityReads,
+            targetWindowID: item.id, processAliveAtStart: aliveAtStart,
+            processAliveAtEnd: WindowLookupDiagnostics.processExists(ownerPID),
+            windowsMs: windowsMs, candidatesMs: candidatesMs, decisionMs: decisionMs, matched: decision != nil
+        ), item: item)
+        if let decision {
             return MatchedWindow(
                 element: candidates[decision.index].element,
                 decision: decision,
@@ -1144,7 +1149,6 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
                 candidates: candidates.map(\.candidate)
             )
         }
-        let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
 
         let titleMatchCount = candidates.reduce(0) { count, candidate in
             count + (Self.titleMatches(item.title, candidateTitle: candidate.candidate.title) ? 1 : 0)
@@ -1157,6 +1161,16 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             "AX no matching window pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) appWindows=\(windows.count, privacy: .public) scanned=\(candidates.count, privacy: .public) bounded=\(candidateScanWasBounded, privacy: .public) titleMatches=\(titleMatchCount, privacy: .public) frameMatches=\(frameMatchCount, privacy: .public) windowsMs=\(windowsMs, format: .fixed(precision: 1), privacy: .public) candidatesMs=\(candidatesMs, format: .fixed(precision: 1), privacy: .public) decisionMs=\(decisionMs, format: .fixed(precision: 1), privacy: .public)"
         )
         return nil
+    }
+
+    /// Every window lookup (activate, close, snap), matched or not, in one
+    /// `activation_ax_match` row under the caller's correlation ID.
+    private func recordLookup(_ lookup: WindowLookupDiagnostics, item: WindowActionTarget) {
+        var fields = lookup.fields
+        fields["pid"] = .int(Int(item.pid))
+        fields["window_pid"] = .int(Int(item.windowProcessIdentifier))
+        fields["window_id"] = .int(Int(item.id))
+        PerformanceDiagnostics.record("activation_ax_match", fields: fields)
     }
 
     private func logMatchDecision(
