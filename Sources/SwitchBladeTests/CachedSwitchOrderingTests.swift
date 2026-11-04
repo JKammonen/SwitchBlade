@@ -9,6 +9,7 @@ enum CachedSwitchOrderingTests {
         ("CachedSwitch/healAfterQuickCommitDoesNotOverwriteSelectionCache", healAfterQuickCommitKeepsSelectionCache),
         ("CachedSwitch/emptyHealSnapshotKeepsPaintedRows", emptyHealSnapshotKeepsPaintedRows),
         ("CachedSwitch/unchangedHealDoesNotRestartPreviewCapture", unchangedHealDoesNotRestartCapture),
+        ("CachedSwitch/sameIDHealAppliesProtectedStateToOpenPanel", sameIDHealAppliesProtectedState),
         ("CachedSwitch/freshSingleWindowCacheUsesCurrentMRU", freshCacheUsesCurrentMRU),
         ("CachedSwitch/staleSingleWindowCacheUsesCurrentMRUBeforeRefresh", staleCacheUsesCurrentMRU),
         ("CachedSwitch/rebasedSingleWindowCacheUsesCurrentMRU", rebasedCacheUsesCurrentMRU),
@@ -137,6 +138,36 @@ enum CachedSwitchOrderingTests {
         try expect(contexts().contains("stale-cache-refresh-unchanged"))
         try await runPendingMainTasks()
         try expectEqual(catalog.captureCallCount, capturesBeforeHeal, "unchanged membership must not recapture")
+        try expectEqual(store.items.map(\.id), original.map(\.id))
+    }
+
+    /// Outlook can turn a window protected without a new ID. The heal scan's
+    /// row must still go through hydration, which drops the old pixels and
+    /// title from the open panel; equal IDs are not equal privacy state.
+    @MainActor private static func sameIDHealAppliesProtectedState() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = (1...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100), title: "Mail \($0)",
+                                               isFrontmostApp: $0 == 1) }
+        catalog.visibleItems = original
+        catalog.previewsToReturn = Dictionary(uniqueKeysWithValues: original.map { ($0.id, NSImage(size: NSSize(width: 8, height: 8))) })
+        await store.warmPreviewCache(context: "protected-heal-seed")
+        catalog.visibleItems = original.map { item in
+            item.id == 2
+                ? makeItem(id: 2, pid: 200, title: "Confidential", isFrontmostApp: false,
+                           canCapturePreview: false, isTitleRedacted: true)
+                : item
+        }
+        catalog.visibleSnapshotDelayNanoseconds = 20_000_000
+        store.requestCycle(forward: true)
+        try expectNotNil(store.items.first(where: { $0.id == 2 })?.preview, "cached first paint had pixels")
+        for _ in 0..<100 where store.items.first(where: { $0.id == 2 })?.isTitleRedacted != true {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try await runPendingMainTasks()
+        let row = store.items.first(where: { $0.id == 2 })
+        try expectEqual(row?.isTitleRedacted, true, "the protected state reached the open panel")
+        try expectNil(row?.preview, "pixels captured before protection must not stay visible")
         try expectEqual(store.items.map(\.id), original.map(\.id))
     }
 

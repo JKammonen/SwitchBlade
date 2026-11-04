@@ -52,6 +52,17 @@ struct WindowItem: Identifiable, Equatable {
     var windowProcessIdentifier: pid_t { windowOwnerPID ?? pid }
     var isApplicationFallback: Bool { SyntheticApplicationID.isSynthetic(windowID) }
 
+    /// Every scanned fact except the rendered images. Equal IDs are not equal
+    /// rows: a window can keep its ID while its title, owner or privacy state
+    /// (`canCapturePreview`, `isTitleRedacted`) changes.
+    func hasSameScannedState(as other: WindowItem) -> Bool {
+        windowID == other.windowID && pid == other.pid && appName == other.appName
+            && title == other.title && bounds == other.bounds && isFrontmostApp == other.isFrontmostApp
+            && isMinimized == other.isMinimized && canCapturePreview == other.canCapturePreview
+            && isTitleRedacted == other.isTitleRedacted && bundleIdentifier == other.bundleIdentifier
+            && windowOwnerPID == other.windowOwnerPID
+    }
+
     var displayTitle: String {
         isTitleRedacted || title.isEmpty ? appName : title
     }

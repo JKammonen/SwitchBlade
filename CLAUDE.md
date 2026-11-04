@@ -372,13 +372,17 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   still apply. A selection or `hide()` discards the pending reconciliation:
   its scan predates the selection, so it must not rewrite the selection-synced
   cache (frontmost flags, resnapshot marker); post-hide warmups refresh it. An
-  empty scan (also the CGWindowList failure result) keeps the painted rows, and
-  an unchanged ID order keeps the in-flight preview batch instead of restarting
-  capture (`stale_heal_discarded`, `display_order` context
+  empty scan (also the CGWindowList failure result) keeps the painted rows.
+  Only rows whose every scanned fact is unchanged (`hasSameScannedState`: ID,
+  owner, title, frame, frontmost/minimized and privacy state) keep the in-flight
+  preview batch instead of restarting capture; equal IDs alone are not enough,
+  because a window can turn protected without a new ID and hydration must drop
+  its pixels and title (`stale_heal_discarded`, `display_order` context
   `stale-cache-refresh-unchanged`). A window not yet created/eligible at snapshot time can only be
   discovered by a later notification/open. Regressions:
   `CachedSwitch/freshCacheDiscoversNewAndClosedWindows` (14 rows),
   `CachedSwitch/healAfterQuickCommit*`, `emptyHealSnapshot*`, `unchangedHeal*`,
+  `sameIDHealAppliesProtectedState*`,
   `Store/requestCycle_doesNotReusePreOpenWarmupSnapshot`.
 - **Cmd+Tab does nothing, or release activates nothing** → look for
   `selection_action_refused`. The single window-action lane stays busy while

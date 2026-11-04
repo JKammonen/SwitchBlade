@@ -2161,10 +2161,13 @@ final class SwitcherStore: ObservableObject {
         showAfterRefresh: Bool
     ) -> Double {
         setShowingStale(false)
-        // Unchanged membership and order: the painted rows and their in-flight
-        // preview batch are already current. Restarting capture would only
-        // duplicate ScreenCaptureKit work and occupy more permits.
-        if showAfterRefresh, orderedItems.map(\.id) == items.map(\.id) {
+        // Unchanged rows: the painted rows and their in-flight preview batch
+        // are already current. Restarting capture would only duplicate
+        // ScreenCaptureKit work and occupy more permits. Same IDs alone are not
+        // enough: a changed title or privacy state must go through hydration,
+        // which drops pixels of windows that became protected.
+        if showAfterRefresh, orderedItems.count == items.count,
+           zip(orderedItems, items).allSatisfy({ $0.hasSameScannedState(as: $1) }) {
             recordDisplayOrder(context: "stale-cache-refresh-unchanged")
             return 0
         }
