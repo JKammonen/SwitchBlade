@@ -13,8 +13,12 @@ enum ActivationVerificationTests {
         ("ActivationVerification/activationResetRestoresOnlyRetainedExactWindow", activationResetRestoresExactWindow),
         ("ActivationVerification/ambiguousOverlapDoesNotActivateFirstSibling", ambiguousOverlapDoesNotActivateFirstSibling),
         ("ActivationVerification/contradictedTitleDoesNotRaiseOrActivate", contradictedTitleDoesNotRaiseOrActivate),
+        ("ActivationVerification/unidentifiedSingleRow_fallsBackToApplication", unidentifiedSingleRowFallsBack),
+        ("ActivationVerification/accessibilityUnavailable_fallsBackToApplication", accessibilityUnavailableFallsBack),
+        ("ActivationVerification/unidentifiedMultiRow_skipsActivationWithReason", unidentifiedMultiRowSkipsActivation),
+        ("ActivationVerification/windowIdentitySymbol_resolves", windowIdentitySymbolResolves),
         ("ActivationVerification/uniqueMatchFocused_isSelectedTarget", uniqueMatchFocusedIsSelectedTarget),
-        ("ActivationVerification/siblingFocused_isApplicationOnly", siblingFocusedIsApplicationOnly),
+        ("ActivationVerification/siblingFocused_listedSiblingFails", siblingFocusedListedSiblingFails),
         ("ActivationVerification/raise_contradictedSiblingIsRejectedBeforeFocus", matchedSiblingFocusIsNotIdentityProof),
         ("ActivationVerification/synthetic_titleTakeoverRemainsUndetected", titleTakeoverRemainsUndetected),
         ("ActivationVerification/raise_closestFrameGuessIsNotRaised", closestFrameGuessIsNotRaised),
@@ -33,7 +37,8 @@ enum ActivationVerificationTests {
         ("ActivationVerification/userLeftDuringVerification_isNotSelectedTarget", userLeftDuringVerification),
         ("ActivationVerification/diagnostics_separateFactsWithoutTitles", diagnosticsSeparateFacts),
         ("ActivationVerification/store_applicationOnlyDoesNotRememberIntendedWindow", storeApplicationOnlyDoesNotRemember),
-        ("ActivationVerification/store_sameAppApplicationOnlyKeepsRanks", storeSameAppApplicationOnlyKeepsRanks),
+        ("ActivationVerification/store_sameAppSiblingFocusKeepsRanks", storeSameAppApplicationOnlyKeepsRanks),
+        ("ActivationVerification/store_targetCarriesRowCountAndPermission", storeTargetCarriesRowCountAndPermission),
         ("ActivationVerification/store_verifiedSelectionIsRemembered", storeVerifiedSelectionIsRemembered),
         ("ActivationVerification/store_lateVerifiedResultCannotOverrideNewerFocus", storeLateVerifiedResultCannotOverrideNewerFocus),
         ("ActivationVerification/store_dispatchSeparatesQueueAndExecution", storeDispatchSeparatesQueueAndExecution),
@@ -46,8 +51,15 @@ enum ActivationVerificationTests {
     private static let frameA = CGRect(x: 0, y: 0, width: 800, height: 600)
     private static let frameB = CGRect(x: 400, y: 300, width: 800, height: 600)
 
+    /// Legacy title/frame candidate. Production reads these attributes only
+    /// for synthetic minimized rows, so pair it with `syntheticTarget`.
     private static func candidate(_ title: String?, _ frame: CGRect?) -> WindowActivator.WindowMatchCandidate {
         WindowActivator.WindowMatchCandidate(title: title, frame: frame, isMain: false, isFocused: false)
+    }
+
+    /// Production shape for a concrete row: identity only, no title/frame.
+    private static func window(_ id: CGWindowID) -> WindowActivator.WindowMatchCandidate {
+        WindowActivator.WindowMatchCandidate(title: nil, frame: nil, isMain: false, isFocused: false, windowID: id)
     }
 
     private static func sample(active: Bool = true, error: Int32 = 0, matched: Bool?) -> WindowActivator.MatchedElementFocusSample {
@@ -86,8 +98,18 @@ enum ActivationVerificationTests {
     }
 
     private static func target(title: String = "A", bounds: CGRect = frameA,
-                               pid: pid_t = 200, frontmost: Bool = false) -> WindowActionTarget {
-        makeItem(id: 2, pid: pid, title: title, isFrontmostApp: frontmost, bounds: bounds).actionTarget
+                               pid: pid_t = 200, frontmost: Bool = false,
+                               rows: Int? = nil, accessibilityUnavailable: Bool = false) -> WindowActionTarget {
+        var target = makeItem(id: 2, pid: pid, title: title, isFrontmostApp: frontmost, bounds: bounds).actionTarget
+        target.applicationRowCount = rows
+        target.accessibilityUnavailable = accessibilityUnavailable
+        return target
+    }
+
+    /// Minimized row without a concrete WindowServer ID: title/frame evidence.
+    private static func syntheticTarget(title: String = "A", bounds: CGRect = frameA) -> WindowActionTarget {
+        makeItem(id: SyntheticWindowID.make(pid: 200, index: 0, title: title), pid: 200,
+                 title: title, bounds: bounds).actionTarget
     }
 
     /// Captures the activator's own verification row for one action.
@@ -165,40 +187,96 @@ enum ActivationVerificationTests {
             let candidates = (0..<14).map { _ in candidate(title.isEmpty ? nil : title, frameA) }
             let activator = activator(candidates: candidates, focusedIndex: 0, activationCalls: calls)
             var result: WindowActivationResult?
-            let fields = verificationFields { result = activator.activateWithResult(target(title: title)) }
+            let fields = verificationFields { result = activator.activateWithResult(syntheticTarget(title: title)) }
             try expectEqual(bool(fields, "raise_withheld"), true, "overlapping siblings have no unique identity")
             try expectEqual(calls.value, 0, "app activation would expose an arbitrary sibling")
             try expectEqual(result, .failed, "keep the selection recoverable instead of opening a sibling")
         }
+        // Concrete row absent from 14 listed sibling IDs: nothing to raise.
+        let calls = LockedValue(0)
+        let siblings = activator(candidates: (10..<24).map { window(CGWindowID($0)) }, focusedIndex: 0,
+                                 activationCalls: calls)
+        try expectEqual(siblings.activateWithResult(target(rows: 15)), .failed)
+        try expectEqual(calls.value, 0)
     }
 
     @MainActor static func contradictedTitleDoesNotRaiseOrActivate() throws {
         let calls = LockedValue(0)
         let activator = activator(candidates: [candidate("Other", frameA)], focusedIndex: 0, activationCalls: calls)
         var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target(title: "Selected")) }
+        let fields = verificationFields { result = activator.activateWithResult(syntheticTarget(title: "Selected")) }
         try expectEqual(bool(fields, "raise_withheld"), true)
         try expectEqual(calls.value, 0)
         try expectEqual(result, .failed)
     }
 
+    /// Single listed row: app activation cannot expose an unselected listed
+    /// sibling, so an unidentified target keeps the pre-identity app switch.
+    @MainActor static func unidentifiedSingleRowFallsBack() throws {
+        for candidates in [[WindowActivator.WindowMatchCandidate](), [window(9)]] {
+            let calls = LockedValue(0)
+            let activator = activator(candidates: candidates, focusedIndex: 0, activationCalls: calls)
+            var result: WindowActivationResult?
+            let fields = verificationFields { result = activator.activateWithResult(target(rows: 1)) }
+            try expectEqual(calls.value, 1)
+            try expectEqual(result, .applicationOnly)
+            try expectEqual(string(fields, "result_reason"), "ax-targeting-failed")
+            try expectEqual(bool(fields, "application_fallback_allowed"), true)
+        }
+    }
+
+    /// Without Accessibility no window identity can exist; failing closed would
+    /// make every row unreachable, so the app-level switch remains.
+    @MainActor static func accessibilityUnavailableFallsBack() throws {
+        let calls = LockedValue(0)
+        let activator = activator(candidates: [], focusedIndex: 0, activationCalls: calls)
+        try expectEqual(activator.activateWithResult(target(rows: 3, accessibilityUnavailable: true)), .applicationOnly)
+        try expectEqual(calls.value, 1)
+    }
+
+    @MainActor static func unidentifiedMultiRowSkipsActivation() throws {
+        for rows in [nil, 2] as [Int?] {
+            let calls = LockedValue(0)
+            let activator = activator(candidates: [window(9)], focusedIndex: 0, activationCalls: calls)
+            var result: WindowActivationResult?
+            let fields = verificationFields { result = activator.activateWithResult(target(rows: rows)) }
+            try expectEqual(calls.value, 0)
+            try expectEqual(result, .failed)
+            try expectEqual(string(fields, "result_reason"), "activation-skipped-ax-targeting-failed",
+                            "the reason must not claim an activation that never ran")
+            try expectEqual(string(fields, "legacy_result"), "activation-skipped")
+            try expectEqual(bool(fields, "activation_attempted"), false)
+        }
+    }
+
+    /// The real bridge, not an injected candidate list: a missing export would
+    /// otherwise fail every concrete activate/close/snap with the suite green.
+    static func windowIdentitySymbolResolves() throws {
+        try expect(AXWindowIdentity.isAvailable, "_AXUIElementGetWindow is no longer exported")
+    }
+
     @MainActor static func uniqueMatchFocusedIsSelectedTarget() throws {
-        let activator = activator(candidates: [candidate("A", frameA), candidate("B", frameB)], focusedIndex: 0)
+        let activator = activator(candidates: [window(3), window(2)], focusedIndex: 1)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target()) }
         try expectEqual(result, .selectedTarget)
         try expectEqual(string(fields, "match_evidence"), "unique")
-        try expectEqual(string(fields, "match_evidence_basis"), "unique-title")
+        try expectEqual(string(fields, "match_evidence_basis"), "window-id")
         try expectEqual(string(fields, "matched_element_focus"), "matched-element-focused")
     }
 
-    @MainActor static func siblingFocusedIsApplicationOnly() throws {
-        let activator = activator(candidates: [candidate("A", frameA), candidate("B", frameB)], focusedIndex: 1)
-        var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target()) }
-        try expectEqual(result, .applicationOnly, "app active with a sibling focused is not an exact selection")
-        try expectEqual(string(fields, "legacy_result"), "selected-target", "old rule reported this as exact success")
-        try expectEqual(string(fields, "result_reason"), "matched-element-other-window-focused")
+    /// A listed sibling holding focus after the one correction is a visible
+    /// wrong window: fail so the recovery panel stays. With one listed row the
+    /// focused AX window is not a selectable alternative: app-level success.
+    @MainActor static func siblingFocusedListedSiblingFails() throws {
+        for (rows, expected) in [(2, WindowActivationResult.failed), (1, .applicationOnly)] {
+            let activator = activator(candidates: [window(2), window(3)], focusedIndex: 1)
+            var result: WindowActivationResult?
+            let fields = verificationFields { result = activator.activateWithResult(target(rows: rows)) }
+            try expectEqual(result, expected)
+            try expectEqual(string(fields, "legacy_result"), "selected-target", "old rule reported this as exact success")
+            try expectEqual(string(fields, "result_reason"), "matched-element-other-window-focused")
+        }
     }
 
     /// Intended A, matched B, focused B. A was renamed and B sits exactly in
@@ -208,7 +286,7 @@ enum ActivationVerificationTests {
     @MainActor static func matchedSiblingFocusIsNotIdentityProof() throws {
         let activator = activator(candidates: [candidate("X", frameB), candidate("B", frameA)], focusedIndex: 1)
         var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
+        let fields = verificationFields { result = activator.activateWithResult(syntheticTarget(title: "A")) }
         try expectEqual(bool(fields, "raise_withheld"), true)
         try expectEqual(string(fields, "matched_element_focus"), "not-observed")
         try expectEqual(result, .failed, "contradicted identity must be rejected before any action")
@@ -227,12 +305,12 @@ enum ActivationVerificationTests {
                 focusSampleOverride: { _, _ in samples.withValue { $0 += 1 }; return sample(matched: true) }
             )
             var result: WindowActivationResult?
-            let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
+            let fields = verificationFields { result = activator.activateWithResult(syntheticTarget(title: "A")) }
             try expectEqual(string(fields, "match_reason"), "closest-frame-no-title")
             try expectEqual(bool(fields, "raise_withheld"), true, "a guess must not be raised")
-            try expectEqual(result, .failed, "the app still activates")
-            try expectEqual(string(fields, "result_reason"), "application-activation-unconfirmed")
-            try expectEqual(string(fields, "legacy_result"), "failed", "unidentified targets no longer activate an app")
+            try expectEqual(result, .failed, "several listed rows: activation could expose a sibling")
+            try expectEqual(string(fields, "result_reason"), "activation-skipped-raise-withheld-title-not-found")
+            try expectEqual(string(fields, "legacy_result"), "activation-skipped")
             try expectEqual(samples.value, 0, "nothing was raised, so there is no matched element to observe")
         }
     }
@@ -241,7 +319,7 @@ enum ActivationVerificationTests {
         let activator = activator(candidates: [candidate("X", frameB), candidate("Y", CGRect(x: 2000, y: 0, width: 300, height: 200))],
                                   focusedIndex: 0)
         var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target(title: "")) }
+        let fields = verificationFields { result = activator.activateWithResult(syntheticTarget(title: "")) }
         try expectEqual(bool(fields, "raise_withheld"), true)
         try expectEqual(result, .failed)
     }
@@ -263,7 +341,7 @@ enum ActivationVerificationTests {
         let candidates = [candidate("A", frameA)] + (1..<32).map { candidate("Other \($0)", frameB) }
         let activator = activator(candidates: candidates, total: 40, focusedIndex: 0)
         var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target()) }
+        let fields = verificationFields { result = activator.activateWithResult(syntheticTarget()) }
         try expectEqual(result, .failed, "a unique title in a prefix is not unique in the app")
         try expectEqual(string(fields, "match_evidence_basis"), "candidate-scan-bounded")
         try expectEqual(bool(fields, "candidate_scan_bounded"), true)
@@ -272,7 +350,7 @@ enum ActivationVerificationTests {
     @MainActor static func unreadableCandidateTitleIsWeak() throws {
         let activator = activator(candidates: [candidate("A", frameA), candidate(nil, frameB)], focusedIndex: 0)
         var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target()) }
+        let fields = verificationFields { result = activator.activateWithResult(syntheticTarget()) }
         try expectEqual(result, .failed, "an unreadable title could be another A")
         try expectEqual(string(fields, "match_evidence_basis"), "candidate-title-unavailable")
     }
@@ -326,8 +404,11 @@ enum ActivationVerificationTests {
                         .weak("frame-not-found"))
     }
 
+    /// Live Outlook shape: focused-window reads return cannotComplete (-25204)
+    /// after a correct switch. Unreadable focus is not a wrong sibling, so the
+    /// exact-ID target is app-level success and the panel must not return.
     @MainActor static func unknownFocusIsNeitherMismatchNorSuccess() throws {
-        let activator = activator(candidates: [candidate("A", frameA), candidate("B", frameB)],
+        let activator = activator(candidates: [window(2), window(3)],
                                   focusedIndex: nil, focusError: -25204)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target()) }
@@ -358,7 +439,7 @@ enum ActivationVerificationTests {
         let failed = activator(candidates: [], focusedIndex: 0, applicationActivated: false)
         try expectEqual(failed.activateWithResult(target()), .failed)
         // A different survivor is not the closed window, even if it gets focus.
-        let survivor = activator(candidates: [candidate("B", frameB)], focusedIndex: 0)
+        let survivor = activator(candidates: [window(3)], focusedIndex: 0)
         try expectEqual(survivor.activateWithResult(target()), .failed)
     }
 
@@ -393,9 +474,11 @@ enum ActivationVerificationTests {
     @MainActor static func sameAppVerifies() throws {
         // Same app, already active: no app activation call and no activation
         // notification. Only the focus check can tell the two outcomes apart.
-        for (focused, expected) in [(0, WindowActivationResult.selectedTarget), (1, .applicationOnly)] {
+        // An already-active app gets no corrective raise, so a focused listed
+        // sibling stays a failure.
+        for (focused, expected) in [(0, WindowActivationResult.selectedTarget), (1, .failed)] {
             let calls = LockedValue(0)
-            let activator = activator(candidates: [candidate("A", frameA), candidate("B", frameB)],
+            let activator = activator(candidates: [window(2), window(3)],
                                       focusedIndex: focused, alreadyActive: true, activationCalls: calls)
             try expectEqual(activator.activateWithResult(target(pid: 100, frontmost: true)), expected)
             try expectEqual(calls.value, 0)
@@ -404,7 +487,7 @@ enum ActivationVerificationTests {
 
     @MainActor static func userLeftDuringVerification() throws {
         // Activation was confirmed, then another app took focus before the check.
-        let activator = activator(candidates: [candidate("A", frameA), candidate("B", frameB)],
+        let activator = activator(candidates: [window(2), window(3)],
                                   focusedIndex: 0, active: false)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target()) }
@@ -414,12 +497,14 @@ enum ActivationVerificationTests {
 
     @MainActor static func diagnosticsSeparateFacts() throws {
         let secret = "Quarterly secret"
-        let activator = activator(candidates: [candidate(secret, frameA), candidate("Other", frameB)], focusedIndex: 0)
+        let activator = activator(candidates: [window(2), window(3)], focusedIndex: 0)
         let fields = verificationFields { _ = activator.activateWithResult(target(title: secret)) } ?? [:]
         for key in ["window_id", "pid", "window_pid", "match_reason", "candidate_count", "candidate_total",
                     "candidate_scan_bounded", "match_evidence", "match_evidence_basis", "application_activated",
                     "matched_element_focus", "focus_verification_ms", "focus_samples", "result", "result_reason",
-                    "legacy_result", "targeting_ms", "application_activation_ms", "activation_total_ms"] {
+                    "legacy_result", "targeting_ms", "application_activation_ms", "activation_total_ms",
+                    "activation_attempted", "application_fallback_allowed", "application_row_count",
+                    "accessibility_unavailable", "focus_restored_after_activation"] {
             try expect(fields[key] != nil, "missing \(key)")
         }
         try expectLessThanOrEqual(fields.count, PerformanceDiagnostics.maximumFieldCount)
@@ -469,8 +554,9 @@ enum ActivationVerificationTests {
         return dispatched.value ?? [:]
     }
 
-    private static func targetApp(focusedIndex: Int) -> WindowActivator {
-        activator(candidates: [candidate("W2", frameA), candidate("W3", frameB)], focusedIndex: focusedIndex)
+    /// `focusedIndex: nil` makes the focused window unreadable.
+    private static func targetApp(focusedIndex: Int?) -> WindowActivator {
+        activator(candidates: [window(2), window(3)], focusedIndex: focusedIndex, focusError: -25204)
     }
 
     private static let crossAppWindows: [WindowItem] = [
@@ -482,13 +568,14 @@ enum ActivationVerificationTests {
     @MainActor static func storeApplicationOnlyDoesNotRemember() async throws {
         let catalog = MockWindowCatalog()
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
-        let store = makeStore(activator: targetApp(focusedIndex: 1), tracker: tracker, catalog: catalog)
+        let store = makeStore(activator: targetApp(focusedIndex: nil), tracker: tracker, catalog: catalog)
         defer { store.cancel() }
         for item in [crossAppWindows[2], crossAppWindows[1], crossAppWindows[0]] { tracker.trackFocusedWindowActivation(item) }
         catalog.visibleItems = crossAppWindows
         let fields = try await commitAndWait(store, selecting: 2)
         try expectEqual(string(fields, "result"), "application-only")
-        try expect(tracker.recentWindowIDs.first != 2, "a focused sibling must not rank the intended window as exact")
+        try expect(!store.isVisible, "unreadable focus after a real switch must not bring the panel back")
+        try expect(tracker.recentWindowIDs.first != 2, "unverified focus must not rank the intended window as exact")
     }
 
     @MainActor static func storeSameAppApplicationOnlyKeepsRanks() async throws {
@@ -496,7 +583,7 @@ enum ActivationVerificationTests {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let windows = [makeItem(id: 1, pid: 100, title: "W1", isFrontmostApp: true, bounds: frameB),
                        makeItem(id: 2, pid: 100, title: "W2", isFrontmostApp: true, bounds: frameA)]
-        let activator = activator(candidates: [candidate("W2", frameA), candidate("W1", frameB)],
+        let activator = activator(candidates: [window(2), window(1)],
                                   focusedIndex: 1, alreadyActive: true)
         let store = makeStore(activator: activator, tracker: tracker, catalog: catalog)
         defer { store.cancel() }
@@ -530,7 +617,7 @@ enum ActivationVerificationTests {
                 started.value = true
                 return gate.semaphore.wait(timeout: .now() + 2) == .success
             },
-            matchCandidatesOverride: { _ in ([candidate("W2", frameA), candidate("W3", frameB)], 2) },
+            matchCandidatesOverride: { _ in ([window(2), window(3)], 2) },
             focusSampleOverride: { _, index in sample(matched: index == 0) }
         )
         let store = makeStore(activator: activator, tracker: tracker, catalog: catalog)
@@ -547,6 +634,31 @@ enum ActivationVerificationTests {
         try expectEqual(string(fields, "result"), "selected-target")
         try expectEqual(tracker.recentWindowIDs, ranksBeforeCompletion,
                         "an older verified result must not move ahead of newer external focus")
+    }
+
+    /// The store, not the activator, knows how many rows the user saw for the
+    /// app and whether Accessibility was granted when the action started.
+    @MainActor static func storeTargetCarriesRowCountAndPermission() async throws {
+        for accessibility in [true, false] {
+            let catalog = MockWindowCatalog()
+            let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+            let captured = LockedValue<WindowActionTarget?>(nil)
+            let permissions = MockPermissionService()
+            permissions.state = PermissionState(hasAccessibility: accessibility, hasScreenRecording: true)
+            let store = SwitcherStore(
+                catalog: catalog,
+                activator: WindowActivator(raiseWindowOverride: { item in captured.value = item; return true },
+                                           activateApplicationOverride: { _ in true }),
+                permissionService: permissions, userDefaults: makeIsolatedUserDefaults(), mruTracker: tracker,
+                focusedRankUpgradeDelayNanoseconds: 5_000_000_000, workspaceNotificationCenter: NotificationCenter(),
+                initialFrontmostAppPID: 100, switchBladePID: 999
+            )
+            defer { store.cancel() }
+            catalog.visibleItems = crossAppWindows
+            _ = try await commitAndWait(store, selecting: 2)
+            try expectEqual(captured.value?.applicationRowCount, 2)
+            try expectEqual(captured.value?.accessibilityUnavailable, !accessibility)
+        }
     }
 
     @MainActor static func storeDispatchSeparatesQueueAndExecution() async throws {
@@ -575,7 +687,7 @@ enum ActivationVerificationTests {
                 started.value = true
                 return gate.semaphore.wait(timeout: .now() + 2) == .success
             },
-            matchCandidatesOverride: { _ in ([candidate("W2", frameA), candidate("W3", frameB)], 2) },
+            matchCandidatesOverride: { _ in ([window(2), window(3)], 2) },
             focusSampleOverride: { _, index in sample(matched: index == 0) }
         )
         let store = makeStore(activator: activator, tracker: tracker, catalog: catalog)

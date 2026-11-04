@@ -14,6 +14,13 @@ struct WindowActionTarget: Identifiable, Equatable, Sendable {
     /// Process that owns the AX/WindowServer window when it differs from the
     /// regular application process (for example a nested renderer process).
     let windowOwnerPID: pid_t?
+    /// Rows the switcher listed for this application when the action started.
+    /// `nil` is unknown and treated like several rows: activating the app could
+    /// then expose an unselected sibling.
+    var applicationRowCount: Int? = nil
+    /// Accessibility was not granted when the action started, so no window
+    /// identity can be read and only app-level activation is possible.
+    var accessibilityUnavailable = false
 
     var id: CGWindowID { windowID }
     var windowProcessIdentifier: pid_t { windowOwnerPID ?? pid }

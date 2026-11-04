@@ -1332,7 +1332,8 @@ enum SwitcherStoreTests {
             [3, 1, 2],
             "a rapid reopen should not replay the pre-commit cached order and leave the newly selected app at the tail"
         )
-        try expect(catalog.visibleSnapshotCount >= baselineSnapshots)
+        try expectGreaterThan(catalog.visibleSnapshotCount, baselineSnapshots,
+                              "a cached reopen still reconciles membership with a post-open scan")
     }
 
     @MainActor static func requestCycle_reusesInFlightWarmupSnapshot() async throws {

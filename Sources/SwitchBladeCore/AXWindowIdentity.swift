@@ -8,13 +8,22 @@ import Darwin
 enum AXWindowIdentity {
     private typealias ReadWindowID = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> Int32
 
+    /// Resolved once; lookup through RTLD_DEFAULT covers the linked
+    /// ApplicationServices image.
+    private static let readWindowID: ReadWindowID? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: ReadWindowID.self)
+    }()
+
+    /// Whether the system still exports the identity symbol.
+    static var isAvailable: Bool { readWindowID != nil }
+
     static func windowID(of element: AXUIElement) -> CGWindowID? {
-        guard let process = dlopen(nil, RTLD_LAZY) else { return nil }
-        defer { dlclose(process) }
-        guard let symbol = dlsym(process, "_AXUIElementGetWindow") else { return nil }
-        let read = unsafeBitCast(symbol, to: ReadWindowID.self)
+        guard let readWindowID else { return nil }
         var id: CGWindowID = 0
-        guard read(element, &id) == AXError.success.rawValue, id != 0 else { return nil }
+        guard readWindowID(element, &id) == AXError.success.rawValue, id != 0 else { return nil }
         return id
     }
 }

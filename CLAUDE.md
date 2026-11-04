@@ -323,44 +323,62 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   app activation. Selection uses `WindowActivationResult`: `applicationOnly`
   dismisses the panel and reconciles app history, but does not remember the
   unverified selected window or pin its cached sibling order. The next open
-  rebases a single-window cache or refreshes multi-window order. A frontmost
-  target must be identified and targeted before app activation; a failed AX
-  target now fails the selection rather than activating an arbitrary sibling. A
+  rebases a single-window cache or refreshes multi-window order. An
+  unidentified or untargeted row activates its app only when that cannot expose
+  an unselected listed sibling: the app had one listed row, or Accessibility
+  was unavailable (no identity can exist). Otherwise no activation is attempted
+  (`result_reason=activation-skipped-*`, `activation_attempted=false`). A
   cross-app `applicationOnly` result records the coarse app hint that an
   external activation would (plus the delayed AX-focus upgrade), so the
   backgrounded window stays the next Cmd+Tab target. Genuine
   activation failures retain the recovery panel; failed snaps remain failures.
   `PartialActivationTests` covers visible/prepared/resolving release, history,
   exact-window MRU preservation, backgrounded-window order, fresh sibling order
-  and newer external focus.
+  and newer external focus. Production-reachable `applicationOnly` shapes are in
+  `ActivationVerification/*` (unreadable focus, single-row and no-Accessibility
+  fallback).
 - **Selected window opens a sibling (all apps)** → concrete actions use the
   selected WindowServer ID within its owning process. `AXWindowIdentity` resolves
-  `_AXUIElementGetWindow` dynamically (undocumented macOS API); a missing symbol,
-  unreadable ID, absent target or duplicate match fails closed before app
-  activation. Title/frame matching is reserved for synthetic minimized rows,
+  `_AXUIElementGetWindow` once through `RTLD_DEFAULT` (undocumented macOS API;
+  `ActivationVerification/windowIdentitySymbol_resolves` checks the real export).
+  A missing symbol, unreadable ID, absent target or duplicate match raises
+  nothing; app activation then follows only the single-row/no-Accessibility
+  fallback above. Title/frame matching is reserved for synthetic minimized rows,
   and requires unique evidence over a complete readable AX list before raising.
   Concrete matching reads IDs only, avoiding unrelated title/frame AX timeouts.
   `selectedTarget` additionally requires confirmed app activation and focus of
   the retained matched AX element. If activation restores a different sibling,
   one corrective raise/main/focus is allowed only for the same retained exact-ID
   target, while its app remains active and its ID can still be read. No rematch,
-  no app reactivation loop. Unconfirmed concrete focus returns failure and the
-  recovery panel; it must not silently promote the intended row in MRU.
+  no app reactivation loop. Only an observed *other* focused window with several
+  listed rows returns failure and the recovery panel. Unreadable focus (signed
+  Outlook returned AX `cannotComplete` -25204) or a later departure is
+  `applicationOnly`: the panel stays dismissed and the intended row is not
+  promoted in MRU.
   `activation_verification` logs `match_evidence_basis=window-id`, focus and
   `focus_restored_after_activation` without window titles. Action correlation
   and stale-completion guards remain in force. Synthetic rows lack concrete ID
   continuity; their unique title/frame match is a weaker documented limit.
   Regressions: `ActivationVerification/*` includes 14 overlapping untitled
   windows, contradicted titles, missing identity and activation focus reset.
+  Injected candidates use the production rule: concrete targets match by
+  window ID only, so title/frame evidence tests use synthetic minimized IDs.
 - **New window missing immediately after launch/open (all apps)** → cache age
   is not proof of membership. Every cached open paints immediately, then
   reconciles a scope snapshot started after that open, including additions and
   removals. Cold opens also reject a pre-open in-flight warmup snapshot.
   New opens/settings supersede old reconciliation; previews remain cached,
   selection is retained by ID when present, and current-Space/privacy filters
-  still apply. A window not yet created/eligible at snapshot time can only be
+  still apply. A selection or `hide()` discards the pending reconciliation:
+  its scan predates the selection, so it must not rewrite the selection-synced
+  cache (frontmost flags, resnapshot marker); post-hide warmups refresh it. An
+  empty scan (also the CGWindowList failure result) keeps the painted rows, and
+  an unchanged ID order keeps the in-flight preview batch instead of restarting
+  capture (`stale_heal_discarded`, `display_order` context
+  `stale-cache-refresh-unchanged`). A window not yet created/eligible at snapshot time can only be
   discovered by a later notification/open. Regressions:
   `CachedSwitch/freshCacheDiscoversNewAndClosedWindows` (14 rows),
+  `CachedSwitch/healAfterQuickCommit*`, `emptyHealSnapshot*`, `unchangedHeal*`,
   `Store/requestCycle_doesNotReusePreOpenWarmupSnapshot`.
 - **Cmd+Tab does nothing, or release activates nothing** → look for
   `selection_action_refused`. The single window-action lane stays busy while

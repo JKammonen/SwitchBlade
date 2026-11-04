@@ -1151,7 +1151,10 @@ final class SwitcherStore: ObservableObject {
                 "Double modifier switching window current=\(effectiveCurrentPID ?? -1, privacy: .public) targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public)"
             )
             let activator = self.activator
-            let target = targetItem.actionTarget
+            var actionTarget = targetItem.actionTarget
+            actionTarget.applicationRowCount = orderedItems.filter { $0.pid == targetItem.pid }.count
+            actionTarget.accessibilityUnavailable = permissionState.needsAccessibility
+            let target = actionTarget
             let activationSequenceAtStart = appActivationSequence
             guard await runActivatorOperation({
                 Self.activateSelectionTarget(target, using: activator) == .selectedTarget
@@ -1351,7 +1354,10 @@ final class SwitcherStore: ObservableObject {
         let actionSource = source ?? currentOpenSource ?? "unknown"
         let activator = self.activator
         let catalog = self.catalog
-        let target = item.actionTarget
+        var actionTarget = item.actionTarget
+        actionTarget.applicationRowCount = liveItems.filter { $0.pid == item.pid }.count
+        actionTarget.accessibilityUnavailable = permissionState.needsAccessibility
+        let target = actionTarget
         let dismissBeforeCompletion = dismissVisiblePanelImmediately && isVisible
         let sourceAppPID = currentAppPID
         let backgroundedPID = sourceAppPID.flatMap { pid in
@@ -1862,6 +1868,10 @@ final class SwitcherStore: ObservableObject {
         minimizedMergeTask = nil
         openItemsWarmupTask?.cancel()
         openRefreshTask?.cancel()
+        // Its snapshot predates the selection; post-hide warmups refresh the
+        // cache from a scan that starts after this point.
+        staleCacheHealTask?.cancel()
+        staleCacheHealTask = nil
         cancelPanelShow()
         previewWarmupTask?.cancel()
         enterIdle(resumeDeferredFocus: false)
@@ -2073,6 +2083,19 @@ final class SwitcherStore: ObservableObject {
 
             guard !Task.isCancelled, self.openDiagnosticID == openID,
                   self.settingsGeneration == generation else { return }
+            // A selection after this snapshot started owns the cache: the scan
+            // still carries pre-selection frontmost state and would also clear
+            // the resnapshot marker of an app-only or failed action.
+            guard self.isSwitching, self.windowActionID == nil else {
+                self.recordStaleHealDiscard("selection-after-snapshot", openID: openID)
+                return
+            }
+            // CGWindowList failure also yields an empty list. Keep the
+            // painted rows instead of replacing them with an empty panel.
+            guard !visibleSnapshot.isEmpty else {
+                self.recordStaleHealDiscard("empty-snapshot", openID: openID)
+                return
+            }
 
             let orderStart = Date()
             self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
@@ -2126,11 +2149,25 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
+    private func recordStaleHealDiscard(_ reason: String, openID: String) {
+        PerformanceDiagnostics.record("stale_heal_discarded", fields: [
+            "open_id": .string(openID),
+            "reason": .string(reason)
+        ])
+    }
+
     private func applyStaleCacheRefresh(
         _ orderedItems: [WindowItem],
         showAfterRefresh: Bool
     ) -> Double {
         setShowingStale(false)
+        // Unchanged membership and order: the painted rows and their in-flight
+        // preview batch are already current. Restarting capture would only
+        // duplicate ScreenCaptureKit work and occupy more permits.
+        if showAfterRefresh, orderedItems.map(\.id) == items.map(\.id) {
+            recordDisplayOrder(context: "stale-cache-refresh-unchanged")
+            return 0
+        }
         let previousSelectedID = selectedID
         let hydrateStart = Date()
         let hydratedItems = hydratedForDisplay(orderedItems)

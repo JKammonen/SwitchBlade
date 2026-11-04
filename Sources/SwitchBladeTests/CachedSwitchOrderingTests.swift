@@ -6,6 +6,9 @@ import Foundation
 enum CachedSwitchOrderingTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("CachedSwitch/freshCacheDiscoversNewAndClosedWindows", freshCacheDiscoversNewAndClosedWindows),
+        ("CachedSwitch/healAfterQuickCommitDoesNotOverwriteSelectionCache", healAfterQuickCommitKeepsSelectionCache),
+        ("CachedSwitch/emptyHealSnapshotKeepsPaintedRows", emptyHealSnapshotKeepsPaintedRows),
+        ("CachedSwitch/unchangedHealDoesNotRestartPreviewCapture", unchangedHealDoesNotRestartCapture),
         ("CachedSwitch/freshSingleWindowCacheUsesCurrentMRU", freshCacheUsesCurrentMRU),
         ("CachedSwitch/staleSingleWindowCacheUsesCurrentMRUBeforeRefresh", staleCacheUsesCurrentMRU),
         ("CachedSwitch/rebasedSingleWindowCacheUsesCurrentMRU", rebasedCacheUsesCurrentMRU),
@@ -49,6 +52,92 @@ enum CachedSwitchOrderingTests {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         try expectEqual(Set(store.items.map(\.id)), Set(updated.map(\.id)), "fresh cache age does not prove current membership")
+    }
+
+    private static func recordedRows(_ event: String) -> (rows: LockedValue<[[String: PerformanceMetricValue]]>,
+                                                           restore: () -> Void) {
+        let rows = LockedValue<[[String: PerformanceMetricValue]]>([])
+        let previous = PerformanceDiagnostics.testObserver.value
+        PerformanceDiagnostics.testObserver.value = { name, fields in
+            previous?(name, fields)
+            if name == event { rows.withValue { $0.append(fields) } }
+        }
+        return (rows, { PerformanceDiagnostics.testObserver.value = previous })
+    }
+
+    /// The heal scan of a cached open started before the quick commit. It
+    /// still names the source app frontmost; writing it after the selection
+    /// replaced the selection-synced cache (and its resnapshot marker).
+    @MainActor private static func healAfterQuickCommitKeepsSelectionCache() async throws {
+        let (store, catalog, activator, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        catalog.visibleItems = [makeItem(id: 1, pid: 100, isFrontmostApp: true),
+                                makeItem(id: 2, pid: 200), makeItem(id: 3, pid: 300)]
+        await store.warmPreviewCache(context: "quick-commit-seed")
+        catalog.visibleSnapshotDelayNanoseconds = 60_000_000
+        store.requestCycle(forward: true)
+        try expectEqual(store.selectedID, 2)
+        store.commitSelection()
+        for _ in 0..<100 where store.isSwitching || activator.activatedItems.isEmpty {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try expectEqual(activator.activatedItems.map(\.id), [2])
+        // Let the pre-commit heal scan return, then reopen before the
+        // 250 ms post-hide warmup can legitimately refresh the cache.
+        try await Task.sleep(nanoseconds: 90_000_000)
+        catalog.visibleSnapshotDelayNanoseconds = 400_000_000
+        store.requestCycle(forward: true)
+        try expectEqual(store.items.first(where: \.isFrontmostApp)?.pid, 200,
+                        "the selected app is frontmost in the cache, not the pre-commit source")
+        try expectEqual(store.items.first?.id, 2)
+    }
+
+    /// CGWindowList failure returns an empty list. It must not empty the
+    /// visible panel that already painted cached rows.
+    @MainActor private static func emptyHealSnapshotKeepsPaintedRows() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = (1...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100), isFrontmostApp: $0 == 1) }
+        catalog.visibleItems = original
+        await store.warmPreviewCache(context: "empty-heal-seed")
+        catalog.visibleItems = []
+        let recorded = recordedRows("stale_heal_discarded")
+        defer { recorded.restore() }
+        store.requestCycle(forward: true)
+        for _ in 0..<100 where recorded.rows.value.isEmpty {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try expectEqual(recorded.rows.value.count, 1)
+        try expectEqual(store.items.map(\.id), original.map(\.id))
+        try expect(store.isVisible)
+        try expectNotNil(store.selectedID)
+    }
+
+    /// Every cached open reconciles membership now. When nothing changed, the
+    /// painted rows and their preview batch are current: no second capture.
+    @MainActor private static func unchangedHealDoesNotRestartCapture() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = (1...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100), isFrontmostApp: $0 == 1) }
+        catalog.visibleItems = original
+        await store.warmPreviewCache(context: "unchanged-heal-seed")
+        catalog.visibleSnapshotDelayNanoseconds = 20_000_000
+        let recorded = recordedRows("display_order")
+        defer { recorded.restore() }
+        store.requestCycle(forward: true)
+        try await Task.sleep(nanoseconds: 5_000_000)
+        let capturesBeforeHeal = catalog.captureCallCount
+        let contexts = { recorded.rows.value.compactMap { row -> String? in
+            guard case .string(let context)? = row["context"] else { return nil }
+            return context
+        } }
+        for _ in 0..<100 where !contexts().contains("stale-cache-refresh-unchanged") {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        try expect(contexts().contains("stale-cache-refresh-unchanged"))
+        try await runPendingMainTasks()
+        try expectEqual(catalog.captureCallCount, capturesBeforeHeal, "unchanged membership must not recapture")
+        try expectEqual(store.items.map(\.id), original.map(\.id))
     }
 
     @MainActor private static func freshCacheUsesCurrentMRU() async throws {

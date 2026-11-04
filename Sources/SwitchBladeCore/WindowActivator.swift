@@ -166,10 +166,14 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let targetWasActive = isApplicationActive(pid: item.pid)
         let targeting = targetWindow(item)
         let targeted = ProcessInfo.processInfo.systemUptime
-        // Never turn an unidentified concrete window into an app-level switch:
-        // activation can bring an arbitrary previously-main sibling forward.
-        let activated = targeting.targeted && !targeting.raiseWithheld
-            ? activateTargetApplicationIfNeeded(item) : false
+        // An unidentified target becomes an app-level switch only when that
+        // cannot expose an unselected sibling: the app has a single listed row,
+        // or Accessibility is unavailable and no window identity can exist.
+        let unidentified = !targeting.targeted || targeting.raiseWithheld
+        let applicationLevelIsSafe = Self.allowsApplicationLevelFallback(for: item)
+        let fallbackAllowed = unidentified && applicationLevelIsSafe
+        let activationAttempted = !unidentified || fallbackAllowed
+        let activated = activationAttempted ? activateTargetApplicationIfNeeded(item) : false
         let applicationActivated = ProcessInfo.processInfo.systemUptime
         // App activation can restore its old main window after AX targeting.
         // Observe the retained target, never pick another candidate on recovery.
@@ -185,13 +189,18 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
         let classification = Self.classifyActivation(
             applicationActivated: activated, targeted: targeting.targeted,
-            evidence: targeting.evidence, focus: focus.outcome, raiseWithheld: targeting.raiseWithheld
+            evidence: targeting.evidence, focus: focus.outcome, raiseWithheld: targeting.raiseWithheld,
+            activationAttempted: activationAttempted, applicationLevelIsSafe: applicationLevelIsSafe
         )
         let result = classification.result
-        // The pre-verification rule raised every match, including withheld guesses.
-        let legacyResult: WindowActivationResult = activated
-            ? (targeting.targeted || targeting.raiseWithheld ? .selectedTarget : .applicationOnly)
-            : .failed
+        // The pre-verification rule raised every match, including withheld
+        // guesses. Its outcome is unknown when activation was not attempted.
+        let legacyResult: String = !activationAttempted
+            ? "activation-skipped"
+            : (activated
+                ? (targeting.targeted || targeting.raiseWithheld ? WindowActivationResult.selectedTarget
+                    : .applicationOnly)
+                : .failed).rawValue
         var fields: [String: PerformanceMetricValue] = [
             "window_id": .int(Int(item.id)),
             "focus_restored_after_activation": .bool(restoredFocus),
@@ -214,7 +223,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             "targeting_ms": .double((targeted - start) * 1000),
             "application_activation_ms": .double((applicationActivated - targeted) * 1000),
             "activation_total_ms": .double((ProcessInfo.processInfo.systemUptime - start) * 1000),
-            "legacy_result": .string(legacyResult.rawValue),
+            "legacy_result": .string(legacyResult),
+            "activation_attempted": .bool(activationAttempted),
+            "application_fallback_allowed": .bool(fallbackAllowed),
+            "application_row_count": .int(item.applicationRowCount ?? -1),
+            "accessibility_unavailable": .bool(item.accessibilityUnavailable),
             "result": .string(result.rawValue),
             "result_reason": .string(classification.reason),
             "raise_withheld": .bool(targeting.raiseWithheld)
@@ -235,21 +248,38 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     /// the AX match had unique evidence over a complete readable candidate
     /// list, and that matched element was observed focused. Focus alone only
     /// proves the matched element got focus, not that it was the selected row.
+    ///
+    /// An unidentified target that may not fall back to the app is `failed`
+    /// without any activation attempt. For an exact window-ID target, only an
+    /// observed *other* focused sibling is `failed`: an unreadable focused
+    /// window or a later departure is not evidence that a sibling opened.
     static func classifyActivation(
         applicationActivated: Bool,
         targeted: Bool,
         evidence: WindowMatchEvidence,
         focus: MatchedElementFocus,
-        raiseWithheld: Bool = false
+        raiseWithheld: Bool = false,
+        activationAttempted: Bool = true,
+        applicationLevelIsSafe: Bool = false
     ) -> (result: WindowActivationResult, reason: String) {
+        let targetingReason = raiseWithheld ? "raise-withheld-\(evidence.basis)" : "ax-targeting-failed"
+        guard activationAttempted else { return (.failed, "activation-skipped-\(targetingReason)") }
         guard applicationActivated else { return (.failed, "application-activation-unconfirmed") }
-        guard !raiseWithheld else { return (.applicationOnly, "raise-withheld-\(evidence.basis)") }
-        guard targeted else { return (.applicationOnly, "ax-targeting-failed") }
+        guard !raiseWithheld, targeted else { return (.applicationOnly, targetingReason) }
         guard evidence.isUnique else { return (.applicationOnly, "match-evidence-\(evidence.basis)") }
         guard focus == .focused else {
-            return (evidence.basis == "window-id" ? .failed : .applicationOnly, "matched-element-\(focus.rawValue)")
+            let listedSiblingMayBeFocused = evidence.basis == "window-id" && focus == .otherWindowFocused
+                && !applicationLevelIsSafe
+            return (listedSiblingMayBeFocused ? .failed : .applicationOnly, "matched-element-\(focus.rawValue)")
         }
         return (.selectedTarget, "verified-unique-match-focused")
+    }
+
+    /// App activation raises the app's own choice of window. Allow it for an
+    /// unidentified target only when no unselected sibling can be exposed (a
+    /// single listed row) or when no window identity can exist at all.
+    static func allowsApplicationLevelFallback(for item: WindowActionTarget) -> Bool {
+        item.accessibilityUnavailable || item.applicationRowCount == 1
     }
 
     /// Classifies uniqueness over the whole candidate list. Closest-frame and
@@ -704,9 +734,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         if let matchCandidatesOverride {
             let injected = matchCandidatesOverride(item)
             let complete = injected.candidates.count == injected.total
+            // Mirror production: concrete rows match by window ID only.
             guard let decision = Self.bestMatchDecision(
                 for: item, candidates: injected.candidates,
-                preferNonMainOnTies: item.isFrontmostApp, candidateScanIsComplete: complete
+                preferNonMainOnTies: item.isFrontmostApp, candidateScanIsComplete: complete,
+                requireWindowIdentity: !SyntheticWindowID.isSynthetic(item.id)
             ) else { return .unmatched(candidateTotal: injected.total) }
             let evidence = Self.matchEvidence(for: item, candidates: injected.candidates,
                                               chosenIndex: decision.index, candidateScanIsComplete: complete)
@@ -1137,6 +1169,13 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         unminimizeResult: AXError? = nil
     ) {
         let unminimizeRaw = unminimizeResult?.rawValue ?? Int32.min
+        if match.decision.reason == "window-id" {
+            // Identity match reads no title/frame/main/focus metadata.
+            Logger.activator.info(
+                "AX target action=\(action, privacy: .public) pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) candidates=\(match.candidateCount, privacy: .public) chosenIndex=\(match.decision.index, privacy: .public) reason=window-id raiseResult=\(raiseResult.rawValue, privacy: .public) mainResult=\(mainResult.rawValue, privacy: .public) focusResult=\(focusResult.rawValue, privacy: .public) unminimizeResult=\(unminimizeRaw, privacy: .public)"
+            )
+            return
+        }
         Logger.activator.info(
             "AX target action=\(action, privacy: .public) pid=\(item.pid, privacy: .public) windowPID=\(item.windowProcessIdentifier, privacy: .public) windowID=\(item.id, privacy: .public) candidates=\(match.candidateCount, privacy: .public) chosenIndex=\(match.decision.index, privacy: .public) reason=\(match.decision.reason, privacy: .public) titleMatches=\(match.decision.titleMatchCount, privacy: .public) frameMatches=\(match.decision.frameMatchCount, privacy: .public) frameDistance=\(match.decision.frameDistanceBucket, privacy: .public) chosenMain=\(match.decision.chosenIsMain, privacy: .public) chosenFocused=\(match.decision.chosenIsFocused, privacy: .public) raiseResult=\(raiseResult.rawValue, privacy: .public) mainResult=\(mainResult.rawValue, privacy: .public) focusResult=\(focusResult.rawValue, privacy: .public) unminimizeResult=\(unminimizeRaw, privacy: .public)"
         )
