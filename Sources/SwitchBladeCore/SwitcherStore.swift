@@ -221,6 +221,12 @@ final class SwitcherStore: ObservableObject {
     /// Bumped by every open and selection; an outcome probe of an older
     /// selection is discarded rather than measuring a newer switch.
     private var activationOutcomeGeneration = 0
+    /// Position of the open's default selection (normally the previous
+    /// window, index 1). Until the user moves the selection, a membership
+    /// reconciliation keeps this *position*, not the stale row's ID: a newly
+    /// discovered frontmost window shifts every row down by one.
+    private var openDefaultSelectionIndex: Int?
+    private var selectionMovedSinceOpen = false
     private var activationOutcomeProbeTask: Task<Void, Never>?
     private let windowStackReader: WindowStackReading
     private let activationOutcomeProbeDelayNanoseconds: UInt64
@@ -674,7 +680,7 @@ final class SwitcherStore: ObservableObject {
             }
             if cachedOpenItemsRequireFreshSnapshotForCurrentApp() {
                 Logger.switcher.info(
-                    "Bypassing cached open items for current multi-window app"
+                    "Bypassing cached open items: current app has several or no cached rows"
                 )
                 openFromFreshSnapshotOffMain()
                 return
@@ -922,20 +928,24 @@ final class SwitcherStore: ObservableObject {
             direction: direction
         )
         selectedID = items[targetIndex].id
+        selectionMovedSinceOpen = true
     }
 
     private func selectFirst() {
         guard let first = items.first else { return }
         selectedID = first.id
+        selectionMovedSinceOpen = true
     }
 
     private func selectLast() {
         guard let last = items.last else { return }
         selectedID = last.id
+        selectionMovedSinceOpen = true
     }
 
     func hover(_ item: WindowItem) {
         guard hoverEnabled else { return }
+        if selectedID != item.id { selectionMovedSinceOpen = true }
         selectedID = item.id
     }
 
@@ -2054,6 +2064,8 @@ final class SwitcherStore: ObservableObject {
         // Preselect the second item so a tap-Cmd+Tab+release toggles between
         // the two most-recent windows. With only one item, select that.
         applyDisplayItems(hydratedItems, selectedID: preselectedID)
+        openDefaultSelectionIndex = displayOrderedItems.firstIndex { $0.id == preselectedID }
+        selectionMovedSinceOpen = false
         logOpenOrdering(source: source, orderedItems: displayOrderedItems, selectedID: selectedID)
 
         let cachedHits = items.filter { $0.preview != nil }.count
@@ -2265,7 +2277,9 @@ final class SwitcherStore: ObservableObject {
         t.disablesAnimations = true
         withTransaction(t) {
             items = hydratedItems
-            if let previousSelectedID, hydratedItems.contains(where: { $0.id == previousSelectedID }) {
+            if !selectionMovedSinceOpen, let index = openDefaultSelectionIndex, !hydratedItems.isEmpty {
+                selectedID = hydratedItems[min(index, hydratedItems.count - 1)].id
+            } else if let previousSelectedID, hydratedItems.contains(where: { $0.id == previousSelectedID }) {
                 selectedID = previousSelectedID
             } else {
                 selectedID = hydratedItems.indices.contains(1) ? hydratedItems[1].id : hydratedItems.first?.id
@@ -2615,9 +2629,15 @@ final class SwitcherStore: ObservableObject {
         return items
     }
 
+    /// Several rows: the focused sibling is unknown. No row: the frontmost
+    /// app's window is missing from the cache (for example a relaunched app
+    /// whose window was not yet eligible at the last scan), so the cached
+    /// index 1 is not the previous window and a quick release would pick the
+    /// wrong one.
     private func cachedOpenItemsRequireFreshSnapshotForCurrentApp() -> Bool {
-        guard let currentAppPID else { return false }
-        return cachedOpenItems.filter { $0.pid == currentAppPID }.count > 1
+        guard let currentAppPID, currentAppPID != switchBladePID else { return false }
+        let count = cachedOpenItems.filter { $0.pid == currentAppPID }.count
+        return count != 1
     }
 
     private func recordPreviousSwitchDispatch(
@@ -3377,5 +3397,6 @@ final class SwitcherStore: ObservableObject {
         let currentIndex = items.firstIndex(where: { $0.id == selectedID }) ?? 0
         let nextIndex = (currentIndex + delta + items.count) % items.count
         selectedID = items[nextIndex].id
+        selectionMovedSinceOpen = true
     }
 }

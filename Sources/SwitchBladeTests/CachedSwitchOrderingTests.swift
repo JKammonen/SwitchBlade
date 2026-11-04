@@ -10,6 +10,9 @@ enum CachedSwitchOrderingTests {
         ("CachedSwitch/emptyHealSnapshotKeepsPaintedRows", emptyHealSnapshotKeepsPaintedRows),
         ("CachedSwitch/unchangedHealDoesNotRestartPreviewCapture", unchangedHealDoesNotRestartCapture),
         ("CachedSwitch/sameIDHealAppliesProtectedStateToOpenPanel", sameIDHealAppliesProtectedState),
+        ("CachedSwitch/healInsertingFrontWindowKeepsDefaultPosition", healKeepsDefaultPosition),
+        ("CachedSwitch/healAfterUserMoveKeepsChosenWindow", healAfterUserMoveKeepsChosenWindow),
+        ("CachedSwitch/frontmostAppWithoutCachedRowUsesFreshSnapshot", frontmostAppWithoutCachedRowUsesFreshSnapshot),
         ("CachedSwitch/freshSingleWindowCacheUsesCurrentMRU", freshCacheUsesCurrentMRU),
         ("CachedSwitch/staleSingleWindowCacheUsesCurrentMRUBeforeRefresh", staleCacheUsesCurrentMRU),
         ("CachedSwitch/rebasedSingleWindowCacheUsesCurrentMRU", rebasedCacheUsesCurrentMRU),
@@ -169,6 +172,65 @@ enum CachedSwitchOrderingTests {
         try expectEqual(row?.isTitleRedacted, true, "the protected state reached the open panel")
         try expectNil(row?.preview, "pixels captured before protection must not stay visible")
         try expectEqual(store.items.map(\.id), original.map(\.id))
+    }
+
+    /// Live shape 2026-11-04: a reconciliation put a newly discovered window
+    /// first. Retaining the stale default row by ID moved it to slot 3, so
+    /// the switcher offered the third window instead of the previous one.
+    @MainActor private static func healKeepsDefaultPosition() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = [makeItem(id: 1, pid: 100, isFrontmostApp: true)]
+            + (2...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100)) }
+        catalog.visibleItems = original
+        await store.warmPreviewCache(context: "default-position-seed")
+        // A new same-app window took focus without an app activation.
+        catalog.visibleItems = [makeItem(id: 50, pid: 100, isFrontmostApp: true),
+                                makeItem(id: 1, pid: 100, isFrontmostApp: true)] + original.dropFirst()
+        catalog.visibleSnapshotDelayNanoseconds = 20_000_000
+        store.requestCycle(forward: true)
+        try expectEqual(store.selectedID, 2, "cached first paint selects slot 2")
+        for _ in 0..<100 where store.items.first?.id != 50 { try await Task.sleep(nanoseconds: 2_000_000) }
+        try expectEqual(store.items.first?.id, 50)
+        try expectEqual(store.selectedID, store.items[1].id, "the default stays the previous window, slot 2")
+    }
+
+    @MainActor private static func healAfterUserMoveKeepsChosenWindow() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = [makeItem(id: 1, pid: 100, isFrontmostApp: true)]
+            + (2...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100)) }
+        catalog.visibleItems = original
+        await store.warmPreviewCache(context: "user-move-seed")
+        catalog.visibleItems = [makeItem(id: 50, pid: 100, isFrontmostApp: true),
+                                makeItem(id: 1, pid: 100, isFrontmostApp: true)] + original.dropFirst()
+        catalog.visibleSnapshotDelayNanoseconds = 40_000_000
+        store.requestCycle(forward: true)
+        store.requestCycle(forward: true)
+        try expectEqual(store.selectedID, 3, "the user moved to slot 3 before reconciliation")
+        for _ in 0..<100 where store.items.first?.id != 50 { try await Task.sleep(nanoseconds: 2_000_000) }
+        try expectEqual(store.items.first?.id, 50)
+        try expectEqual(store.selectedID, 3, "an explicit choice follows its window, not its old slot")
+    }
+
+    /// The frontmost app has no cached row (relaunched app whose window was not
+    /// yet eligible at the last scan). Cached slot 2 is not the previous
+    /// window, so even a quick release must wait for a fresh scan.
+    @MainActor private static func frontmostAppWithoutCachedRowUsesFreshSnapshot() async throws {
+        let (store, catalog, activator, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = (1...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100), isFrontmostApp: $0 == 1) }
+        catalog.visibleItems = original
+        await store.warmPreviewCache(context: "missing-front-seed")
+        store.handleAppActivation(pid: 5000)
+        await store.warmPreviewCache(context: "missing-front-rescan")
+        catalog.visibleItems = [makeItem(id: 500, pid: 5000, isFrontmostApp: true)]
+            + original.map { $0.withFrontmostState(false) }
+        catalog.visibleSnapshotDelayNanoseconds = 20_000_000
+        store.requestCycle(forward: true)
+        store.commitSelection()
+        for _ in 0..<100 where activator.activatedItems.isEmpty { try await Task.sleep(nanoseconds: 2_000_000) }
+        try expectEqual(activator.activatedItems.map(\.id), [1], "the previous window, not cached slot 2")
     }
 
     @MainActor private static func freshCacheUsesCurrentMRU() async throws {

@@ -403,9 +403,14 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   is not proof of membership. Every cached open paints immediately, then
   reconciles a scope snapshot started after that open, including additions and
   removals. Cold opens also reject a pre-open in-flight warmup snapshot.
-  New opens/settings supersede old reconciliation; previews remain cached,
-  selection is retained by ID when present, and current-Space/privacy filters
-  still apply. A selection or `hide()` discards the pending reconciliation:
+  New opens/settings supersede old reconciliation; previews remain cached and
+  current-Space/privacy filters still apply. Until the user moves the
+  selection, reconciliation keeps the default *position* (slot 2, the previous
+  window); afterwards it keeps the chosen window by ID. Live cause 2026-11-04:
+  a relaunched Outlook window appeared first and the retained stale default
+  slid to slot 3. A cache with no row (or several rows) for the frontmost app
+  is not used at all: its slot 2 is not the previous window, so even a quick
+  release waits for a fresh scan (about 5% of opens, p50 ~43 ms). A selection or `hide()` discards the pending reconciliation:
   its scan predates the selection, so it must not rewrite the selection-synced
   cache (frontmost flags, resnapshot marker); post-hide warmups refresh it. An
   empty scan (also the CGWindowList failure result) keeps the painted rows.
@@ -418,7 +423,8 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   discovered by a later notification/open. Regressions:
   `CachedSwitch/freshCacheDiscoversNewAndClosedWindows` (14 rows),
   `CachedSwitch/healAfterQuickCommit*`, `emptyHealSnapshot*`, `unchangedHeal*`,
-  `sameIDHealAppliesProtectedState*`,
+  `sameIDHealAppliesProtectedState*`, `healInsertingFrontWindow*`,
+  `healAfterUserMove*`, `frontmostAppWithoutCachedRow*`,
   `Store/requestCycle_doesNotReusePreOpenWarmupSnapshot`.
 - **Cmd+Tab does nothing, or release activates nothing** → look for
   `selection_action_refused`. The single window-action lane stays busy while
