@@ -363,6 +363,25 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   windows, contradicted titles, missing identity and activation focus reset.
   Injected candidates use the production rule: concrete targets match by
   window ID only, so title/frame evidence tests use synthetic minimized IDs.
+- **Switch reported success but the window did not appear** → read
+  `activation_outcome_probe` (debug logging only, diagnostic only: no behavior
+  change). About 150 ms after a completed `activate` selection, off the action
+  lane, it records `target_on_screen`, `target_app_frontmost`, `frontmost_pid`
+  and the normal-level windows (layer 0 and the Electron layer -1) listed above
+  the target that overlap it: `covering_other_app_count`,
+  `covering_same_app_count`, `covering_max_fraction`, up to 8
+  `covering_window_ids` / `covering_owner_pids`. SwitchBlade's own panel and
+  fully transparent surfaces are excluded; titles are never read. It shares the
+  selection's `correlation_id`. A newer open or selection, an open switcher, or
+  an activation of another app discards it as
+  `activation_outcome_probe_discarded` (`superseded`, `switcher-open`,
+  `user-departed`, `departed-before-completion`). Open case (2026-11-04): a
+  `selectedTarget` result whose workbook did not appear; a clean retry opened
+  it. Covering is a hypothesis, not a finding, until this row shows it. First
+  signed-app run (43 selections, 7 apps incl. two Excel workbooks): 0 covered
+  or off-screen targets and one real `superseded` discard. The
+  double-modifier window path is not probed. Regressions:
+  `ActivationOutcomeProbe/*`.
 - **New window missing immediately after launch/open (all apps)** → cache age
   is not proof of membership. Every cached open paints immediately, then
   reconciles a scope snapshot started after that open, including additions and

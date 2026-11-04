@@ -218,6 +218,12 @@ final class SwitcherStore: ObservableObject {
     /// after another app activated is stale even if that app is its source.
     private var appActivationSequence = 0
     private var recentAppActivations: [(sequence: Int, pid: pid_t)] = []
+    /// Bumped by every open and selection; an outcome probe of an older
+    /// selection is discarded rather than measuring a newer switch.
+    private var activationOutcomeGeneration = 0
+    private var activationOutcomeProbeTask: Task<Void, Never>?
+    private let windowStackReader: WindowStackReading
+    private let activationOutcomeProbeDelayNanoseconds: UInt64
     private var focusMembershipInvalidatedAt: TimeInterval?
     private let focusResolutionLane = WindowFocusResolutionLane()
 
@@ -260,8 +266,12 @@ final class SwitcherStore: ObservableObject {
         switchBladePID: pid_t = getpid(),
         bundleIdentifierForPID: @escaping @MainActor (pid_t) -> String? = {
             NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
-        }
+        },
+        windowStackReader: WindowStackReading = SystemWindowStackReader(),
+        activationOutcomeProbeDelayNanoseconds: UInt64 = 150_000_000
     ) {
+        self.windowStackReader = windowStackReader
+        self.activationOutcomeProbeDelayNanoseconds = activationOutcomeProbeDelayNanoseconds
         self.catalog = catalog
         self.windowFocusObserver = windowFocusObserver
         self.activator = activator
@@ -431,6 +441,7 @@ final class SwitcherStore: ObservableObject {
         openRefreshTask?.cancel()
         panelShowTimer?.cancel()
         staleCacheHealTask?.cancel()
+        activationOutcomeProbeTask?.cancel()
         previewWarmupTask?.cancel()
         focusedRankUpgradeTask?.cancel()
         backgroundedFocusRankTask?.cancel()
@@ -612,6 +623,7 @@ final class SwitcherStore: ObservableObject {
 
         staleCacheHealTask?.cancel()
         staleCacheHealTask = nil
+        activationOutcomeGeneration &+= 1
         openDiagnosticID = UUID().uuidString
         sourceFocusBeforePanel = nil
         PerformanceDiagnostics.record("open_cache_decision", fields: [
@@ -1385,6 +1397,7 @@ final class SwitcherStore: ObservableObject {
         // One ID ties the request, the off-main activation/verification and
         // the completion rows of this selection together.
         let actionDiagnosticID = UUID().uuidString
+        activationOutcomeGeneration &+= 1
         let actionContext = "selection-\(actionName)"
         let activationSequenceAtStart = appActivationSequence
         let activationRequestID = item.pid != currentAppPID
@@ -1602,6 +1615,10 @@ final class SwitcherStore: ObservableObject {
             "backgrounded_rank_will_update": .bool(selectionStillOwnsFocus &&
                 (backgroundedFocusBeforeActivation.map { !$0.isApplicationFallback } ?? false))
         ])
+        if actionName == "activate", !item.isApplicationFallback {
+            scheduleActivationOutcomeProbe(item: item, result: result, ownsFocus: selectionStillOwnsFocus,
+                                           correlationID: actionDiagnosticID)
+        }
         if selectionStillOwnsFocus, currentAppPID != item.pid {
             if let currentAppPID, currentAppPID != switchBladePID {
                 previousAppPID = currentAppPID
@@ -1691,6 +1708,74 @@ final class SwitcherStore: ObservableObject {
         Logger.switcher.info(
             "Dispatch selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public) delay=\(dispatchDelayMs, format: .fixed(precision: 1), privacy: .public)ms"
         )
+    }
+
+    /// Diagnostic only, debug logging only: ~150 ms after a reported switch,
+    /// is the selected window on screen and which normal-level windows lie
+    /// above it. Bound to this selection; a newer open/selection or a user
+    /// departure discards it instead of measuring someone else's switch.
+    /// The lane is not held: the read runs after the action completed.
+    private func scheduleActivationOutcomeProbe(
+        item: WindowItem, result: WindowActivationResult, ownsFocus: Bool, correlationID: String
+    ) {
+        guard PerformanceDiagnostics.isEnabled else { return }
+        let generation = activationOutcomeGeneration
+        guard ownsFocus else {
+            recordActivationOutcomeDiscard("departed-before-completion", item: item, correlationID: correlationID)
+            return
+        }
+        let sequence = appActivationSequence
+        let reader = windowStackReader
+        let delay = activationOutcomeProbeDelayNanoseconds
+        let ownPID = switchBladePID
+        let completedAt = ProcessInfo.processInfo.systemUptime
+        activationOutcomeProbeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard let self else { return }
+            if let reason = self.activationOutcomeDiscardReason(generation: generation, sequence: sequence,
+                                                                targetPID: item.pid) {
+                return self.recordActivationOutcomeDiscard(reason, item: item, correlationID: correlationID)
+            }
+            let readStart = ProcessInfo.processInfo.systemUptime
+            let read = await Task.detached(priority: .utility) {
+                (reader.onScreenSurfacesFrontToBack(), reader.frontmostApplicationPID())
+            }.value
+            let readEnd = ProcessInfo.processInfo.systemUptime
+            if let reason = self.activationOutcomeDiscardReason(generation: generation, sequence: sequence,
+                                                                targetPID: item.pid) {
+                return self.recordActivationOutcomeDiscard(reason, item: item, correlationID: correlationID)
+            }
+            let measurement = ActivationOutcomeProbe.measure(
+                targetWindowID: item.id, targetPID: item.pid, targetOwnerPID: item.windowProcessIdentifier,
+                ownPID: ownPID, surfaces: read.0, frontmostPID: read.1
+            )
+            var fields = ActivationOutcomeProbe.fields(for: measurement, targetPID: item.pid)
+            fields["window_id"] = .int(Int(item.id))
+            fields["pid"] = .int(Int(item.pid))
+            fields["result"] = .string(result.rawValue)
+            fields["elapsed_ms"] = .double((readEnd - completedAt) * 1000)
+            fields["read_ms"] = .double((readEnd - readStart) * 1000)
+            PerformanceDiagnostics.$correlationID.withValue(correlationID) {
+                PerformanceDiagnostics.record("activation_outcome_probe", fields: fields)
+            }
+        }
+    }
+
+    private func activationOutcomeDiscardReason(generation: Int, sequence: Int, targetPID: pid_t) -> String? {
+        if activationOutcomeGeneration != generation { return "superseded" }
+        if isSwitching { return "switcher-open" }
+        if hasAppActivation(since: sequence, otherThan: targetPID) { return "user-departed" }
+        return nil
+    }
+
+    private func recordActivationOutcomeDiscard(_ reason: String, item: WindowItem, correlationID: String) {
+        PerformanceDiagnostics.$correlationID.withValue(correlationID) {
+            PerformanceDiagnostics.record("activation_outcome_probe_discarded", fields: [
+                "reason": .string(reason),
+                "window_id": .int(Int(item.id)),
+                "pid": .int(Int(item.pid))
+            ])
+        }
     }
 
     private func hasAppActivation(since sequence: Int, otherThan targetPID: pid_t) -> Bool {

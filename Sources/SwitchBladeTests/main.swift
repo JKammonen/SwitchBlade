@@ -33,6 +33,7 @@ func runAll() async -> Int {
         ("FocusTrackingDiagnostics",  FocusTrackingDiagnosticsTests.all),
         ("PartialActivation",        PartialActivationTests.all),
         ("ActivationVerification",   ActivationVerificationTests.all),
+        ("ActivationOutcomeProbe",   ActivationOutcomeProbeTests.all),
         ("WindowActionLane",         WindowActionLaneTests.all),
         ("MRUPersistence",          MRUPersistenceTests.all),
         ("PerformanceMetrics",      PerformanceMetricsTests.all),
