@@ -5,6 +5,7 @@ import Foundation
 /// Store-only regressions: no real panel, AX calls, or application activation.
 enum CachedSwitchOrderingTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("CachedSwitch/freshCacheDiscoversNewAndClosedWindows", freshCacheDiscoversNewAndClosedWindows),
         ("CachedSwitch/freshSingleWindowCacheUsesCurrentMRU", freshCacheUsesCurrentMRU),
         ("CachedSwitch/staleSingleWindowCacheUsesCurrentMRUBeforeRefresh", staleCacheUsesCurrentMRU),
         ("CachedSwitch/rebasedSingleWindowCacheUsesCurrentMRU", rebasedCacheUsesCurrentMRU),
@@ -28,6 +29,27 @@ enum CachedSwitchOrderingTests {
         ("CachedSwitch/sameAppSelectionPreservesPreviousApp", sameAppSelectionPreservesHistory),
         ("CachedSwitch/failedActivationPreservesHistoryAndMRU", failedActivationPreservesHistory)
     ]
+
+    @MainActor private static func freshCacheDiscoversNewAndClosedWindows() async throws {
+        let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+        defer { store.cancel() }
+        let original = (1...14).map { makeItem(id: UInt32($0), pid: pid_t($0 * 100), isFrontmostApp: $0 == 1) }
+        catalog.visibleItems = original
+        await store.warmPreviewCache(context: "membership-seed")
+        // No app activation: opening a sibling in the current app also changes membership.
+        let added = makeItem(id: 50, pid: 100)
+        let updated = Array(original.dropLast()) + [added]
+        catalog.visibleItems = updated
+        catalog.visibleSnapshotDelayNanoseconds = 20_000_000
+        catalog.minimizedSnapshotDelayNanoseconds = 100_000_000
+        store.requestCycle(forward: true)
+        try expectEqual(Set(store.items.map(\.id)), Set(original.map(\.id)), "cached first paint stays immediate")
+        for _ in 0..<100 {
+            if Set(store.items.map(\.id)) == Set(updated.map(\.id)) { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expectEqual(Set(store.items.map(\.id)), Set(updated.map(\.id)), "fresh cache age does not prove current membership")
+    }
 
     @MainActor private static func freshCacheUsesCurrentMRU() async throws {
         try await cachedOrderUsesCurrentMRU(maxAge: 30, rebase: false)

@@ -324,8 +324,8 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   dismisses the panel and reconciles app history, but does not remember the
   unverified selected window or pin its cached sibling order. The next open
   rebases a single-window cache or refreshes multi-window order. A frontmost
-  target with failed AX targeting requires an actual active-app check before
-  this partial result; cached frontmost flags alone are insufficient. A
+  target must be identified and targeted before app activation; a failed AX
+  target now fails the selection rather than activating an arbitrary sibling. A
   cross-app `applicationOnly` result records the coarse app hint that an
   external activation would (plus the delayed AX-focus upgrade), so the
   backgrounded window stays the next Cmd+Tab target. Genuine
@@ -333,38 +333,35 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   `PartialActivationTests` covers visible/prepared/resolving release, history,
   exact-window MRU preservation, backgrounded-window order, fresh sibling order
   and newer external focus.
-- **Is a "selected-target" switch really the chosen window?** → read
-  `activation_verification`. `selectedTarget` needs three separate facts:
-  confirmed app activation; unique match evidence (complete AX candidate scan,
-  every title/frame the rule depends on readable, and the matcher chose the
-  `unique-title`, `unique-title-frame` or `unique-untitled-frame` window); and
-  that matched AX element observed as the owner process's focused window
-  (`matched_element_focus`, 150 ms soft budget, 15 ms polling, no stability
-  floor, no corrective raise or retry). Anything else is `applicationOnly`
-  with `result_reason`; `legacy_result` shows the pre-verification rule.
-  Closest-frame, first-candidate and singleton matches are never unique.
-  `matched-element-focused` proves only that the *matched* element got focus,
-  not that the match was the selected row. Undetectable with this data model:
-  a sibling that took over the selected title (or exact frame when untitled).
-  `unknown` (unreadable focused window) is never a mismatch or a success. The
-  system-wide AX element is not used: its messaging timeout is process-wide.
-  `selection_action_dispatch.queue_ms`/`execution_ms` separate lane wait from
-  the action. A completion is stale when any app other than the target (or
-  SwitchBlade) activated after the action started, including a return to the
-  source app: it then neither calls `rememberSelection` nor rewrites app
-  history. PID equality alone missed that return. `activation_request`, all
-  off-main activation rows and `selection_action_dispatch`/`_failed` share one
-  `correlation_id` (context `selection-<action>` off-main). The double-modifier window
-  path inherits the stricter result. Raising has a lower bar than exact
-  confirmation: the chosen AX window must itself carry the row's title or a
-  frame within 12 pt. Closest-frame/first-candidate guesses are not
-  unminimized, raised or focused (`raise_withheld`, reason
-  `raise-withheld-*`); the app is still activated. Observed cause
-  (2026-10-21): one app's AXWindows listed a single window for three minutes
-  while WindowServer showed two current-Space rows, and the old matcher raised
-  the listed sibling for the other row. Whether that row was a real window
-  omitted by AX or a secondary surface is unresolved. Regressions:
-  `ActivationVerification/*`.
+- **Selected window opens a sibling (all apps)** → concrete actions use the
+  selected WindowServer ID within its owning process. `AXWindowIdentity` resolves
+  `_AXUIElementGetWindow` dynamically (undocumented macOS API); a missing symbol,
+  unreadable ID, absent target or duplicate match fails closed before app
+  activation. Title/frame matching is reserved for synthetic minimized rows,
+  and requires unique evidence over a complete readable AX list before raising.
+  Concrete matching reads IDs only, avoiding unrelated title/frame AX timeouts.
+  `selectedTarget` additionally requires confirmed app activation and focus of
+  the retained matched AX element. If activation restores a different sibling,
+  one corrective raise/main/focus is allowed only for the same retained exact-ID
+  target, while its app remains active and its ID can still be read. No rematch,
+  no app reactivation loop. Unconfirmed concrete focus returns failure and the
+  recovery panel; it must not silently promote the intended row in MRU.
+  `activation_verification` logs `match_evidence_basis=window-id`, focus and
+  `focus_restored_after_activation` without window titles. Action correlation
+  and stale-completion guards remain in force. Synthetic rows lack concrete ID
+  continuity; their unique title/frame match is a weaker documented limit.
+  Regressions: `ActivationVerification/*` includes 14 overlapping untitled
+  windows, contradicted titles, missing identity and activation focus reset.
+- **New window missing immediately after launch/open (all apps)** → cache age
+  is not proof of membership. Every cached open paints immediately, then
+  reconciles a scope snapshot started after that open, including additions and
+  removals. Cold opens also reject a pre-open in-flight warmup snapshot.
+  New opens/settings supersede old reconciliation; previews remain cached,
+  selection is retained by ID when present, and current-Space/privacy filters
+  still apply. A window not yet created/eligible at snapshot time can only be
+  discovered by a later notification/open. Regressions:
+  `CachedSwitch/freshCacheDiscoversNewAndClosedWindows` (14 rows),
+  `Store/requestCycle_doesNotReusePreOpenWarmupSnapshot`.
 - **Cmd+Tab does nothing, or release activates nothing** → look for
   `selection_action_refused`. The single window-action lane stays busy while
   detached AX work finishes, even after `hide()` dropped the caller task. The

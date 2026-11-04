@@ -9,13 +9,16 @@ import Foundation
 enum ActivationVerificationTests {
 
     static let all: [(String, @MainActor () async throws -> Void)] = [
+        ("ActivationVerification/exactIDDisambiguates14OverlappingWindows", exactIDDisambiguatesOverlaps),
+        ("ActivationVerification/activationResetRestoresOnlyRetainedExactWindow", activationResetRestoresExactWindow),
+        ("ActivationVerification/ambiguousOverlapDoesNotActivateFirstSibling", ambiguousOverlapDoesNotActivateFirstSibling),
+        ("ActivationVerification/contradictedTitleDoesNotRaiseOrActivate", contradictedTitleDoesNotRaiseOrActivate),
         ("ActivationVerification/uniqueMatchFocused_isSelectedTarget", uniqueMatchFocusedIsSelectedTarget),
         ("ActivationVerification/siblingFocused_isApplicationOnly", siblingFocusedIsApplicationOnly),
-        ("ActivationVerification/blindSpot_matchedSiblingFocusIsNotIdentityProof", matchedSiblingFocusIsNotIdentityProof),
-        ("ActivationVerification/blindSpot_titleTakeoverRemainsUndetected", titleTakeoverRemainsUndetected),
+        ("ActivationVerification/raise_contradictedSiblingIsRejectedBeforeFocus", matchedSiblingFocusIsNotIdentityProof),
+        ("ActivationVerification/synthetic_titleTakeoverRemainsUndetected", titleTakeoverRemainsUndetected),
         ("ActivationVerification/raise_closestFrameGuessIsNotRaised", closestFrameGuessIsNotRaised),
         ("ActivationVerification/raise_untitledGuessIsNotRaised", untitledGuessIsNotRaised),
-        ("ActivationVerification/raise_directEvidenceNeedsOwnTitleOrFrame", directEvidenceNeedsOwnTitleOrFrame),
         ("ActivationVerification/boundedCandidateScan_isWeakEvidence", boundedCandidateScanIsWeak),
         ("ActivationVerification/unreadableCandidateTitle_isWeakEvidence", unreadableCandidateTitleIsWeak),
         ("ActivationVerification/evidence_closestFrameAndFirstCandidateAreNeverUnique", closestFrameAndFirstCandidateAreNeverUnique),
@@ -119,6 +122,66 @@ enum ActivationVerificationTests {
 
     // MARK: - Activator classification
 
+    @MainActor static func exactIDDisambiguatesOverlaps() throws {
+        let candidates = (1...14).map { id in
+            WindowActivator.WindowMatchCandidate(title: nil, frame: frameA, isMain: id == 1,
+                                                isFocused: id == 1, windowID: UInt32(id))
+        }
+        let activator = activator(candidates: candidates, focusedIndex: 11)
+        let item = makeItem(id: 12, pid: 200, title: "Changed title", bounds: frameB).actionTarget
+        var result: WindowActivationResult?
+        let fields = verificationFields { result = activator.activateWithResult(item) }
+        try expectEqual(result, .selectedTarget)
+        try expectEqual(string(fields, "match_evidence_basis"), "window-id")
+        try expectNil(WindowActivator.bestMatchDecision(for: target(), candidates: [candidates[0]], requireWindowIdentity: true),
+                      "a sibling ID must not fall back to a frame or title")
+        try expectNil(WindowActivator.bestMatchDecision(for: target(), candidates: [candidate("A", frameA)], requireWindowIdentity: true),
+                      "unavailable native identity fails closed")
+    }
+
+    @MainActor static func activationResetRestoresExactWindow() throws {
+        for restored in [true, false] {
+            let calls = LockedValue(0)
+            let candidates = [WindowActivator.WindowMatchCandidate(title: nil, frame: frameA, isMain: false,
+                                                                  isFocused: false, windowID: 2)]
+            let activator = WindowActivator(
+                activateApplicationOverride: { _ in true }, isApplicationActiveOverride: { _ in false },
+                matchCandidatesOverride: { _ in (candidates, 1) },
+                focusSampleOverride: { _, _ in sample(matched: restored && calls.value == 1) },
+                restoreFocusOverride: { item, index in
+                    calls.withValue { $0 += 1 }
+                    return restored && index == 0 && item.id == 2
+                }, focusObservationBudgetSeconds: 0
+            )
+            let result = activator.activateWithResult(target())
+            try expectEqual(calls.value, 1, "one correction, never an action loop")
+            try expectEqual(result, restored ? .selectedTarget : .failed)
+        }
+    }
+
+    @MainActor static func ambiguousOverlapDoesNotActivateFirstSibling() throws {
+        for title in ["", "Shared"] {
+            let calls = LockedValue(0)
+            let candidates = (0..<14).map { _ in candidate(title.isEmpty ? nil : title, frameA) }
+            let activator = activator(candidates: candidates, focusedIndex: 0, activationCalls: calls)
+            var result: WindowActivationResult?
+            let fields = verificationFields { result = activator.activateWithResult(target(title: title)) }
+            try expectEqual(bool(fields, "raise_withheld"), true, "overlapping siblings have no unique identity")
+            try expectEqual(calls.value, 0, "app activation would expose an arbitrary sibling")
+            try expectEqual(result, .failed, "keep the selection recoverable instead of opening a sibling")
+        }
+    }
+
+    @MainActor static func contradictedTitleDoesNotRaiseOrActivate() throws {
+        let calls = LockedValue(0)
+        let activator = activator(candidates: [candidate("Other", frameA)], focusedIndex: 0, activationCalls: calls)
+        var result: WindowActivationResult?
+        let fields = verificationFields { result = activator.activateWithResult(target(title: "Selected")) }
+        try expectEqual(bool(fields, "raise_withheld"), true)
+        try expectEqual(calls.value, 0)
+        try expectEqual(result, .failed)
+    }
+
     @MainActor static func uniqueMatchFocusedIsSelectedTarget() throws {
         let activator = activator(candidates: [candidate("A", frameA), candidate("B", frameB)], focusedIndex: 0)
         var result: WindowActivationResult?
@@ -143,18 +206,12 @@ enum ActivationVerificationTests {
     /// focus. That proves only that B got focus; the contradicted title keeps
     /// the result app-level. The old rule called this an exact selection.
     @MainActor static func matchedSiblingFocusIsNotIdentityProof() throws {
-        let candidates = [candidate("X", CGRect(x: 2000, y: 0, width: 300, height: 200)),
-                          candidate("B", frameA)]
-        let activator = activator(candidates: candidates, focusedIndex: 1)
+        let activator = activator(candidates: [candidate("X", frameB), candidate("B", frameA)], focusedIndex: 1)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
-        try expectEqual(string(fields, "match_reason"), "frame-close")
-        try expectEqual(bool(fields, "raise_withheld"), false, "an exact frame is direct evidence for raising")
-        try expectEqual(string(fields, "matched_element_focus"), "matched-element-focused",
-                        "the matched element B really has focus")
-        try expectEqual(result, .applicationOnly, "B's focus is not evidence that A was identified")
-        try expectEqual(string(fields, "match_evidence_basis"), "title-not-found")
-        try expectEqual(string(fields, "legacy_result"), "selected-target")
+        try expectEqual(bool(fields, "raise_withheld"), true)
+        try expectEqual(string(fields, "matched_element_focus"), "not-observed")
+        try expectEqual(result, .failed, "contradicted identity must be rejected before any action")
     }
 
     /// Live shape from 2026-10-21: the selected row was absent from AXWindows,
@@ -173,9 +230,9 @@ enum ActivationVerificationTests {
             let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
             try expectEqual(string(fields, "match_reason"), "closest-frame-no-title")
             try expectEqual(bool(fields, "raise_withheld"), true, "a guess must not be raised")
-            try expectEqual(result, .applicationOnly, "the app still activates")
-            try expectEqual(string(fields, "result_reason"), "raise-withheld-title-not-found")
-            try expectEqual(string(fields, "legacy_result"), "selected-target", "old rule raised and confirmed it")
+            try expectEqual(result, .failed, "the app still activates")
+            try expectEqual(string(fields, "result_reason"), "application-activation-unconfirmed")
+            try expectEqual(string(fields, "legacy_result"), "failed", "unidentified targets no longer activate an app")
             try expectEqual(samples.value, 0, "nothing was raised, so there is no matched element to observe")
         }
     }
@@ -186,18 +243,7 @@ enum ActivationVerificationTests {
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target(title: "")) }
         try expectEqual(bool(fields, "raise_withheld"), true)
-        try expectEqual(result, .applicationOnly)
-    }
-
-    static func directEvidenceNeedsOwnTitleOrFrame() throws {
-        let item = target(title: "A")
-        try expect(WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate("A", frameB)))
-        try expect(WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate("Renamed", frameA)))
-        try expect(!WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate("B", frameB)))
-        try expect(!WindowActivator.chosenCandidateHasDirectEvidence(for: item, candidate: candidate(nil, nil)))
-        let untitled = target(title: "")
-        try expect(!WindowActivator.chosenCandidateHasDirectEvidence(for: untitled, candidate: candidate("", frameB)),
-                   "an empty title is not a title match")
+        try expectEqual(result, .failed)
     }
 
     /// Known limit: when sibling B takes over A's exact title, the match is
@@ -208,7 +254,7 @@ enum ActivationVerificationTests {
         let candidates = [candidate("Renamed A", frameA), candidate("A", frameB)]
         let activator = activator(candidates: candidates, focusedIndex: 1)
         var result: WindowActivationResult?
-        let fields = verificationFields { result = activator.activateWithResult(target(title: "A")) }
+        let fields = verificationFields { result = activator.activateWithResult(makeItem(id: SyntheticWindowID.make(pid: 200, index: 0, title: "A"), pid: 200, title: "A", bounds: frameA).actionTarget) }
         try expectEqual(string(fields, "match_evidence_basis"), "unique-title")
         try expectEqual(result, .selectedTarget, "documented blind spot: title takeover is not detectable")
     }
@@ -218,7 +264,7 @@ enum ActivationVerificationTests {
         let activator = activator(candidates: candidates, total: 40, focusedIndex: 0)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target()) }
-        try expectEqual(result, .applicationOnly, "a unique title in a prefix is not unique in the app")
+        try expectEqual(result, .failed, "a unique title in a prefix is not unique in the app")
         try expectEqual(string(fields, "match_evidence_basis"), "candidate-scan-bounded")
         try expectEqual(bool(fields, "candidate_scan_bounded"), true)
     }
@@ -227,7 +273,7 @@ enum ActivationVerificationTests {
         let activator = activator(candidates: [candidate("A", frameA), candidate(nil, frameB)], focusedIndex: 0)
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target()) }
-        try expectEqual(result, .applicationOnly, "an unreadable title could be another A")
+        try expectEqual(result, .failed, "an unreadable title could be another A")
         try expectEqual(string(fields, "match_evidence_basis"), "candidate-title-unavailable")
     }
 
@@ -300,7 +346,7 @@ enum ActivationVerificationTests {
         )
         var result: WindowActivationResult?
         let fields = verificationFields { result = activator.activateWithResult(target()) }
-        try expectEqual(result, .applicationOnly)
+        try expectEqual(result, .failed)
         try expectEqual(samples.value, 0, "there is no matched element to observe")
         try expectEqual(string(fields, "matched_element_focus"), "not-observed")
     }
@@ -308,12 +354,12 @@ enum ActivationVerificationTests {
     @MainActor static func closedTargetIsNotSubstituted() throws {
         // The selected window closed: AX lists no window at all for the app.
         let open = activator(candidates: [], focusedIndex: 0)
-        try expectEqual(open.activateWithResult(target()), .applicationOnly)
+        try expectEqual(open.activateWithResult(target()), .failed)
         let failed = activator(candidates: [], focusedIndex: 0, applicationActivated: false)
         try expectEqual(failed.activateWithResult(target()), .failed)
         // A different survivor is not the closed window, even if it gets focus.
         let survivor = activator(candidates: [candidate("B", frameB)], focusedIndex: 0)
-        try expectEqual(survivor.activateWithResult(target()), .applicationOnly)
+        try expectEqual(survivor.activateWithResult(target()), .failed)
     }
 
     static func focusBudgetExhausts() throws {

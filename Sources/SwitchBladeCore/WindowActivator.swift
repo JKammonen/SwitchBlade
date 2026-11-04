@@ -19,6 +19,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let frame: CGRect?
         let isMain: Bool
         let isFocused: Bool
+        var windowID: CGWindowID? = nil
     }
 
     struct WindowMatchDecision: Equatable {
@@ -37,12 +38,9 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let isRunning: Bool?
     }
 
-    /// How strongly the AX window chosen for activation is tied to the row the
-    /// user selected. Judged from the complete AX window list and readable
-    /// attributes, never from the decision reason name alone. Even `isUnique`
-    /// cannot prove WindowServer identity continuity: a sibling that took over
-    /// the selected window's title, or matches its frame without a title,
-    /// is indistinguishable from the selected window with this data model.
+    /// Concrete windows use WindowServer identity within the owning process.
+    /// Synthetic minimized rows have no concrete ID and require unique title /
+    /// frame evidence over a complete readable candidate list.
     struct WindowMatchEvidence: Equatable, Sendable {
         let isUnique: Bool
         let basis: String
@@ -124,6 +122,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     private let reopenApplicationOverride: ((pid_t) -> Bool)?
     private let isApplicationActiveOverride: ((pid_t) -> Bool)?
     private let matchCandidatesOverride: ((WindowActionTarget) -> (candidates: [WindowMatchCandidate], total: Int))?
+    private let restoreFocusOverride: ((WindowActionTarget, Int?) -> Bool)?
     private let focusSampleOverride: ((WindowActionTarget, Int?) -> MatchedElementFocusSample)?
     private let focusObservationBudgetSeconds: TimeInterval
     private let focusObservationIntervalSeconds: TimeInterval
@@ -139,6 +138,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         isApplicationActiveOverride: ((pid_t) -> Bool)? = nil,
         matchCandidatesOverride: ((WindowActionTarget) -> (candidates: [WindowMatchCandidate], total: Int))? = nil,
         focusSampleOverride: ((WindowActionTarget, Int?) -> MatchedElementFocusSample)? = nil,
+        restoreFocusOverride: ((WindowActionTarget, Int?) -> Bool)? = nil,
         focusObservationBudgetSeconds: TimeInterval = 0.15,
         focusObservationIntervalSeconds: TimeInterval = 0.015
     ) {
@@ -148,6 +148,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         self.isApplicationActiveOverride = isApplicationActiveOverride
         self.matchCandidatesOverride = matchCandidatesOverride
         self.focusSampleOverride = focusSampleOverride
+        self.restoreFocusOverride = restoreFocusOverride
         self.focusObservationBudgetSeconds = focusObservationBudgetSeconds
         self.focusObservationIntervalSeconds = focusObservationIntervalSeconds
     }
@@ -162,15 +163,26 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         // Select the target window first, then activate the app. AX raise/focus
         // alone does not make many apps frontmost, while app activation before
         // AX targeting can raise the app's previously-main sibling window.
+        let targetWasActive = isApplicationActive(pid: item.pid)
         let targeting = targetWindow(item)
         let targeted = ProcessInfo.processInfo.systemUptime
-        let activated = activateTargetApplicationIfNeeded(item)
+        // Never turn an unidentified concrete window into an app-level switch:
+        // activation can bring an arbitrary previously-main sibling forward.
+        let activated = targeting.targeted && !targeting.raiseWithheld
+            ? activateTargetApplicationIfNeeded(item) : false
         let applicationActivated = ProcessInfo.processInfo.systemUptime
-        // Observe only after the existing sequence: no corrective raise, retry
-        // or forced focus. Without a matched element there is nothing to compare.
-        let focus = activated && targeting.targeted
+        // App activation can restore its old main window after AX targeting.
+        // Observe the retained target, never pick another candidate on recovery.
+        var focus = activated && targeting.targeted
             ? observeMatchedElementFocus(item, targeting: targeting)
             : .notObserved
+        var restoredFocus = false
+        if !targetWasActive, targeting.evidence.basis == "window-id",
+           focus.outcome == .otherWindowFocused,
+           focus.lastSample?.targetApplicationActive == true {
+            restoredFocus = restoreMatchedWindowFocus(item, targeting: targeting)
+            if restoredFocus { focus = observeMatchedElementFocus(item, targeting: targeting) }
+        }
         let classification = Self.classifyActivation(
             applicationActivated: activated, targeted: targeting.targeted,
             evidence: targeting.evidence, focus: focus.outcome, raiseWithheld: targeting.raiseWithheld
@@ -182,6 +194,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             : .failed
         var fields: [String: PerformanceMetricValue] = [
             "window_id": .int(Int(item.id)),
+            "focus_restored_after_activation": .bool(restoredFocus),
             "pid": .int(Int(item.pid)),
             "window_pid": .int(Int(item.windowProcessIdentifier)),
             "snapshot_frontmost": .bool(item.isFrontmostApp),
@@ -233,7 +246,9 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         guard !raiseWithheld else { return (.applicationOnly, "raise-withheld-\(evidence.basis)") }
         guard targeted else { return (.applicationOnly, "ax-targeting-failed") }
         guard evidence.isUnique else { return (.applicationOnly, "match-evidence-\(evidence.basis)") }
-        guard focus == .focused else { return (.applicationOnly, "matched-element-\(focus.rawValue)") }
+        guard focus == .focused else {
+            return (evidence.basis == "window-id" ? .failed : .applicationOnly, "matched-element-\(focus.rawValue)")
+        }
         return (.selectedTarget, "verified-unique-match-focused")
     }
 
@@ -247,6 +262,11 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         candidateScanIsComplete: Bool
     ) -> WindowMatchEvidence {
         guard let chosenIndex, candidates.indices.contains(chosenIndex) else { return .weak("no-match") }
+        if !SyntheticWindowID.isSynthetic(item.id), candidates.contains(where: { $0.windowID != nil }) {
+            let matches = candidates.indices.filter { candidates[$0].windowID == item.id }
+            guard matches.count == 1, matches[0] == chosenIndex else { return .weak("window-id-not-unique") }
+            return .unique("window-id")
+        }
         guard candidateScanIsComplete else { return .weak("candidate-scan-bounded") }
         let evidenceIndex: Int
         let basis: String
@@ -285,20 +305,6 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         return .unique(basis)
     }
 
-    /// Raising needs the chosen window itself to carry the selected row's
-    /// title or frame. Closest-frame and first-candidate picks have neither,
-    /// so raising them would put an arbitrary sibling forward. This is a
-    /// weaker bar than `matchEvidence`: a stale title with an unchanged frame
-    /// still raises, but such a result is not confirmed as exact.
-    static func chosenCandidateHasDirectEvidence(
-        for item: WindowActionTarget,
-        candidate: WindowMatchCandidate
-    ) -> Bool {
-        if !item.title.isEmpty, candidate.title == item.title { return true }
-        if let frame = candidate.frame, framesAreClose(frame, item.bounds) { return true }
-        return false
-    }
-
     static func classifyFocusSample(_ sample: MatchedElementFocusSample) -> MatchedElementFocus {
         guard sample.targetApplicationActive else { return .targetApplicationInactive }
         guard let isMatched = sample.focusedWindowIsMatchedElement else { return .unknown }
@@ -330,6 +336,19 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             }
             wait(intervalSeconds)
         }
+    }
+
+    /// At most one correction, only after a background app activated and
+    /// reported a different focused sibling. Recheck identity and active app
+    /// immediately before acting; a closed target or departure cancels it.
+    private func restoreMatchedWindowFocus(_ item: WindowActionTarget, targeting: ActivationTargeting) -> Bool {
+        if let restoreFocusOverride { return restoreFocusOverride(item, targeting.matchedIndex) }
+        guard isApplicationActive(pid: item.pid), let window = targeting.element,
+              AXWindowIdentity.windowID(of: window) == item.id else { return false }
+        let raise = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        let main = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let focus = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        return Self.activationTargetingSucceeded(raiseResult: raise, mainResult: main, focusResult: focus)
     }
 
     private func observeMatchedElementFocus(
@@ -575,9 +594,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             for: item, candidates: match.candidates, chosenIndex: match.decision.index,
             candidateScanIsComplete: match.candidateCount == match.candidateTotal
         )
-        guard Self.chosenCandidateHasDirectEvidence(
-            for: item, candidate: match.candidates[match.decision.index]
-        ) else {
+        guard evidence.isUnique else {
             PerformanceDiagnostics.record(
                 "activation_ax_target",
                 fields: [
@@ -693,9 +710,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             ) else { return .unmatched(candidateTotal: injected.total) }
             let evidence = Self.matchEvidence(for: item, candidates: injected.candidates,
                                               chosenIndex: decision.index, candidateScanIsComplete: complete)
-            guard Self.chosenCandidateHasDirectEvidence(
-                for: item, candidate: injected.candidates[decision.index]
-            ) else {
+            guard evidence.isUnique else {
                 return .withheld(matchedIndex: decision.index, evidence: evidence, matchReason: decision.reason,
                                  candidateCount: injected.candidates.count, candidateTotal: injected.total)
             }
@@ -1046,16 +1061,18 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let candidateDeadline = ProcessInfo.processInfo.systemUptime
             + Self.maximumAXCandidateScanSeconds
         var candidates: [(element: AXUIElement, candidate: WindowMatchCandidate)] = []
+        let needsLegacyMetadata = SyntheticWindowID.isSynthetic(item.id)
         for window in windows.prefix(Self.maximumAXCandidateWindows) {
             guard ProcessInfo.processInfo.systemUptime < candidateDeadline else { break }
             applyAXMessagingTimeout(to: window)
             candidates.append((
                 element: window,
                 candidate: WindowMatchCandidate(
-                    title: axString(kAXTitleAttribute, on: window),
-                    frame: axFrame(on: window),
-                    isMain: axBool(kAXMainAttribute, on: window),
-                    isFocused: axBool(kAXFocusedAttribute, on: window)
+                    title: needsLegacyMetadata ? axString(kAXTitleAttribute, on: window) : nil,
+                    frame: needsLegacyMetadata ? axFrame(on: window) : nil,
+                    isMain: needsLegacyMetadata && axBool(kAXMainAttribute, on: window),
+                    isFocused: needsLegacyMetadata && axBool(kAXFocusedAttribute, on: window),
+                    windowID: AXWindowIdentity.windowID(of: window)
                 )
             ))
         }
@@ -1068,7 +1085,8 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             candidates: candidates.map(\.candidate),
             preferNonMainOnTies: preferNonMainOnTies,
             requireUniqueEvidence: requireUniqueEvidence,
-            candidateScanIsComplete: !candidateScanWasBounded
+            candidateScanIsComplete: !candidateScanWasBounded,
+            requireWindowIdentity: !SyntheticWindowID.isSynthetic(item.id)
         ) {
             let decisionMs = Date().timeIntervalSince(decisionStart) * 1000
             PerformanceDiagnostics.record(
@@ -1223,9 +1241,17 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         candidates: [WindowMatchCandidate],
         preferNonMainOnTies: Bool = false,
         requireUniqueEvidence: Bool = false,
-        candidateScanIsComplete: Bool = true
+        candidateScanIsComplete: Bool = true,
+        requireWindowIdentity: Bool = false
     ) -> WindowMatchDecision? {
         guard !candidates.isEmpty else { return nil }
+        if !SyntheticWindowID.isSynthetic(item.id),
+           requireWindowIdentity || candidates.contains(where: { $0.windowID != nil }) {
+            let matches = candidates.enumerated().filter { $0.element.windowID == item.id }
+            guard matches.count == 1, let match = matches.first else { return nil }
+            return decision((index: match.offset, candidate: match.element), reason: "window-id",
+                            item: item, titleMatchCount: 0, frameMatchCount: 0)
+        }
         // Uniqueness in a prefix is not proof of identity. Close/snap must not
         // act on a sibling when the actual target was beyond the scan budget.
         guard !requireUniqueEvidence || candidateScanIsComplete else { return nil }

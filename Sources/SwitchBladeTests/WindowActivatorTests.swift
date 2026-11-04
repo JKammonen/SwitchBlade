@@ -356,11 +356,10 @@ enum WindowActivatorTests {
                     isApplicationActiveOverride: { _ in false },
                     focusSampleOverride: { _, _ in matchedFocus }
                 )
-                let expected: WindowActivationResult = activationSucceeded
-                    ? (raised ? .selectedTarget : .applicationOnly) : .failed
+                let expected: WindowActivationResult = activationSucceeded && raised ? .selectedTarget : .failed
                 try expectEqual(activator.activateWithResult(windows[1].actionTarget), expected,
                                 "AX success alone cannot prove keyboard focus returned from the switcher")
-                try expectEqual(steps, ["window:2", "app:100"],
+                try expectEqual(steps, raised ? ["window:2", "app:100"] : ["window:2"],
                                 "restore app activation after targeting the exact sibling")
             }
         }
@@ -504,7 +503,7 @@ enum WindowActivatorTests {
     static func activationResultDistinguishesAppOnlyAndExactTarget() throws {
         let cases: [(Bool, Bool, WindowActivationResult)] = [
             (false, false, .failed), (true, false, .failed),
-            (false, true, .applicationOnly), (true, true, .selectedTarget)
+            (false, true, .failed), (true, true, .selectedTarget)
         ]
         for (raised, activated, expected) in cases {
             var steps: [String] = []
@@ -514,7 +513,7 @@ enum WindowActivatorTests {
                 focusSampleOverride: { _, _ in matchedFocus }
             )
             try expectEqual(activator.activateWithResult(makeItem(id: 2, pid: 200).actionTarget), expected)
-            try expectEqual(steps, ["window", "app"], "AX targeting must still precede app activation")
+            try expectEqual(steps, raised ? ["window", "app"] : ["window"], "app activation requires a targeted window")
         }
         // Accepted AX calls plus an active app, without observed focus of the
         // matched element, are app-level success only.
@@ -527,7 +526,7 @@ enum WindowActivatorTests {
         for active in [false, true] {
             var activationCalls = 0
             let activator = WindowActivator(
-                raiseWindowOverride: { _ in false },
+                raiseWindowOverride: { _ in true },
                 activateApplicationOverride: { _ in
                     activationCalls += 1
                     return false

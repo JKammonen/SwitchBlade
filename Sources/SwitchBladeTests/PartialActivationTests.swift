@@ -25,7 +25,7 @@ enum PartialActivationTests {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let activatedPIDs = LockedValue<[pid_t]>([])
         let activator = WindowActivator(
-            raiseWindowOverride: { _ in false },
+            raiseWindowOverride: { _ in true },
             activateApplicationOverride: { pid in
                 activatedPIDs.withValue { $0.append(pid) }
                 return true
@@ -104,7 +104,7 @@ enum PartialActivationTests {
     @MainActor private static func frontmostAppRequiresConfirmation() async throws {
         for confirmedActive in [false, true] {
             let activator = WindowActivator(
-                raiseWindowOverride: { _ in false },
+                raiseWindowOverride: { _ in true },
                 activateApplicationOverride: { _ in false },
                 isApplicationActiveOverride: { _ in confirmedActive }
             )
@@ -114,7 +114,7 @@ enum PartialActivationTests {
     }
 
     @MainActor private static func failedAppActivation() async throws {
-        let activator = WindowActivator(raiseWindowOverride: { _ in false },
+        let activator = WindowActivator(raiseWindowOverride: { _ in true },
                                         activateApplicationOverride: { _ in false })
         try await visibleOutcome(activator: activator, targetIsFrontmost: false, shouldDismiss: false)
     }
@@ -161,7 +161,7 @@ enum PartialActivationTests {
         let gate = DispatchSemaphore(value: 0)
         let completed = LockedValue(false)
         let activator = WindowActivator(
-            raiseWindowOverride: { _ in false },
+            raiseWindowOverride: { _ in true },
             activateApplicationOverride: { _ in
                 started.value = true
                 return gate.wait(timeout: .now() + 2) == .success
@@ -205,7 +205,7 @@ enum PartialActivationTests {
         let catalog = MockWindowCatalog()
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let activator = WindowActivator(
-            raiseWindowOverride: { _ in false },
+            raiseWindowOverride: { _ in true },
             activateApplicationOverride: { _ in true }
         )
         let store = SwitcherStore(

@@ -610,6 +610,8 @@ final class SwitcherStore: ObservableObject {
         activeOpenRequestedAt = pendingOpenRequestedAt
         enterResolving(commitWhenReady: false)
 
+        staleCacheHealTask?.cancel()
+        staleCacheHealTask = nil
         openDiagnosticID = UUID().uuidString
         sourceFocusBeforePanel = nil
         PerformanceDiagnostics.record("open_cache_decision", fields: [
@@ -677,12 +679,13 @@ final class SwitcherStore: ObservableObject {
                 snapshotMs: 0,
                 orderMs: 0,
                 source: cacheIsFresh ? "cached" : "stale-cached",
-                updateCachedItems: cacheIsFresh,
-                showingStaleCachedItems: !cacheIsFresh
+                updateCachedItems: false,
+                showingStaleCachedItems: true
             )
-            if !cacheIsFresh {
-                scheduleStaleCacheHealingIfNeeded()
-            }
+            // Age measures preview freshness, not membership. A window may
+            // appear or close without an app activation or an AX notification.
+            // Keep immediate first paint, then reconcile a fresh scope snapshot.
+            scheduleStaleCacheHealingIfNeeded()
             Task { @MainActor [weak self] in
                 await Task.yield()
                 self?.refreshPermissionState()
@@ -2009,17 +2012,11 @@ final class SwitcherStore: ObservableObject {
             self.pendingOpenRequestedAt = nil
 
             let snapshotStart = Date()
-            var visibleSnapshot = await self.snapshotVisibleOnlyOffMain(priority: .userInitiated)
-            // A warmup may have observed another sibling before this hotkey.
-            // Reuse its membership for single-window apps, but resolve fresh
-            // focus for a multi-window source before our panel can deactivate it.
-            if self.lastReturnedSnapshotStartedUptime < self.openRequestedUptime,
-               visibleSnapshot.filter({ $0.pid == self.currentAppPID }).count > 1 {
-                guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
-                visibleSnapshot = await self.snapshotVisibleOnlyOffMain(
-                    priority: .userInitiated, minimumStartUptime: self.openRequestedUptime
-                )
-            }
+            // A snapshot started before this hotkey may predate a newly
+            // opened window, even when the source app has only one old row.
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain(
+                priority: .userInitiated, minimumStartUptime: self.openRequestedUptime
+            )
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
 
             guard !Task.isCancelled, self.isSwitching, !self.isVisible else { return }
@@ -2059,22 +2056,28 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
+        let openID = openDiagnosticID
+        let generation = settingsGeneration
+        let minimumStart = openRequestedUptime
         staleCacheHealTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.staleCacheHealTask = nil }
+            defer {
+                if self.openDiagnosticID == openID { self.staleCacheHealTask = nil }
+            }
 
             let snapshotStart = Date()
-            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain(priority: .userInitiated)
+            let visibleSnapshot = await self.snapshotVisibleOnlyOffMain(
+                priority: .userInitiated, minimumStartUptime: minimumStart
+            )
             let snapshotMs = Date().timeIntervalSince(snapshotStart) * 1000
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.openDiagnosticID == openID,
+                  self.settingsGeneration == generation else { return }
 
             let orderStart = Date()
             self.rememberFrontmostWindowFocusIfNeeded(in: visibleSnapshot)
             let orderedItems = self.orderItems(self.mruTracker.orderedForDisplay(from: visibleSnapshot, context: "stale-heal", snapshotDiagnosticID: self.lastReturnedSnapshotDiagnosticID))
             let orderMs = Date().timeIntervalSince(orderStart) * 1000
-            guard !orderedItems.isEmpty else { return }
-
             let cacheItems = self.updateCachedOpenItems(orderedItems)
 
             if self.currentShowingStale {
