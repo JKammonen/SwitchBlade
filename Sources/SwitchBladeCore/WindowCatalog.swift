@@ -476,7 +476,7 @@ enum WindowSharingPolicy {
         titleDecision == .showTitle && matchedSharingState.map { $0 != 0 } == true
     }
 
-    private static func isMicrosoftTeams(appName: String, bundleIdentifier: String?) -> Bool {
+    static func isMicrosoftTeams(appName: String, bundleIdentifier: String?) -> Bool {
         let normalizedName = appName.lowercased()
         let normalizedBundle = (bundleIdentifier ?? "").lowercased()
         return normalizedName.contains("teams")

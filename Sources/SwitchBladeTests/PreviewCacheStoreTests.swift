@@ -9,7 +9,13 @@ enum PreviewCacheStoreTests {
         ("PreviewCache/expiredAmbiguityAllowsFreshUniqueCapture", expiredAmbiguityAllowsFreshUniqueCapture),
         ("PreviewCache/hydrated_returnsItem_whenNoPreviewMatch", hydrated_noMatch),
         ("PreviewCache/record_then_hydrated_returnsImage_byWindowID", roundTrip_byWindowID),
-        ("PreviewCache/record_keepsOnlyLiveItems_acrossCalls", keepOnlyLive),
+        ("PreviewCache/record_prunesAliasesButKeepsConcretePixels_acrossCalls", keepOnlyLive),
+        ("PreviewCache/concretePixelsSurviveFullscreenSpaceRoundTrip", concretePixelsSurviveFullscreenSpaceRoundTrip),
+        ("PreviewCache/retainedConcretePixelsRespectFreshPrivacyState", retainedConcretePixelsRespectFreshPrivacyState),
+        ("PreviewCache/minimizedNonShareableRowsGetNoRetainedPixels", minimizedNonShareableRowsGetNoRetainedPixels),
+        ("PreviewCache/transparentCaptureForDepartedRowClearsRetainedPixels", transparentCaptureForDepartedRowClearsRetainedPixels),
+        ("PreviewCache/liveRowsOutrankAbsentRowsForCapacity", liveRowsOutrankAbsentRowsForCapacity),
+        ("PreviewCache/concretePixelsBoundedByCapacity", concretePixelsBoundedByCapacity),
         ("PreviewCache/hydrated_fallsBackTo_signature_whenBoundsChange", signatureFallback),
         ("PreviewCache/applicationFallback_neverHydratesWindowPreview", applicationFallbackNeverHydratesWindowPreview),
         ("PreviewCache/minimizedExactSignatureSurvivesVisiblePrune", minimizedExactSignatureSurvivesVisiblePrune),
@@ -114,16 +120,128 @@ enum PreviewCacheStoreTests {
 
     @MainActor static func keepOnlyLive() throws {
         let store = PreviewCacheStore()
-        // Distinct signatures (pid + title) so the signature fallback doesn't
-        // hand A's preview to B after B is pruned.
         let a = makeItem(id: 1, pid: 100, title: "A")
         let b = makeItem(id: 2, pid: 200, title: "B")
         store.record([1: NSImage(), 2: NSImage()], liveItems: [a, b])
 
-        // Second pass — only `a` is live; both caches should drop `b`.
+        // Second pass: only `a` is live. b's title alias is pruned, so a
+        // recreated window with b's title gets nothing ...
         store.record([:], liveItems: [a])
         try expect(store.hydrated(a, liveItems: [a]).preview != nil)
-        try expectNil(store.hydrated(b, liveItems: [a]).preview)
+        let recreatedB = makeItem(id: 3, pid: 200, title: "B")
+        try expectNil(store.hydrated(recreatedB, liveItems: [a, recreatedB]).preview)
+        // ... but b itself (same ID and owner) was only absent, not closed.
+        try expect(store.hydrated(b, liveItems: [a, b]).preview != nil)
+    }
+
+    /// Live case 2026-11-05: a 12-minute fullscreen Firefox Space. The warmup
+    /// there saw one window, which pruned every other preview; the first open
+    /// back showed 4/17 previews and dark placeholders for the rest.
+    @MainActor static func concretePixelsSurviveFullscreenSpaceRoundTrip() throws {
+        let store = PreviewCacheStore()
+        let desktop = (1...17).map { makeItem(id: UInt32($0), pid: Int32(100 + $0), title: "W\($0)") }
+        var images: [CGWindowID: NSImage] = [:]
+        for item in desktop { images[item.windowID] = makeRasterPreview() }
+        store.record(images, liveItems: desktop)
+
+        store.prepareForSpaceChange()
+        let fullscreen = makeItem(id: 40, pid: 400, title: "Video")
+        store.record([40: makeRasterPreview()], liveItems: [fullscreen])
+        store.record([:], liveItems: [fullscreen])
+        store.prepareForSpaceChange()
+
+        let hydrated = desktop.map { store.hydrated($0, liveItems: desktop) }
+        try expectEqual(hydrated.filter { $0.preview != nil }.count, 17)
+        for item in hydrated { try expect(item.preview === images[item.windowID]) }
+    }
+
+    /// Retained pixels are gated by the fresh row, never by the old capture.
+    @MainActor static func retainedConcretePixelsRespectFreshPrivacyState() async throws {
+        let store = PreviewCacheStore()
+        let teams = makeItem(id: 1, pid: 101, appName: "Microsoft Teams", bundleIdentifier: "com.microsoft.teams2")
+        let mail = makeItem(id: 2, pid: 102, appName: "Outlook", title: "Inbox", bundleIdentifier: "com.microsoft.Outlook")
+        let plain = makeItem(id: 3, pid: 103)
+        let empty = makeRasterPreview(alpha: 0)
+        store.record([1: makeRasterPreview(), 2: makeRasterPreview(), 3: makeRasterPreview()],
+            liveItems: [teams, mail, plain])
+        // Outlook turned protected before leaving: its transparent capture
+        // clears its pixels.
+        let classifications = await PreviewCacheStore.classifyCapturedFrames([2: empty])
+        store.record([2: empty], liveItems: [teams, mail, plain], classifications: classifications)
+
+        store.record([:], liveItems: [makeItem(id: 40, pid: 400)])
+
+        let teamsNowPrivate = makeItem(id: 1, pid: 101, appName: "Microsoft Teams", canCapturePreview: false,
+            bundleIdentifier: "com.microsoft.teams2")
+        let redacted = makeItem(id: 3, pid: 103, isTitleRedacted: true)
+        let reusedByOtherOwner = makeItem(id: 3, pid: 999)
+        let back = [teamsNowPrivate, mail, plain]
+        try expectNil(store.hydrated(teamsNowPrivate, liveItems: back).preview, "now non-capturable")
+        try expectNil(store.hydrated(mail, liveItems: back).preview, "transparent capture cleared it")
+        try expectNil(store.hydrated(redacted, liveItems: [redacted]).preview, "redacted row")
+        try expectNil(store.hydrated(reusedByOtherOwner, liveItems: [reusedByOtherOwner]).preview, "other owner")
+        try expect(store.hydrated(plain, liveItems: back).preview != nil)
+    }
+
+    /// Review P2: Teams that stopped sharing (sharingState 0) and was then
+    /// minimized must not show pixels captured while it was shareable, through
+    /// any key, including after a Space change.
+    @MainActor static func minimizedNonShareableRowsGetNoRetainedPixels() throws {
+        let store = PreviewCacheStore()
+        let teams = makeItem(id: 5, pid: 50, appName: "Microsoft Teams", title: "Meeting",
+            bundleIdentifier: "com.microsoft.teams2")
+        let notes = makeItem(id: 6, pid: 60, appName: "Notes", title: "Note")
+        store.record([5: makeRasterPreview(), 6: makeRasterPreview()], liveItems: [teams, notes])
+        store.prepareForSpaceChange()
+
+        // Concrete minimized row as the catalog builds it: matched sharingState 0.
+        let minimizedTeams = makeItem(id: 5, pid: 50, appName: "Microsoft Teams", title: "Meeting",
+            isMinimized: true, canCapturePreview: false, bundleIdentifier: "com.microsoft.teams2")
+        try expectNil(store.hydrated(minimizedTeams, liveItems: [minimizedTeams]).preview)
+        // Synthetic Teams row (no matched state): no retained pixels either.
+        let syntheticTeams = makeItem(id: SyntheticWindowID.make(pid: 50, index: 0, title: "Meeting"), pid: 50,
+            appName: "Microsoft Teams", title: "Meeting", isMinimized: true, canCapturePreview: false,
+            bundleIdentifier: "com.microsoft.teams2")
+        try expectNil(store.hydrated(syntheticTeams, liveItems: [syntheticTeams]).preview)
+        // A shareable concrete minimized row keeps its retained pixels.
+        let minimizedNotes = makeItem(id: 6, pid: 60, appName: "Notes", title: "Note",
+            isMinimized: true, canCapturePreview: true)
+        try expect(store.hydrated(minimizedNotes, liveItems: [minimizedNotes]).preview != nil)
+    }
+
+    /// Review P3: a protected-content (transparent) capture that lands after
+    /// its row left `liveItems` must still clear the retained pixels.
+    @MainActor static func transparentCaptureForDepartedRowClearsRetainedPixels() async throws {
+        let store = PreviewCacheStore()
+        let mail = makeItem(id: 9, pid: 90, appName: "Outlook", title: "Inbox")
+        store.record([9: makeRasterPreview()], liveItems: [mail])
+        let empty = makeRasterPreview(alpha: 0)
+        let classifications = await PreviewCacheStore.classifyCapturedFrames([9: empty])
+        store.record([9: empty], liveItems: [makeItem(id: 1, pid: 10)], classifications: classifications)
+        try expectNil(store.hydrated(mail, liveItems: [mail]).preview)
+    }
+
+    /// Review P3: captures of absent windows must not evict live rows first.
+    @MainActor static func liveRowsOutrankAbsentRowsForCapacity() throws {
+        let store = PreviewCacheStore(capacity: 3)
+        let live = makeItem(id: 1, pid: 10, title: "Live")
+        store.record([1: makeRasterPreview()], liveItems: [live])
+        let transient = (2...4).map { makeItem(id: UInt32($0), pid: Int32(10 + $0), title: "T\($0)") }
+        for item in transient {
+            store.record([item.windowID: makeRasterPreview()], liveItems: [live, item])
+        }
+        try expect(store.hydrated(live, liveItems: [live]).preview != nil, "live row kept its slot")
+        try expectNil(store.hydrated(transient[0], liveItems: [transient[0]]).preview, "oldest absent row evicted")
+    }
+
+    @MainActor static func concretePixelsBoundedByCapacity() throws {
+        let store = PreviewCacheStore(capacity: 3)
+        let items = (1...5).map { makeItem(id: UInt32($0), pid: Int32(100 + $0), title: "W\($0)") }
+        for item in items {
+            store.record([item.windowID: makeRasterPreview()], liveItems: [item])
+        }
+        let survivors = items.filter { store.hydrated($0, liveItems: [$0]).preview != nil }.map(\.windowID)
+        try expectEqual(survivors, [3, 4, 5])
     }
 
     @MainActor static func signatureFallback() throws {
@@ -192,7 +310,7 @@ enum PreviewCacheStoreTests {
             appName: "Claude",
             title: "Chat",
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             bundleIdentifier: "com.anthropic.claude"
         )
         let result = store.hydrated(minimized, liveItems: [other, minimized])
@@ -217,7 +335,7 @@ enum PreviewCacheStoreTests {
             appName: visible.appName,
             title: visible.title,
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             bundleIdentifier: visible.bundleIdentifier
         )
 
@@ -250,7 +368,7 @@ enum PreviewCacheStoreTests {
             appName: visible.appName,
             title: "ChatGPT",
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             bundleIdentifier: visible.bundleIdentifier
         )
 
@@ -277,7 +395,7 @@ enum PreviewCacheStoreTests {
             appName: original.appName,
             title: "Relaunched",
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             bundleIdentifier: original.bundleIdentifier
         )
 
@@ -356,7 +474,7 @@ enum PreviewCacheStoreTests {
             appName: "Terminal",
             title: "shell",
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             isTitleRedacted: false,
             bundleIdentifier: "com.apple.Terminal"
         )
@@ -366,7 +484,7 @@ enum PreviewCacheStoreTests {
             appName: "Terminal",
             title: "shell",
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             isTitleRedacted: false,
             bundleIdentifier: "com.apple.Terminal"
         )
@@ -397,7 +515,7 @@ enum PreviewCacheStoreTests {
             appName: "Claude",
             title: "Chat",
             isMinimized: true,
-            canCapturePreview: false,
+            canCapturePreview: true,
             bundleIdentifier: "com.anthropic.claude"
         )
 

@@ -233,6 +233,23 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   current-scope snapshot. Settings changes still clear the full preview cache.
   `SpaceChange/retains14VerifiedPreviewsAndRespectsProtection` covers retained
   frames, removed/new rows, same-app aliases and newly protected windows.
+  Second cause (2026-11-05): a round trip through a fullscreen app's Space.
+  The hidden warmup there recorded a one-window snapshot, and `record` pruned
+  every concrete preview absent from it; the first open back showed 4/17.
+  Absence from a scope snapshot is not closure: concrete window-ID/owner pixels
+  are no longer pruned by liveness, only by LRU capacity (40), and hydrate only
+  for the same ID and owner in a fresh row through the usual privacy gates.
+  Live rows are refreshed in LRU order, so absent windows are evicted first.
+  A transparent capture clears retained pixels even when its row already left
+  the list. Minimized rows get retained pixels only when shareable: a concrete
+  minimized row with `canCapturePreview == false` means matched sharingState 0
+  (Teams that stopped sharing), and synthetic Teams rows get none.
+  Title/app aliases are still pruned. Regressions:
+  `SpaceChange/fullscreenRoundTripWithWarmupKeepsPreviews`,
+  `PreviewCache/concretePixels*`, `retainedConcretePixelsRespectFreshPrivacyState`,
+  `minimizedNonShareableRowsGetNoRetainedPixels`,
+  `transparentCaptureForDepartedRowClearsRetainedPixels`,
+  `liveRowsOutrankAbsentRowsForCapacity`.
 - **Cmd+Tab falls through to the macOS switcher, then SwitchBlade works again** →
   with performance logging on debug, read `performance.jsonl` around the gap
   before touching tap heuristics. Rows to look for: `hotkey_passthrough` (tap saw

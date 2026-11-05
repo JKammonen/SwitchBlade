@@ -1035,7 +1035,9 @@ enum SwitcherStoreTests {
             appName: visibleExcel.appName,
             title: visibleExcel.title,
             isMinimized: true,
-            canCapturePreview: false,
+            // Production shape: a concrete minimized row with a shareable
+            // matched window. `false` here would mean sharingState 0.
+            canCapturePreview: true,
             bundleIdentifier: visibleExcel.bundleIdentifier
         )]
         catalog.previewsToReturn = [:]

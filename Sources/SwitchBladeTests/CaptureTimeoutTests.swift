@@ -29,6 +29,7 @@ enum CaptureTimeoutTests {
         ("ActivationRefresh/skipsRefresh_whenSwitcherIdle", activation_skipsRefreshWhenIdle),
         ("CaptureInvalidation/storeForwardsLifecycleInvalidation", storeForwardsLifecycleInvalidation),
         ("SpaceChange/retains14VerifiedPreviewsAndRespectsProtection", retains14VerifiedPreviewsAndRespectsProtection),
+        ("SpaceChange/fullscreenRoundTripWithWarmupKeepsPreviews", fullscreenRoundTripWithWarmupKeepsPreviews),
         ("SpaceChange/nextOpenDropsPreviousSpace", spaceChangeNextOpenDropsPreviousSpace),
         ("SpaceChange/visiblePanelReplacesPreviousSpace", spaceChangeVisiblePanelReplacesPreviousSpace),
         ("SpaceChange/releaseDuringTransitionUsesFreshTarget", spaceChangeReleaseUsesFreshTarget),
@@ -599,6 +600,43 @@ enum CaptureTimeoutTests {
         try expectNil(store.items.first { $0.id == 20 }?.preview)
         try expect(!catalog.captureWindowIDCalls.dropFirst(priorCaptureCalls).flatMap { $0 }.contains(1),
             "Protected window must not be recaptured")
+        store.cancel()
+    }
+
+    /// Live case 2026-11-05: Space change into a fullscreen app, a hidden
+    /// warmup there (one window), Space change back. The first open showed
+    /// 4/17 previews. Every surviving capturable window must hydrate before
+    /// any new capture; a window that turned private must not.
+    @MainActor static func fullscreenRoundTripWithWarmupKeepsPreviews() async throws {
+        let settings = SwitchBladeSettings.shared
+        let oldMode = settings.previewMode
+        settings.previewMode = .livePreviews
+        defer { settings.previewMode = oldMode }
+        let (store, catalog, _, _) = makeStore(activationWarmupWindow: -1)
+        let desktop = (1...17).map { makeItem(id: UInt32($0), pid: Int32(100 + $0)) }
+        catalog.visibleItems = desktop
+        catalog.previewsToReturn = Dictionary(uniqueKeysWithValues: (1...17).map { (UInt32($0), makeRasterPreview()) })
+        await openSwitcher(store)
+        for _ in 0..<200 where store.items.filter({ $0.preview != nil }).count < 17 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try expectEqual(store.items.filter { $0.preview != nil }.count, 17)
+        store.cancel()
+
+        catalog.visibleItems = [makeItem(id: 40, pid: 400)]
+        catalog.previewsToReturn = [40: makeRasterPreview()]
+        await store.handleActiveSpaceChange()
+        await store.warmPreviewCache(context: "test-fullscreen-space")
+        try expect(catalog.captureWindowIDCalls.last == [40], "the warmup must have run in the fullscreen Space")
+
+        catalog.visibleItems = [makeItem(id: 1, pid: 101, canCapturePreview: false)] + Array(desktop.dropFirst())
+        catalog.previewsToReturn = [:]
+        await store.handleActiveSpaceChange()
+        await openSwitcher(store)
+        try expectEqual(store.items.count, 17)
+        try expectEqual(store.items.filter { $0.preview != nil }.count, 16,
+            "previews from before the fullscreen Space must hydrate on the first open back")
+        try expectNil(store.items.first { $0.id == 1 }?.preview)
         store.cancel()
     }
 

@@ -92,9 +92,11 @@ final class PreviewCacheStore {
         // title redaction above, and retained previews stay valid for them.
         guard !transparentWindowIDs.contains(item.windowID),
               !item.isTitleRedacted, !item.isApplicationFallback,
-              item.canCapturePreview || item.isMinimized else {
+              item.canCapturePreview || Self.minimizedRowMayShowRetainedPixels(item) else {
             return item.withPreview(nil)
         }
+        // Concrete pixels outlive snapshots that omit the window (other Space,
+        // fullscreen app, current-app scope); see `record`.
         if let cached = byID[item.windowID], cached.ownerPID == item.windowProcessIdentifier {
             return item.withPreview(cached.image)
         }
@@ -125,12 +127,26 @@ final class PreviewCacheStore {
         return item
     }
 
-    /// Records fresh previews and prunes anything not in `liveItems`. Returns
-    /// the accepted previews so callers don't immediately paint captures we
-    /// intentionally rejected.
+    /// A minimized row is never live-capturable. A concrete (WindowServer-ID)
+    /// minimized row reports `canCapturePreview == false` only when its
+    /// matched window has sharingState 0 (redacted Outlook is gated above),
+    /// i.e. Teams that stopped sharing: it must not show older pixels. A
+    /// synthetic row has no matched sharing state; Teams is the only listable
+    /// sharingState-0 app with a shown title, so synthetic Teams rows get none.
+    static func minimizedRowMayShowRetainedPixels(_ item: WindowItem) -> Bool {
+        guard item.isMinimized, SyntheticWindowID.isSynthetic(item.windowID) else { return false }
+        return !WindowSharingPolicy.isMicrosoftTeams(appName: item.appName, bundleIdentifier: item.bundleIdentifier)
+    }
+
+    /// Records fresh previews and prunes the cross-ID aliases of anything not
+    /// in `liveItems`. Returns the accepted previews so callers don't
+    /// immediately paint captures we intentionally rejected.
     ///
-    /// The prune step is what keeps the cache from growing past `capacity`
-    /// even when an app spawns many short-lived windows.
+    /// Concrete window-ID pixels are not pruned by absence: a snapshot covers
+    /// only the current Space (or app), so a window missing from it is not
+    /// proof that it closed. They are bounded by the LRU `capacity` and are
+    /// hydrated only for the same ID and owner in a fresh snapshot, through the
+    /// same privacy gates.
     /// `classifications`, when supplied, contains frame-quality results already
     /// decoded off the main thread. Production passes it so pixel inspection
     /// doesn't run on @MainActor during first paint; callers that omit it (tests)
@@ -157,8 +173,17 @@ final class PreviewCacheStore {
         let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: liveItems, appIdentity: appIdentity(for:))
         var accepted: [CGWindowID: NSImage] = [:]
         for (windowID, image) in previews {
-            guard let item = itemsByID[windowID] else { continue }
             let quality = classifications?.quality(for: windowID) ?? Self.frameQuality(image)
+            guard let item = itemsByID[windowID] else {
+                // The row left `liveItems` while its capture was in flight. Its
+                // concrete pixels are retained, so a protected-content signal
+                // must still clear them.
+                if quality == .fullyTransparent {
+                    byID[windowID] = nil
+                    transparentWindowIDs.insert(windowID)
+                }
+                continue
+            }
             if quality == .fullyTransparent {
                 // Outlook can return transparent pixels while showing protected
                 // mail. Do not retain or resurrect the previous window content.
@@ -252,7 +277,13 @@ final class PreviewCacheStore {
 
     private func keepOnlyLive(_ items: [WindowItem]) {
         let liveWindowIDs = Set(items.map(\.windowID))
-        byID.keepOnly(liveWindowIDs)
+        // byID is deliberately not pruned here (see `record`): a round trip
+        // through a fullscreen app's Space used to drop every other window's
+        // preview, leaving placeholders on the first open back. Live entries
+        // are refreshed in LRU order so absent ones are evicted first.
+        for windowID in byID.keysInOrder where liveWindowIDs.contains(windowID) {
+            if let cached = byID[windowID] { byID[windowID] = cached }
+        }
         bySignature.keepOnly(Set(items.map(signature(for:))))
         let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: items, appIdentity: appIdentity(for:))
         byAppProcessIdentity.keepOnly(Set(
