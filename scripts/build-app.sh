@@ -7,7 +7,7 @@ fi
 set -euo pipefail
 umask 077
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 app_name="SwitchBlade"
 bundle_id="${BUNDLE_ID:-com.jannekammonen.SwitchBlade}"
 version="${APP_VERSION:-0.1.0}"
@@ -29,6 +29,7 @@ source_paths=(
     scripts/atomic-replace.c
     scripts/generate-icon.swift
     scripts/verify_minimized_runtime_proof.py
+    scripts/relaunch-lifecycle.sh
 )
 if ! git -C "$repo_root" diff --quiet -- "${source_paths[@]}"; then
     source_state="working-copy"
@@ -312,27 +313,14 @@ if [[ "${SWITCHBLADE_FAIL_BEFORE_PUBLISH:-0}" == "1" ]]; then
     echo "ERROR: injected failure before atomic app publication." >&2
     exit 1
 fi
-running_pid="$(pgrep -f "^$final_app_bundle/Contents/MacOS/$app_name" | head -n 1 || true)"
-"$atomic_replace_binary" "$staging_app_bundle" "$final_app_bundle"
-rm -rf "$staging_app_bundle"
+source "$repo_root/scripts/relaunch-lifecycle.sh"
+ready_marker="$HOME/Library/Application Support/SwitchBlade/ready"
+# An instance stopped for publication is restarted even if this script is
+# interrupted or fails before restarting it.
+trap 'cleanup_staging_bundle; switchblade_restore_if_stopped' EXIT
+switchblade_publish "$staging_app_bundle" "$final_app_bundle" "$app_name" "$ready_marker" "$atomic_replace_binary" \
+    || exit 1
 trap - EXIT HUP INT TERM
 
 echo "Built $final_app_bundle"
 
-# The running instance relaunches itself when idle; this script never kills
-# or launches it. Report only, so a commit gate shows what happened.
-if [[ -n "$running_pid" && "${SWITCHBLADE_SKIP_RELAUNCH_REPORT:-0}" != "1" ]]; then
-    new_pid=""
-    for _ in {1..150}; do
-        if ! kill -0 "$running_pid" 2>/dev/null; then
-            new_pid="$(pgrep -f "^$final_app_bundle/Contents/MacOS/$app_name" | head -n 1 || true)"
-            [[ -n "$new_pid" ]] && break
-        fi
-        sleep 0.1
-    done
-    if [[ -n "$new_pid" ]]; then
-        echo "Running instance relaunched: pid $running_pid -> $new_pid"
-    else
-        echo "NOTE: running instance pid $running_pid has not relaunched yet (it waits until idle); see ~/Library/Application Support/SwitchBlade/relaunch.log"
-    fi
-fi

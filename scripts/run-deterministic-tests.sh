@@ -7,3 +7,4 @@ cd "$repo_root"
 
 swift run --disable-sandbox SwitchBladeTests
 python3 scripts/test_minimized_runtime_proof.py
+zsh scripts/test-relaunch-lifecycle.sh

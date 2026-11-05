@@ -6,6 +6,7 @@ import os.log
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
+    private var restartAction: (() -> Void)?
     private var settingsWindowController: NSWindowController?
     private var settingsHostingController: NSHostingController<SettingsView>?
     private var cancellables: Set<AnyCancellable> = []
@@ -93,9 +94,22 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
         refreshSettingsRootView()
     }
 
+    /// The published bundle replaced this running instance outside
+    /// `build-app.sh`; AX can fail for apps started from now on. Keep the
+    /// status item visible with a restart action until the restart.
+    func showRestartRequired(restart: @escaping () -> Void) {
+        restartAction = restart
+        applyMenuBarVisibility(SwitchBladeSettings.shared.showMenuBarIcon)
+        rebuildStatusMenu()
+    }
+
+    @objc private func restartRequested() {
+        restartAction?()
+    }
+
     private func applyMenuBarVisibility(_ isVisible: Bool) {
         let shouldShow = Self.shouldShowStatusItem(
-            userPreference: isVisible,
+            userPreference: isVisible || restartAction != nil,
             secureInputActive: secureInputState.isActive,
             hasRelevantMissingPermissions: !permissionState
                 .missingPermissions(for: permissionPreviewMode)
@@ -170,6 +184,14 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
+
+        if restartAction != nil {
+            let restart = NSMenuItem(title: L10n.tr(.menuRestartAfterUpdate), action: #selector(restartRequested),
+                                     keyEquivalent: "")
+            restart.target = self
+            menu.addItem(restart)
+            menu.addItem(.separator())
+        }
 
         let missingPermissions = permissionState.missingPermissions(for: permissionPreviewMode)
         if !missingPermissions.isEmpty {

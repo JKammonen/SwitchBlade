@@ -14,10 +14,10 @@ fails to expand). Prefix builds and test runs with
 
 For user-tested behavior changes, `swift build` is not enough. Rebuild/sign with
 `bash scripts/build-app.sh`; `.build/debug/SwitchBlade` does not update the app
-bundle the user is running. A running instance whose `dist/SwitchBlade.app` was
-replaced relaunches itself when idle (the script only reports
-`Running instance relaunched: pid A -> B`). Launch manually only when no instance
-runs, or once when the running instance predates the relaunch coordinator.
+bundle the user is running. When an instance runs from `dist/`, the script
+stops it, publishes, relaunches it and fails unless the new build reports ready
+(`Relaunched SwitchBlade on the new build (pid N, ready)`). Launch manually only
+when no instance was running.
 
 Streaming logs (use the full path: `log` is a zsh builtin, so a bare `log show`
 or `log stream` fails with "too many arguments" or returns nothing):
@@ -388,44 +388,50 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   instance, an app launched afterwards answered every AX call from it with
   -25211 while a shell read it normally; apps contacted before the swap kept
   working; a relaunch fixed the same target process (Teams in a meeting: 14
-  failed selections). The macOS permission mechanism behind it is inferred.
-  `RelaunchCoordinator` keeps one instance on the published bundle:
-  - `instance.lock` (`~/Library/Application Support/SwitchBlade/`, `flock`,
-    close-on-exec) is taken first in `applicationDidFinishLaunching`, before
-    any monitor, tap or hotkey; `open -n` or a direct exec exits
-    (`singleton_rejected`). A relaunched instance waits up to 5 s for it.
-  - `LaunchIdentity.capture()` runs first in `main`: the executable identity
-    comes from the kernel (mapped image), so a publication racing process
-    start is still seen. The designated requirement is read there too; if the
-    bundle was already replaced, the published bundle's own requirement is
-    accepted only for the same bundle identifier (`relaunch_requirement_fallback`).
-  - Any change of the executable or Info.plist (device/inode/size/mtime) is a
-    replacement, even with an identical CDHash. Relaunch waits until idle
-    (`isIdleForRelaunch`: no switcher, no resolving open or previous-app
-    switch, free window-action lane; `relaunch_deferred`).
-  - Only the running instance acts. It takes `relaunch.lock`, verifies the
-    bundle against its requirement, writes the one-shot rank handoff and
-    spawns `/bin/sh` (new session, only fd 3 = `relaunch.lock` inherited).
-    The helper waits for the old PID, re-verifies with `codesign -R`, opens
-    the bundle with `--switchblade-relaunch-request <uuid>` and waits for the
-    acknowledgement the new instance writes after setup and handoff import.
-    One retry; if another instance runs it logs `superseded`; otherwise
-    `failed` and no instance runs (a build that cannot start). Helper log:
-    `relaunch.log` in the same directory.
-  - Rank handoff (`relaunch-handoff.json`, 0600, < 60 s, same boot session,
-    consumed once): window ID, app PID and start time, window-owner PID and
-    start time; no titles or previews. Only live windows with the same owner
-    and unchanged processes regain rank; minimized windows are not in the
-    visible snapshot and fall back to bundle order. A handoff consumed by an
-    attempt that crashed before acknowledging is `missing` for the retry.
-  - Acceptance (signed app, 2026-11-05): republish with identical bytes, a
-    publication racing the new process (5 + 3 rounds, mapped inode = disk
-    inode, one instance), `open -n` steady and racing a relaunch, two
-    simultaneous direct launches, crash before acknowledgement once (retry ok)
-    and twice (logged failure), corrupt handoff, and an app launched after
-    publication reading AX normally. Fault files for such runs:
-    `fault-crash-before-relaunch-ack` and `fault-corrupt-relaunch-handoff`
-    (count inside, consumed). Regressions: `Relaunch/*`.
+  failed selections). The macOS mechanism behind it is inferred.
+  Design (after an app-driven relaunch protocol failed two independent
+  reviews): **`build-app.sh` owns publication and the instance lifecycle**
+  (`scripts/relaunch-lifecycle.sh`, `switchblade_publish`). Under the signing
+  lock it finds a running instance by exact argv path (given and physical
+  spelling) and by the ready marker
+  (`~/Library/Application Support/SwitchBlade/ready`: pid, mapped executable
+  inode, time) whose live process maps the published file, so relative argv,
+  symlinks or letter case cannot hide it. It SIGTERMs it, waits (SIGKILL after
+  10 s; if it survives, the bundle is not replaced), swaps the bundle, `open`s
+  it (one retry with `open -n`) and accepts success only from a fresh marker
+  naming a live process that maps the new file; otherwise the build fails.
+  Once an instance was stopped, a failed swap restarts the previous build and
+  an interrupted or failing script restarts the published one (EXIT trap). It
+  never starts SwitchBlade when none was running (`SWITCHBLADE_NO_RELAUNCH=1`
+  stops without restarting and says so). The app side (`InstanceLifecycle`):
+  - `instance.lock` (`flock`, close-on-exec) first in launch, before any
+    monitor, tap or hotkey; `open -n`/direct exec exits (`singleton_rejected`).
+    It also takes a fallback lock in `NSTemporaryDirectory`, so an instance
+    that could open only the fallback still excludes a later one. If neither
+    opens it runs unlocked and records `singleton_lock_unavailable`. The
+    SIGTERM handler is installed right after the lock.
+  - SIGTERM quits gracefully once idle (no switcher, no window action), at
+    most 3 s; `applicationWillTerminate` writes the rank handoff
+    (`relaunch-handoff.json`: window ID, owner PID and start time, app identity;
+    no titles). Every MRU rank is handed over in order: concrete windows with
+    owners from WindowServer's full list (minimized and other-Space windows
+    keep rank), synthetic minimized rows with the owner the switcher knows
+    (restored only if that process kept its start time), app-level ranks as
+    app identity. The next launch consumes it once (< 120 s, same boot).
+  - Previews are never persisted, so every launch (also each relaunch by the
+    script) warms previews for every capturable window in scope, not the
+    routine four: the first open after a relaunch showed 4/12 cached before.
+  - The ready marker uses the kernel's mapped-image inode
+    (`LaunchIdentity.capture()` first in `main`).
+  - A replacement outside the script cannot be prevented: it is detected
+    (`bundle_replaced_while_running`) and the status item shows a restart
+    action until restarted. Running from `swift run` skips all of this.
+  Regressions: `Relaunch/*`; `scripts/test-relaunch-lifecycle.sh` (in
+  check-repo and run-deterministic-tests) drives the real publish sequence with
+  a compiled fake app (not a `.app`, fake `open`): relative-argv identity, stop
+  before swap, no start without an instance, unready build fails, failed swap
+  restarts the previous build, SIGTERM-ignoring instance, corrupt marker,
+  interrupted publication.
 - **Switch reported success but the window did not appear** → read
   `activation_outcome_probe` (debug logging only, diagnostic only: no behavior
   change). About 150 ms after a completed `activate` selection, off the action

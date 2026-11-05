@@ -69,6 +69,7 @@ else
 fi
 
 zsh scripts/test-signing-safety.sh
+zsh scripts/test-relaunch-lifecycle.sh
 bash scripts/run-deterministic-tests.sh
 bash scripts/build-app.sh
 

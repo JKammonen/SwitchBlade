@@ -1,48 +1,52 @@
 import AppKit
 import Darwin
 import Foundation
-import Security
 @testable import SwitchBladeCore
 
-/// One instance running the published bundle. Locks, replacement detection,
-/// idle gating, the one-shot rank handoff and descriptor inheritance run for
-/// real against temporary files; launching the app itself is covered by the
-/// signed-app acceptance runs, not here.
+/// Lifecycle of the single running instance. `build-app.sh` stops, publishes
+/// and relaunches (its shell side is covered by scripts/test-relaunch-lifecycle.sh);
+/// these tests cover the app side: lock, graceful quit gate, rank handoff,
+/// ready marker and replacement warning, against temporary files.
 enum RelaunchTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("Relaunch/instanceLockIsExclusiveAndCloseOnExec", instanceLockIsExclusive),
         ("Relaunch/concurrentAcquisitionsYieldExactlyOneOwner", concurrentAcquisitions),
-        ("Relaunch/bundleStampDetectsReplacementIncludingSameBytes", bundleStampDetectsReplacement),
-        ("Relaunch/handoffValidationRejectsStaleForeignAndCorrupt", handoffValidation),
-        ("Relaunch/handoffRestoresOnlyIdenticalProcessesAndOwners", handoffRestoresOnlyIdentical),
-        ("Relaunch/handoffCarriesNoTitles", handoffCarriesNoTitles),
-        ("Relaunch/requestIDMustBeUUID", requestIDMustBeUUID),
-        ("Relaunch/helperInheritsRelaunchLockButNotInstanceLock", helperInheritance),
-        ("Relaunch/completeConsumesHandoffOnceAndAcknowledges", completeConsumesHandoffOnce),
+        ("Relaunch/unopenableLockIsNotAnotherInstance", unopenableLockIsNotAnotherInstance),
+        ("Relaunch/spawnedShellInheritsNoLock", spawnedShellInheritsNoLock),
+        ("Relaunch/quitWaitsForIdleAtMostThreeSeconds", quitWaitsForIdle),
         ("Relaunch/store_idleGateWaitsForDetachedWindowAction", storeIdleGate),
-        ("Relaunch/store_handoffRestores14WindowOrder", storeHandoffRestoresOrder),
-        ("Relaunch/faultFilesAreCountedAndAbsentByDefault", faultFilesAreCounted),
-        ("Relaunch/signatureCheckRejectsOtherOrBrokenBundles", signatureCheck),
-        ("Relaunch/mappedExecutableIdentityMatchesUnreplacedFile", mappedExecutableIdentity)
+        ("Relaunch/handoffKeepsMinimizedAndOtherSpaceRanksWithoutTitles", handoffKeepsAllRanks),
+        ("Relaunch/takeHandoffRestoresOnlyUnchangedOwnersOnce", takeHandoffRestoresOnlyUnchanged),
+        ("Relaunch/takeHandoffRejectsStaleForeignAndCorrupt", takeHandoffRejects),
+        ("Relaunch/store_exportsAndRestores14RanksInOrder", storeRanksRoundTrip),
+        ("Relaunch/readyMarkerNamesThisProcessAndMappedInode", readyMarker),
+        ("Relaunch/replacementOutsideBuildScriptWarnsOnce", replacementWarnsOnce),
+        ("Relaunch/mappedExecutableIdentityMatchesUnreplacedFile", mappedExecutableIdentity),
+        ("Relaunch/launchWarmupCapturesEveryPreviewInScope", launchWarmupCapturesAll)
     ]
 
-    private static func temporaryPaths() -> RelaunchPaths {
+    private static func temporaryPaths() -> LifecyclePaths {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("switchblade-relaunch-tests-\(UUID().uuidString)", isDirectory: true)
-        let paths = RelaunchPaths(directory: directory)
+            .appendingPathComponent("switchblade-lifecycle-tests-\(UUID().uuidString)", isDirectory: true)
+        var paths = LifecyclePaths(directory: directory)
+        paths.fallbackDirectory = directory.appendingPathComponent("fallback", isDirectory: true)
         paths.ensureDirectory()
+        try? FileManager.default.createDirectory(at: paths.fallbackDirectory, withIntermediateDirectories: true)
         return paths
     }
+
+    private static let start = ProcessIdentity.StartTime(seconds: 1_000, microseconds: 7)
 
     static func instanceLockIsExclusive() throws {
         let paths = temporaryPaths()
         var first = FileLock.acquire(at: paths.instanceLock)
         try expectNotNil(first)
-        try expectNil(FileLock.acquire(at: paths.instanceLock), "a second open description must not get the lock")
-        let flags = fcntl(first!.descriptor, F_GETFD)
-        try expect(flags & FD_CLOEXEC != 0, "the instance lock must not leak into spawned children")
+        guard case .held = FileLock.attempt(at: paths.instanceLock) else {
+            return try expect(false, "a second open description must see the lock as held")
+        }
+        try expect(fcntl(first!.descriptor, F_GETFD) & FD_CLOEXEC != 0, "never inherited by a spawned child")
         first = nil
-        try expectNotNil(FileLock.acquire(at: paths.instanceLock), "the lock is released with its descriptor")
+        try expectNotNil(FileLock.acquire(at: paths.instanceLock), "released with its descriptor")
     }
 
     /// Two simultaneous starts: exactly one wins; neither both nor none.
@@ -64,151 +68,51 @@ enum RelaunchTests {
         }
     }
 
-    static func bundleStampDetectsReplacement() throws {
+    /// An unopenable lock file says nothing about other instances: the
+    /// fallback lock decides, and only a held lock means "another runs".
+    @MainActor static func unopenableLockIsNotAnotherInstance() throws {
+        var paths = temporaryPaths()
+        let blocker = paths.directory.appendingPathComponent("not-a-directory")
+        try Data("x".utf8).write(to: blocker)
+        let fallback = paths.fallbackDirectory
+        paths = LifecyclePaths(directory: blocker)
+        paths.fallbackDirectory = fallback
+        guard case .unavailable = FileLock.attempt(at: paths.instanceLock) else {
+            return try expect(false, "a lock under a file cannot be opened")
+        }
+        guard case .acquired(let locks) = InstanceLifecycle.acquireInstanceLock(paths: paths) else {
+            return try expect(false, "the fallback lock must be used")
+        }
+        try expectEqual(locks.count, 1)
+        guard case .anotherInstanceRuns = InstanceLifecycle.acquireInstanceLock(paths: paths) else {
+            return try expect(false, "a second instance must see the fallback lock held")
+        }
+        // A later instance that CAN open the primary lock is still excluded.
+        var healthy = LifecyclePaths(directory: temporaryPaths().directory)
+        healthy.fallbackDirectory = fallback
+        guard case .anotherInstanceRuns = InstanceLifecycle.acquireInstanceLock(paths: healthy) else {
+            return try expect(false, "an instance on the fallback lock must exclude one on the primary")
+        }
+        withExtendedLifetime(locks) {}
+    }
+
+    @MainActor static func spawnedShellInheritsNoLock() throws {
         let paths = temporaryPaths()
-        let bundle = paths.directory.appendingPathComponent("Fake.app")
-        let executable = bundle.appendingPathComponent("Contents/MacOS/Fake")
-        func publish(_ text: String) throws {
-            let staging = paths.directory.appendingPathComponent("staging-\(UUID().uuidString).app")
-            try FileManager.default.createDirectory(at: staging.appendingPathComponent("Contents/MacOS"),
-                                                    withIntermediateDirectories: true)
-            try Data(text.utf8).write(to: staging.appendingPathComponent("Contents/MacOS/Fake"))
-            try Data("plist".utf8).write(to: staging.appendingPathComponent("Contents/Info.plist"))
-            if FileManager.default.fileExists(atPath: bundle.path) {
-                _ = try FileManager.default.replaceItemAt(bundle, withItemAt: staging)
-            } else {
-                try FileManager.default.moveItem(at: staging, to: bundle)
-            }
+        var lock = FileLock.acquire(at: paths.instanceLock)
+        try expectNotNil(lock)
+        guard let pid = InstanceLifecycle.spawnDetachedShell(script: "/bin/sleep 1", arguments: []) else {
+            return try expect(false, "spawn failed")
         }
-        try publish("build-1")
-        let launch = BundleStamp.of(bundleURL: bundle, executableURL: executable)
-        try expectEqual(launch.change(to: BundleStamp.of(bundleURL: bundle, executableURL: executable)), .unchanged)
-        try publish("build-1")
-        try expectEqual(launch.change(to: BundleStamp.of(bundleURL: bundle, executableURL: executable)), .replaced,
-                        "a republish of identical bytes still replaces the files")
-        try FileManager.default.removeItem(at: bundle)
-        try expectEqual(launch.change(to: BundleStamp.of(bundleURL: bundle, executableURL: executable)), .unavailable,
-                        "a missing bundle is not yet actionable")
-    }
-
-    private static let start = ProcessIdentity.StartTime(seconds: 1_000, microseconds: 7)
-
-    private static func handoff(requestID: String = "A", boot: String = "boot-1", createdAt: Date = Date(),
-                                version: Int = RelaunchHandoff.currentVersion) -> RelaunchHandoff {
-        RelaunchHandoff(version: version, requestID: requestID, bootSessionUUID: boot, createdAt: createdAt, entries: [])
-    }
-
-    @MainActor static func handoffValidation() throws {
-        let now = Date()
-        try expectNil(handoff().validate(requestID: "A", bootSessionUUID: "boot-1", now: now))
-        try expectEqual(handoff(version: 99).validate(requestID: "A", bootSessionUUID: "boot-1", now: now), .wrongVersion)
-        try expectEqual(handoff(requestID: "B").validate(requestID: "A", bootSessionUUID: "boot-1", now: now), .wrongRequest)
-        try expectEqual(handoff(boot: "boot-0").validate(requestID: "A", bootSessionUUID: "boot-1", now: now),
-                        .otherBootSession)
-        try expectEqual(handoff().validate(requestID: "A", bootSessionUUID: nil, now: now), .otherBootSession)
-        try expectEqual(handoff(createdAt: now.addingTimeInterval(-61)).validate(requestID: "A", bootSessionUUID: "boot-1",
-                                                                                 now: now), .expired)
-        try expectEqual(handoff(createdAt: now.addingTimeInterval(30)).validate(requestID: "A", bootSessionUUID: "boot-1",
-                                                                                now: now), .expired)
-        let paths = temporaryPaths()
-        let requestID = UUID().uuidString
-        try paths.writeAtomically(Data("not json".utf8), to: paths.handoff)
-        let rejection = LockedValue<RelaunchHandoff.Rejection?>(nil)
-        RelaunchCoordinator.completeRelaunch(requestID: requestID, paths: paths) { entries, reason in
-            rejection.value = reason
-            return entries?.count ?? 0
-        }
-        try expectEqual(rejection.value, .unreadable, "a corrupt handoff is ignored, not trusted")
-        RelaunchCoordinator.completeRelaunch(requestID: requestID, paths: paths) { entries, reason in
-            rejection.value = reason
-            return entries?.count ?? 0
-        }
-        try expectEqual(rejection.value, .missing, "a consumed handoff is not mistaken for a corrupt one")
-    }
-
-    static func handoffRestoresOnlyIdentical() throws {
-        let other = ProcessIdentity.StartTime(seconds: 2_000, microseconds: 0)
-        let live = (1...14).map { makeItem(id: CGWindowID($0), pid: pid_t(100 + $0)) }
-            + [makeItem(id: 50, pid: 400, windowOwnerPID: 401)]
-        var entries = live.map {
-            RelaunchHandoff.Entry(windowID: $0.id, appPID: $0.pid, appStart: start,
-                                  ownerPID: $0.windowProcessIdentifier, ownerStart: start)
-        }
-        entries.append(RelaunchHandoff.Entry(windowID: 99, appPID: 999, appStart: start, ownerPID: 999, ownerStart: start))
-        let restarted: pid_t = 103          // app relaunched with the same PID
-        let ownerRestarted: pid_t = 401     // separate window owner restarted
-        let restored = RelaunchHandoff.restorableItems(entries, in: live) { pid in
-            pid == restarted || pid == ownerRestarted ? other : start
-        }
-        try expectEqual(restored.map(\.id), (1...14).filter { $0 != 3 }.map { CGWindowID($0) },
-                        "order kept; changed app, changed owner and vanished window dropped")
-        // A window now owned by a different process is not the same window.
-        let moved = RelaunchHandoff.restorableItems(
-            [RelaunchHandoff.Entry(windowID: 1, appPID: 101, appStart: start, ownerPID: 777, ownerStart: start)],
-            in: live, startTime: { _ in start }
-        )
-        try expect(moved.isEmpty)
-    }
-
-    static func handoffCarriesNoTitles() throws {
-        let items = [makeItem(id: 1, pid: 100, title: "Quarterly secret"),
-                     makeItem(id: SyntheticWindowID.make(pid: 100, index: 0, title: "x"), pid: 100, title: "x")]
-        let handoff = RelaunchHandoff.make(requestID: "A", bootSessionUUID: "boot-1", now: Date(),
-                                           rankedItems: items, startTime: { _ in start })
-        try expectEqual(handoff.entries.map(\.windowID), [1], "synthetic rows have no concrete identity to hand over")
-        let text = String(decoding: try JSONEncoder().encode(handoff), as: UTF8.self)
-        try expect(!text.contains("Quarterly"), "no titles in the handoff file")
-    }
-
-    static func requestIDMustBeUUID() throws {
-        let id = UUID().uuidString
-        try expectEqual(RelaunchLaunchArguments.requestID(in: ["app", RelaunchLaunchArguments.requestFlag, id]), id)
-        try expectNil(RelaunchLaunchArguments.requestID(in: ["app", RelaunchLaunchArguments.requestFlag, "../x"]))
-        try expectNil(RelaunchLaunchArguments.requestID(in: ["app"]))
-    }
-
-    /// The helper must keep the relaunch lock after the old process exits,
-    /// and must never hold the instance lock (the new instance needs it).
-    @MainActor static func helperInheritance() throws {
-        let paths = temporaryPaths()
-        var instance = FileLock.acquire(at: paths.instanceLock)
-        var relaunch = FileLock.acquire(at: paths.relaunchLock)
-        try expectNotNil(instance)
-        guard let pid = RelaunchCoordinator.spawnDetachedShell(
-            script: "/bin/sleep 1", arguments: [], inheritedDescriptor: relaunch!.descriptor,
-            logPath: paths.helperLog.path
-        ) else { return try expect(false, "spawn failed") }
-        instance = nil
-        relaunch = nil
-        try expectNotNil(FileLock.acquire(at: paths.instanceLock), "the helper did not inherit the instance lock")
-        try expectNil(FileLock.acquire(at: paths.relaunchLock), "the helper holds the relaunch lock")
+        lock = nil
+        try expectNotNil(FileLock.acquire(at: paths.instanceLock), "the restart helper must not hold the lock")
         var status: Int32 = 0
         waitpid(pid, &status, 0)
-        try expectNotNil(FileLock.acquire(at: paths.relaunchLock), "released when the helper exits")
     }
 
-    @MainActor static func completeConsumesHandoffOnce() throws {
-        let paths = temporaryPaths()
-        let requestID = UUID().uuidString
-        guard let boot = ProcessIdentity.bootSessionUUID() else { return try expect(false, "no boot session") }
-        let entry = RelaunchHandoff.Entry(windowID: 7, appPID: 1, appStart: start, ownerPID: 1, ownerStart: start)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        let data = try encoder.encode(RelaunchHandoff(version: RelaunchHandoff.currentVersion, requestID: requestID,
-                                                      bootSessionUUID: boot, createdAt: Date(), entries: [entry]))
-        try paths.writeAtomically(data, to: paths.handoff)
-        let received = LockedValue<[RelaunchHandoff.Entry]?>(nil)
-        let ackExistedDuringApply = LockedValue(true)
-        RelaunchCoordinator.completeRelaunch(requestID: requestID, paths: paths) { entries, _ in
-            received.value = entries
-            ackExistedDuringApply.value = FileManager.default.fileExists(atPath: paths.ack(for: requestID).path)
-            return entries?.count ?? 0
-        }
-        try expectEqual(received.value, [entry])
-        try expect(!ackExistedDuringApply.value, "readiness is acknowledged only after the handoff is applied")
-        try expect(!FileManager.default.fileExists(atPath: paths.handoff.path), "the handoff is one-shot")
-        let ack = try String(contentsOf: paths.ack(for: requestID), encoding: .utf8)
-        try expect(ack.hasPrefix("\(requestID) \(getpid())"))
+    @MainActor static func quitWaitsForIdle() throws {
+        try expect(InstanceLifecycle.shouldQuitNow(isIdle: true, waited: 0))
+        try expect(!InstanceLifecycle.shouldQuitNow(isIdle: false, waited: 2.9), "a switch in progress is not cut off")
+        try expect(InstanceLifecycle.shouldQuitNow(isIdle: false, waited: 3), "a busy app cannot block publication")
     }
 
     @MainActor static func storeIdleGate() async throws {
@@ -228,97 +132,168 @@ enum RelaunchTests {
         try expect(store.isIdleForRelaunch)
     }
 
-    @MainActor static func storeHandoffRestoresOrder() async throws {
+    /// Ranks are resolved against every window WindowServer lists, so a
+    /// minimized window or one on another Space keeps its rank.
+    static func handoffKeepsAllRanks() throws {
+        let synthetic = SyntheticWindowID.make(pid: 600, index: 0, title: "Quarterly secret")
+        let ranks = [
+            RelaunchHandoff.Rank(windowID: 5, appIdentity: "com.example.mail", knownOwnerPID: nil),
+            RelaunchHandoff.Rank(windowID: nil, appIdentity: "com.example.app-level", knownOwnerPID: nil),
+            RelaunchHandoff.Rank(windowID: synthetic, appIdentity: "com.example.notes", knownOwnerPID: 600),
+            RelaunchHandoff.Rank(windowID: 9, appIdentity: "com.example.minimized", knownOwnerPID: nil),
+            RelaunchHandoff.Rank(windowID: 7, appIdentity: "com.example.gone", knownOwnerPID: nil)
+        ]
+        let owners: [CGWindowID: pid_t] = [5: 500, 9: 900]   // 9 is minimized/other Space; 7 has closed
+        let handoff = RelaunchHandoff.make(bootSessionUUID: "boot", now: Date(), ranks: ranks,
+                                           windowOwners: owners, startTime: { _ in start })
+        try expectEqual(handoff.entries.map(\.windowID), [5, nil, synthetic, 9], "MRU order kept, closed window dropped")
+        let text = String(decoding: try JSONEncoder().encode(handoff), as: UTF8.self)
+        try expect(!text.contains("Quarterly"), "no titles in the handoff")
+        let restored = RelaunchHandoff.restorableEntries(handoff.entries, windowOwners: owners) { pid in
+            pid == 600 ? ProcessIdentity.StartTime(seconds: 9, microseconds: 9) : start
+        }
+        try expectEqual(restored.map(\.windowID), [5, nil, 9], "a synthetic row of a restarted owner is dropped")
+    }
+
+    private static func write(_ handoff: RelaunchHandoff, to paths: LifecyclePaths) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try paths.writeAtomically(try encoder.encode(handoff), to: paths.handoff)
+    }
+
+    private static func entry(_ id: CGWindowID, owner: pid_t) -> RelaunchHandoff.Entry {
+        RelaunchHandoff.Entry(windowID: id, ownerPID: owner, ownerStart: start, appIdentity: "app.\(id)")
+    }
+
+    @MainActor static func takeHandoffRestoresOnlyUnchanged() throws {
+        let paths = temporaryPaths()
+        let entries = (1...14).map { entry(CGWindowID($0), owner: pid_t(100 + $0)) }
+        try write(RelaunchHandoff(version: RelaunchHandoff.currentVersion, bootSessionUUID: "boot", createdAt: Date(),
+                                  entries: entries), to: paths)
+        var owners = Dictionary(uniqueKeysWithValues: (1...14).map { (CGWindowID($0), pid_t(100 + $0)) })
+        owners[4] = 999          // window 4 now belongs to another process
+        owners[6] = nil          // window 6 closed
+        let restarted: pid_t = 108
+        let other = ProcessIdentity.StartTime(seconds: 2_000, microseconds: 0)
+        let taken = InstanceLifecycle.takeHandoff(paths: paths, windowOwners: owners,
+                                                  startTime: { $0 == restarted ? other : start },
+                                                  bootSessionUUID: "boot")
+        try expectNil(taken.rejection)
+        try expectEqual(taken.entries.map(\.windowID), [1, 2, 3, 5, 7, 9, 10, 11, 12, 13, 14],
+                        "order kept; moved, closed and restarted-owner windows dropped")
+        try expect(!FileManager.default.fileExists(atPath: paths.handoff.path), "one launch consumes it")
+        try expectEqual(InstanceLifecycle.takeHandoff(paths: paths, bootSessionUUID: "boot").rejection, .missing)
+    }
+
+    @MainActor static func takeHandoffRejects() throws {
+        let paths = temporaryPaths()
+        let fresh = RelaunchHandoff(version: RelaunchHandoff.currentVersion, bootSessionUUID: "boot",
+                                    createdAt: Date(), entries: [entry(1, owner: 101)])
+        let owners: [CGWindowID: pid_t] = [1: 101]
+        try write(fresh, to: paths)
+        try expectEqual(InstanceLifecycle.takeHandoff(paths: paths, windowOwners: owners, startTime: { _ in start },
+                                                      bootSessionUUID: "other").rejection, .otherBootSession)
+        try write(fresh, to: paths)
+        try expectEqual(InstanceLifecycle.takeHandoff(paths: paths, now: Date().addingTimeInterval(121),
+                                                      windowOwners: owners, startTime: { _ in start },
+                                                      bootSessionUUID: "boot").rejection, .expired)
+        try write(RelaunchHandoff(version: 2, bootSessionUUID: "boot", createdAt: Date(), entries: []), to: paths)
+        try expectEqual(InstanceLifecycle.takeHandoff(paths: paths, bootSessionUUID: "boot").rejection, .wrongVersion)
+        try paths.writeAtomically(Data("corrupt".utf8), to: paths.handoff)
+        try expectEqual(InstanceLifecycle.takeHandoff(paths: paths, bootSessionUUID: "boot").rejection, .unreadable)
+        try expect(!FileManager.default.fileExists(atPath: paths.handoff.path), "a bad handoff is discarded")
+    }
+
+    /// Export from MRU ranks, not from the visible snapshot: windows outside
+    /// the current scope keep their rank; import restores the same order.
+    @MainActor static func storeRanksRoundTrip() async throws {
         let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let (store, catalog, _, _) = makeStore(mruTracker: tracker, initialFrontmostAppPID: 100)
         defer { store.cancel() }
-        let live = (1...14).map { makeItem(id: CGWindowID($0), pid: pid_t(100 * $0)) }
-        catalog.visibleItems = live
+        catalog.visibleItems = []   // nothing visible in the current scope
         let order: [CGWindowID] = [9, 3, 14, 1, 7, 2, 12, 5, 11, 4, 13, 6, 10, 8]
-        let entries = order.map { id in
-            RelaunchHandoff.Entry(windowID: id, appPID: pid_t(100 * Int(id)), appStart: start,
-                                  ownerPID: pid_t(100 * Int(id)), ownerStart: start)
+        for id in order.reversed() {
+            tracker.trackFocusedWindowActivation(makeItem(id: id, pid: pid_t(100 * Int(id)), bundleIdentifier: "app.\(id)"))
         }
-        let restored = store.applyRelaunchHandoff(entries, startTime: { _ in start })
-        try expectEqual(restored, 14)
-        try expectEqual(Array(tracker.recentWindowIDs.prefix(14)), order)
+        tracker.trackSystemActivation(4242, in: [], bundleIdentifier: "app.level")   // app-level rank on top
+        let exported = store.relaunchRanks()
+        try expectEqual(exported.map(\.windowID), [nil] + order.map { Optional($0) })
+        let fresh = MRUTracker(userDefaults: makeIsolatedUserDefaults())
+        let (restoredStore, _, _, _) = makeStore(mruTracker: fresh, initialFrontmostAppPID: 100)
+        defer { restoredStore.cancel() }
+        let entries = exported.map { RelaunchHandoff.Entry(windowID: $0.windowID, ownerPID: 1, ownerStart: start,
+                                                           appIdentity: $0.appIdentity) }
+        try expectEqual(restoredStore.applyRelaunchRanks(entries), 15)
+        try expectEqual(Array(fresh.recentWindowIDs.prefix(14)), order)
+        try expectEqual(fresh.identityOnlyRankIdentities.first, exported.first?.appIdentity)
     }
 
-    @MainActor static func faultFilesAreCounted() throws {
+    @MainActor static func readyMarker() throws {
         let paths = temporaryPaths()
-        try expect(!RelaunchCoordinator.consumeFault(paths.crashBeforeAckFault), "no fault without its file")
-        try Data("2".utf8).write(to: paths.crashBeforeAckFault)
-        try expect(RelaunchCoordinator.consumeFault(paths.crashBeforeAckFault))
-        try expect(RelaunchCoordinator.consumeFault(paths.crashBeforeAckFault))
-        try expect(!RelaunchCoordinator.consumeFault(paths.crashBeforeAckFault))
-        try expect(!FileManager.default.fileExists(atPath: paths.crashBeforeAckFault.path))
+        let lifecycle = InstanceLifecycle(paths: paths, bundleURL: paths.directory,
+                                          executableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+        try expect(lifecycle.writeReadyMarker(now: Date(timeIntervalSince1970: 1_700_000_000)))
+        let parts = try String(contentsOf: paths.readyMarker, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        try expectEqual(parts.count, 3)
+        try expectEqual(pid_t(parts[0]), getpid())
+        try expectEqual(UInt64(parts[1]), FileStamp.runningMainExecutable()?.inode,
+                        "the inode of the code this process really runs")
+        try expectEqual(parts[2], "1700000000")
     }
 
-    /// Real code-signing checks on ad-hoc signed temporary bundles: the
-    /// relaunch only proceeds into a bundle that is validly signed by the
-    /// requirement captured at launch.
-    @MainActor static func signatureCheck() throws {
+    private static func ownExecutablePath() throws -> String {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        guard proc_pidpath(getpid(), &buffer, UInt32(buffer.count)) > 0 else {
+            throw TestFailure(message: "no path", file: #filePath, line: #line)
+        }
+        return String(cString: buffer)
+    }
+
+    @MainActor static func replacementWarnsOnce() throws {
         let paths = temporaryPaths()
-        func makeBundle(_ name: String, binary: String) throws -> URL {
-            let bundle = paths.directory.appendingPathComponent("\(name).app")
-            let macOS = bundle.appendingPathComponent("Contents/MacOS")
-            try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
-            try FileManager.default.copyItem(atPath: binary, toPath: macOS.appendingPathComponent("Fake").path)
-            let plist: [String: Any] = ["CFBundleIdentifier": "test.switchblade.fake", "CFBundleExecutable": "Fake"]
-            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-                .write(to: bundle.appendingPathComponent("Contents/Info.plist"))
-            try run("/usr/bin/codesign", ["--force", "--sign", "-", bundle.path])
-            return bundle
-        }
-        func requirement(of bundle: URL) throws -> String {
-            var code: SecStaticCode?
-            var requirement: SecRequirement?
-            var text: CFString?
-            guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code,
-                  SecCodeCopyDesignatedRequirement(code, [], &requirement) == errSecSuccess, let requirement,
-                  SecRequirementCopyString(requirement, [], &text) == errSecSuccess, let text else {
-                throw TestFailure(message: "no designated requirement", file: #filePath, line: #line)
-            }
-            return text as String
-        }
-        let original = try makeBundle("Original", binary: "/usr/bin/true")
-        let launchRequirement = try requirement(of: original)
-        try expect(RelaunchCoordinator.bundle(original, satisfies: launchRequirement))
-        let other = try makeBundle("Other", binary: "/usr/bin/false")
-        try expect(!RelaunchCoordinator.bundle(other, satisfies: launchRequirement), "different code, other requirement")
-        // Fallback when the launch requirement was unreadable: only a bundle
-        // with the same identifier supplies its own requirement.
-        try expectNotNil(RelaunchCoordinator.diskRequirement(of: other, bundleIdentifier: "test.switchblade.fake"))
-        try expectNil(RelaunchCoordinator.diskRequirement(of: other, bundleIdentifier: "com.jannekammonen.SwitchBlade"))
-        let executable = original.appendingPathComponent("Contents/MacOS/Fake")
-        try FileManager.default.removeItem(at: executable)
-        try FileManager.default.copyItem(atPath: "/usr/bin/false", toPath: executable.path)
-        try expect(!RelaunchCoordinator.bundle(original, satisfies: launchRequirement), "tampered bundle is rejected")
+        let own = URL(fileURLWithPath: try ownExecutablePath())
+        let unchanged = InstanceLifecycle(paths: paths, bundleURL: paths.directory, executableURL: own)
+        var unchangedCalls = 0
+        unchanged.onReplacementDetected = { unchangedCalls += 1 }
+        unchanged.checkForReplacement()
+        try expectEqual(unchangedCalls, 0, "the running executable is unchanged")
+        // A path whose file is not the mapped executable stands for a replaced bundle.
+        let other = paths.directory.appendingPathComponent("replaced")
+        try Data("x".utf8).write(to: other)
+        let replaced = InstanceLifecycle(paths: paths, bundleURL: paths.directory, executableURL: other)
+        var calls = 0
+        replaced.onReplacementDetected = { calls += 1 }
+        replaced.checkForReplacement()
+        replaced.checkForReplacement()
+        try expectEqual(calls, 1, "the warning is raised once")
+        try expect(replaced.replacementDetected)
     }
 
-    private static func run(_ tool: String, _ arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: tool)
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw TestFailure(message: "\(tool) failed", file: #filePath, line: #line)
-        }
-    }
-
-    /// The kernel's identity of this process's mapped executable equals the
-    /// file at its path while that file is unreplaced; the launch stamp uses
-    /// the former so a publication racing the first stamp is still seen.
     static func mappedExecutableIdentity() throws {
         guard let mapped = FileStamp.runningMainExecutable() else {
             return try expect(false, "mapped executable identity unavailable")
         }
-        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
-        guard proc_pidpath(getpid(), &buffer, UInt32(buffer.count)) > 0 else { return try expect(false, "no path") }
-        let path = String(cString: buffer)
-        try expectEqual(mapped, FileStamp.of(path))
+        try expectEqual(mapped, FileStamp.of(try ownExecutablePath()))
+    }
+
+    /// After a relaunch the preview cache is empty: the launch warmup must
+    /// fill every capturable window so the first open shows previews, while a
+    /// routine warmup keeps the four-window budget.
+    @MainActor static func launchWarmupCapturesAll() async throws {
+        for (limit, expected) in [(Int?.none, 13), (Int?.some(4), 4)] {
+            let (store, catalog, _, _) = makeStore(initialFrontmostAppPID: 100)
+            defer { store.cancel() }
+            let items = (1...13).map { makeItem(id: CGWindowID($0), pid: pid_t(100 * $0), isFrontmostApp: $0 == 1) }
+            catalog.visibleItems = items
+            catalog.previewsToReturn = Dictionary(uniqueKeysWithValues: items.map {
+                ($0.id, NSImage(size: NSSize(width: 8, height: 8)))
+            })
+            await store.warmPreviewCache(context: "test", limit: limit)
+            try expectEqual(Set(catalog.captureWindowIDCalls.flatMap { $0 }).count, expected)
+            store.requestCycle(forward: true)
+            try expectEqual(store.items.filter { $0.preview != nil }.count, expected,
+                            "first paint after the warmup")
+        }
     }
 }

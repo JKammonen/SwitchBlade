@@ -326,6 +326,7 @@ public enum L10n {
         case menuPermissions
         case menuOpenPermissionSettings
         case menuSettings
+        case menuRestartAfterUpdate
         case menuAbout
         case menuQuit
         case menuSettingsWindowTitle

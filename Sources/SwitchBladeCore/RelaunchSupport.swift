@@ -3,11 +3,12 @@ import Darwin
 import Foundation
 import MachO
 
-/// Building blocks for keeping exactly one SwitchBlade process that runs the
-/// currently published bundle. Live proof 2026-11-05: after the bundle was
-/// replaced under a running instance, apps started afterwards answered every
-/// AX call from that instance with kAXErrorAPIDisabled (-25211) while other
-/// clients read them normally; a relaunch fixed the same target process.
+/// Building blocks for running exactly one SwitchBlade on the published
+/// bundle. Live proof 2026-11-05: after the bundle was replaced under a running
+/// instance, apps started afterwards answered every AX call from that instance
+/// with kAXErrorAPIDisabled (-25211) while other clients read them normally; a
+/// relaunch fixed the same target process. `build-app.sh` therefore stops the
+/// running instance before publishing and relaunches it afterwards.
 
 /// Process identity that survives PID reuse: start time plus boot session.
 enum ProcessIdentity {
@@ -34,38 +35,50 @@ enum ProcessIdentity {
 
 /// An exclusive `flock` held for as long as this object (its descriptor)
 /// lives. The kernel releases it when the process exits, so it cannot go
-/// stale. Opened close-on-exec: a spawned child never inherits it by accident.
+/// stale. Opened close-on-exec: a spawned child never inherits it.
 final class FileLock: @unchecked Sendable {
     let descriptor: Int32
     let url: URL
+
+    enum Acquisition {
+        case acquired(FileLock)
+        /// Another open file description holds it: another instance runs.
+        case held
+        /// The lock file could not be opened at all (errno); this says
+        /// nothing about other instances.
+        case unavailable(Int32)
+    }
 
     private init(descriptor: Int32, url: URL) {
         self.descriptor = descriptor
         self.url = url
     }
 
-    /// Non-blocking. `nil` when another open file description holds the lock
-    /// (another process, or another acquisition in this process).
-    static func acquire(at url: URL) -> FileLock? {
+    static func attempt(at url: URL) -> Acquisition {
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
         let fd = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { return nil }
+        guard fd >= 0 else { return .unavailable(errno) }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let error = errno
             close(fd)
-            return nil
+            return error == EWOULDBLOCK ? .held : .unavailable(error)
         }
-        return FileLock(descriptor: fd, url: url)
+        return .acquired(FileLock(descriptor: fd, url: url))
+    }
+
+    /// Non-blocking convenience: `nil` unless acquired.
+    static func acquire(at url: URL) -> FileLock? {
+        if case .acquired(let lock) = attempt(at: url) { return lock }
+        return nil
     }
 
     deinit { close(descriptor) }
 }
 
-/// Identity of one file on disk. Any change (including a republish of the
-/// same build with an identical CDHash) counts: an unchanged code hash was
-/// not proven safe for the AX permission failure, so it is not skipped.
+/// Identity of one file on disk.
 struct FileStamp: Equatable, Sendable {
     let device: Int64
     let inode: UInt64
@@ -81,12 +94,10 @@ struct FileStamp: Equatable, Sendable {
             modifiedSeconds: Int64(info.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec)
         )
     }
-}
 
-extension FileStamp {
     /// Identity of the executable this process actually mapped, from the
-    /// kernel rather than the path. A publication landing between exec and
-    /// the first stamp would otherwise be recorded as "already running".
+    /// kernel rather than the path: a publication landing between exec and the
+    /// first check is still seen.
     static func runningMainExecutable() -> FileStamp? {
         guard let header = _dyld_get_image_header(0) else { return nil }
         var info = proc_regionwithpathinfo()
@@ -102,130 +113,116 @@ extension FileStamp {
     }
 }
 
-struct BundleStamp: Equatable, Sendable {
-    let executable: FileStamp?
-    let infoPlist: FileStamp?
-
-    /// Launch identity: the mapped executable from the kernel; the plist as on
-    /// disk now (it is not mapped code).
-    static func launch(bundleURL: URL, executableURL: URL) -> BundleStamp {
-        BundleStamp(
-            executable: FileStamp.runningMainExecutable() ?? FileStamp.of(executableURL.path),
-            infoPlist: FileStamp.of(bundleURL.appendingPathComponent("Contents/Info.plist").path)
-        )
-    }
-
-    static func of(bundleURL: URL, executableURL: URL) -> BundleStamp {
-        BundleStamp(
-            executable: FileStamp.of(executableURL.path),
-            infoPlist: FileStamp.of(bundleURL.appendingPathComponent("Contents/Info.plist").path)
-        )
-    }
-
-    enum Change: String, Sendable {
-        case unchanged
-        /// A path is missing right now (mid-publication or removed). Not yet
-        /// actionable; the next check decides.
-        case unavailable
-        case replaced
-    }
-
-    func change(to current: BundleStamp) -> Change {
-        guard let executable, let infoPlist else { return .unavailable }
-        guard let currentExecutable = current.executable, let currentInfo = current.infoPlist else {
-            return .unavailable
-        }
-        return executable == currentExecutable && infoPlist == currentInfo ? .unchanged : .replaced
-    }
-}
-
-/// Short-lived, one-shot window-rank handoff across a relaunch. Holds window
-/// IDs and process identities only: no titles, no previews.
+/// Window-rank handoff written on graceful termination and read once by the
+/// next launch. Window IDs, owner process identity and app identity only: no
+/// titles, no previews.
 struct RelaunchHandoff: Codable, Equatable, Sendable {
+    /// One MRU rank. Concrete windows carry their owner process identity;
+    /// synthetic minimized rows carry the owner known to the switcher;
+    /// app-level ranks carry only the app identity. Order is the MRU order.
     struct Entry: Codable, Equatable, Sendable {
-        let windowID: CGWindowID
-        let appPID: pid_t
-        let appStart: ProcessIdentity.StartTime
-        let ownerPID: pid_t
-        let ownerStart: ProcessIdentity.StartTime
+        let windowID: CGWindowID?
+        let ownerPID: pid_t?
+        let ownerStart: ProcessIdentity.StartTime?
+        /// Bundle identifier or app name: the rank's app identity. No titles.
+        let appIdentity: String
     }
 
-    static let currentVersion = 1
-    static let maximumAgeSeconds: TimeInterval = 60
+    /// A rank to hand over: `windowID` nil for an app-level rank;
+    /// `knownOwnerPID` for synthetic rows WindowServer does not list.
+    struct Rank: Equatable, Sendable {
+        let windowID: CGWindowID?
+        let appIdentity: String
+        let knownOwnerPID: pid_t?
+    }
+
+    static let currentVersion = 4
+    /// Covers stop, publish and relaunch by the build script with margin.
+    static let maximumAgeSeconds: TimeInterval = 120
 
     let version: Int
-    let requestID: String
     let bootSessionUUID: String
     let createdAt: Date
     /// Most recent first.
     let entries: [Entry]
 
     enum Rejection: String, Error, Sendable {
-        case missing, unreadable, wrongVersion, wrongRequest, otherBootSession, expired
+        case missing, unreadable, wrongVersion, otherBootSession, expired
     }
 
-    func validate(requestID expected: String, bootSessionUUID boot: String?, now: Date) -> Rejection? {
+    func validate(bootSessionUUID boot: String?, now: Date) -> Rejection? {
         guard version == Self.currentVersion else { return .wrongVersion }
-        guard requestID == expected else { return .wrongRequest }
         guard let boot, boot == bootSessionUUID else { return .otherBootSession }
         let age = now.timeIntervalSince(createdAt)
         guard age >= -5, age <= Self.maximumAgeSeconds else { return .expired }
         return nil
     }
 
-    /// Live windows to replay, most recent first. A rank survives only when
-    /// the same window ID is listed by the same owner process, and both the
-    /// app process and a separate owner process kept their start time.
-    static func restorableItems(
-        _ entries: [Entry],
-        in liveItems: [WindowItem],
-        startTime: (pid_t) -> ProcessIdentity.StartTime?
-    ) -> [WindowItem] {
-        let live = Dictionary(liveItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return entries.compactMap { entry in
-            guard let item = live[entry.windowID],
-                  item.pid == entry.appPID,
-                  item.windowProcessIdentifier == entry.ownerPID,
-                  startTime(entry.appPID) == entry.appStart,
-                  startTime(entry.ownerPID) == entry.ownerStart else { return nil }
-            return item
+    static func make(
+        bootSessionUUID: String, now: Date, ranks: [Rank],
+        windowOwners: [CGWindowID: pid_t], startTime: (pid_t) -> ProcessIdentity.StartTime?
+    ) -> RelaunchHandoff {
+        let entries = ranks.compactMap { rank -> Entry? in
+            guard let id = rank.windowID else {
+                return Entry(windowID: nil, ownerPID: nil, ownerStart: nil, appIdentity: rank.appIdentity)
+            }
+            let owner = SyntheticWindowID.isSynthetic(id) ? rank.knownOwnerPID : windowOwners[id]
+            guard let owner, let start = startTime(owner) else { return nil }
+            return Entry(windowID: id, ownerPID: owner, ownerStart: start, appIdentity: rank.appIdentity)
+        }
+        return RelaunchHandoff(version: currentVersion, bootSessionUUID: bootSessionUUID, createdAt: now,
+                               entries: entries)
+    }
+
+    /// Concrete windows: WindowServer still lists the same ID for the same
+    /// owner and the owner kept its start time. Synthetic rows: the owner kept
+    /// its start time (the same process recomputes the same ID). App-level
+    /// ranks always survive.
+    static func restorableEntries(
+        _ entries: [Entry], windowOwners: [CGWindowID: pid_t], startTime: (pid_t) -> ProcessIdentity.StartTime?
+    ) -> [Entry] {
+        entries.filter { entry in
+            guard let id = entry.windowID else { return true }
+            guard let owner = entry.ownerPID, startTime(owner) == entry.ownerStart else { return false }
+            return SyntheticWindowID.isSynthetic(id) || windowOwners[id] == owner
         }
     }
 
-    static func make(
-        requestID: String, bootSessionUUID: String, now: Date,
-        rankedItems: [WindowItem], startTime: (pid_t) -> ProcessIdentity.StartTime?
-    ) -> RelaunchHandoff {
-        let entries = rankedItems.compactMap { item -> Entry? in
-            guard !item.isApplicationFallback, !SyntheticWindowID.isSynthetic(item.id),
-                  let appStart = startTime(item.pid),
-                  let ownerStart = startTime(item.windowProcessIdentifier) else { return nil }
-            return Entry(windowID: item.id, appPID: item.pid, appStart: appStart,
-                         ownerPID: item.windowProcessIdentifier, ownerStart: ownerStart)
+    /// Every window WindowServer knows (all Spaces, minimized included),
+    /// window ID → owner PID. Identity only: no titles are read.
+    static func currentWindowOwners() -> [CGWindowID: pid_t] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return [:] }
+        var owners: [CGWindowID: pid_t] = [:]
+        for entry in list {
+            guard let id = entry[kCGWindowNumber as String] as? UInt32,
+                  let pid = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
+            owners[id] = pid
         }
-        return RelaunchHandoff(version: currentVersion, requestID: requestID, bootSessionUUID: bootSessionUUID,
-                               createdAt: now, entries: entries)
+        return owners
     }
 }
 
-/// File locations shared by the running instance, the relaunch helper and
-/// the relaunched instance. Injectable so tests never touch the real ones.
-struct RelaunchPaths: Sendable {
+/// Files shared by the running instance and `build-app.sh`. Injectable so
+/// tests never touch the real ones.
+struct LifecyclePaths: Sendable {
     let directory: URL
+    var fallbackDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
 
-    static var standard: RelaunchPaths {
+    static var standard: LifecyclePaths {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return RelaunchPaths(directory: base.appendingPathComponent("SwitchBlade", isDirectory: true))
+        return LifecyclePaths(directory: base.appendingPathComponent("SwitchBlade", isDirectory: true))
     }
 
     var instanceLock: URL { directory.appendingPathComponent("instance.lock") }
-    var relaunchLock: URL { directory.appendingPathComponent("relaunch.lock") }
+    /// Used when the Application Support lock cannot be opened at all.
+    var fallbackInstanceLock: URL {
+        fallbackDirectory.appendingPathComponent("com.jannekammonen.SwitchBlade.instance.lock")
+    }
     var handoff: URL { directory.appendingPathComponent("relaunch-handoff.json") }
-    var helperLog: URL { directory.appendingPathComponent("relaunch.log") }
-    func ack(for requestID: String) -> URL { directory.appendingPathComponent("relaunch-ack-\(requestID)") }
-    var crashBeforeAckFault: URL { directory.appendingPathComponent("fault-crash-before-relaunch-ack") }
-    var corruptHandoffFault: URL { directory.appendingPathComponent("fault-corrupt-relaunch-handoff") }
+    /// "<pid> <executable inode> <unix time>" once launch setup finished;
+    /// `build-app.sh` accepts a relaunch only from this marker.
+    var readyMarker: URL { directory.appendingPathComponent("ready") }
 
     func ensureDirectory() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
@@ -244,25 +241,5 @@ struct RelaunchPaths: Sendable {
             try? FileManager.default.removeItem(at: temporary)
             throw CocoaError(.fileWriteUnknown)
         }
-    }
-
-    /// Reads and deletes in one step: a handoff is consumed at most once.
-    func consumeHandoff() -> Data? {
-        let data = try? Data(contentsOf: handoff)
-        try? FileManager.default.removeItem(at: handoff)
-        return data
-    }
-}
-
-enum RelaunchLaunchArguments {
-    static let requestFlag = "--switchblade-relaunch-request"
-
-    static func requestID(in arguments: [String]) -> String? {
-        guard let index = arguments.firstIndex(of: requestFlag), arguments.indices.contains(index + 1) else {
-            return nil
-        }
-        let value = arguments[index + 1]
-        // UUID text only: it becomes part of a file name.
-        return UUID(uuidString: value) != nil ? value : nil
     }
 }

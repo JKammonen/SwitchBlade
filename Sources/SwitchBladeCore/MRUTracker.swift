@@ -226,6 +226,31 @@ final class MRUTracker {
         promoteRecentBundle(bundleID)
     }
 
+    /// Every rank, most recent first: window ID (nil for app-level and
+    /// signature-only ranks, whose signature holds a title and is not handed
+    /// over) and app identity.
+    var handoffRanks: [(windowID: CGWindowID?, appIdentity: String)] {
+        recentRanks.map { ($0.windowID, $0.appIdentity) }
+    }
+
+    /// Restores ranks handed over across a relaunch, in order, behind any
+    /// rank already recorded in this process. Window ranks get their
+    /// signatures from live rows on the next display; no titles were handed
+    /// over.
+    func restoreHandedOverRanks(_ ranks: [(windowID: CGWindowID?, appIdentity: String)]) {
+        for rank in ranks {
+            if let id = rank.windowID {
+                guard !recentRanks.contains(where: { $0.windowID == id }) else { continue }
+            } else {
+                guard !recentRanks.contains(where: { $0.appIdentity == rank.appIdentity && isIdentityOnly($0) }) else {
+                    continue
+                }
+            }
+            recentRanks.append(RankEntry(windowID: rank.windowID, signature: nil, appIdentity: rank.appIdentity))
+        }
+        trimRanksToCapacity()
+    }
+
     /// Records the exact window an app left focused when it moved to the
     /// background. The newly-frontmost app already owns rank 0, so the
     /// backgrounded window belongs immediately behind it. This matters when a

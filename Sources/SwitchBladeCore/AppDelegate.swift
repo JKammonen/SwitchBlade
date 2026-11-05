@@ -28,35 +28,39 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (which would otherwise cold-start, possibly inheriting a 60 s
     /// failure cooldown if the launch-time refresh failed).
     private var lastKnownHadScreenRecording = false
-    /// Held for the life of the process; see `RelaunchCoordinator`.
-    private var instanceLock: FileLock?
-    private var relaunchCoordinator: RelaunchCoordinator?
+    /// Held for the life of the process; see `InstanceLifecycle`.
+    private var instanceLocks: [FileLock] = []
+    private var lifecycle: InstanceLifecycle?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.app.info("SwitchBlade launching (pid: \(getpid(), privacy: .public))")
         // Exactly one instance, decided atomically before any monitor, event
         // tap or hotkey exists. `open -n` or a direct exec cannot add another.
-        let relaunchRequestID = RelaunchLaunchArguments.requestID(in: CommandLine.arguments)
         // Load settings first so the diagnostic rows below honor the logging mode.
         _ = SwitchBladeSettings.shared
-        if RelaunchCoordinator.isRunningFromAppBundle {
-            guard let lock = RelaunchCoordinator.acquireInstanceLock(
-                paths: .standard, isRelaunch: relaunchRequestID != nil
-            ) else {
+        if InstanceLifecycle.isRunningFromAppBundle {
+            switch InstanceLifecycle.acquireInstanceLock(paths: .standard) {
+            case .acquired(let locks):
+                instanceLocks = locks
+            case .anotherInstanceRuns:
                 Logger.app.notice("Another SwitchBlade instance holds the instance lock; exiting")
-                PerformanceDiagnostics.record("singleton_rejected", fields: [
-                    "relaunch_request": .bool(relaunchRequestID != nil)
-                ])
+                PerformanceDiagnostics.record("singleton_rejected", fields: [:])
                 PerformanceDiagnostics.waitForPendingWrites()
                 NSApp.terminate(nil)
                 return
+            case .unavailable(let error):
+                // Running unlocked beats not running; make it visible.
+                Logger.app.error("Instance lock unavailable (errno \(error, privacy: .public)); running unlocked")
+                PerformanceDiagnostics.record("singleton_lock_unavailable", fields: ["errno": .int(Int(error))])
             }
-            instanceLock = lock
-            // Stamp the bundle now: a replacement during setup is still seen.
             if let executableURL = Bundle.main.executableURL {
-                relaunchCoordinator = RelaunchCoordinator(
+                let lifecycle = InstanceLifecycle(
                     paths: .standard, bundleURL: Bundle.main.bundleURL, executableURL: executableURL
                 )
+                // Before any other setup: a publication's SIGTERM during launch
+                // must still quit gracefully.
+                lifecycle.installTerminationHandler()
+                self.lifecycle = lifecycle
             }
         }
         // Run as a menu-bar-only agent — no Dock icon, and ensures our own
@@ -75,7 +79,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.hasScreenRecording, SwitchBladeSettings.shared.previewMode != .iconsOnly {
             Logger.capture.info("Starting SCKit cache warmup")
             Task { @MainActor [weak self] in
-                await self?.warmCaptureCaches(context: "launch")
+                await self?.warmCaptureCaches(context: "launch", allPreviews: true)
             }
             lastKnownHadScreenRecording = true
         } else {
@@ -90,7 +94,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 Logger.capture.info("Starting delayed SCKit cache warmup")
-                await self.warmCaptureCaches(context: "delayed launch")
+                await self.warmCaptureCaches(context: "delayed launch", allPreviews: true)
                 self.lastKnownHadScreenRecording = true
             }
         }
@@ -171,25 +175,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menuBarController = menuBar
 
         installLifecycleObservers()
-        startRelaunchCoordination(requestID: relaunchRequestID)
+        startLifecycle()
     }
 
-    /// Relaunches this instance when its published bundle is replaced, and
-    /// completes a relaunch that started this process. Readiness is
-    /// acknowledged only now that the tap, hotkeys and observers run.
-    private func startRelaunchCoordination(requestID: String?) {
-        guard let coordinator = relaunchCoordinator else { return }
-        coordinator.isIdle = { [weak self] in self?.store.isIdleForRelaunch ?? false }
-        coordinator.rankedWindowsForHandoff = { [weak self] in self?.store.relaunchHandoffWindows() ?? [] }
-        if let requestID {
-            RelaunchCoordinator.completeRelaunch(requestID: requestID, paths: .standard) { [store] entries, _ in
-                entries.map { store.applyRelaunchHandoff($0) } ?? 0
-            }
+    /// Restores ranks handed over by the previous instance, then reports
+    /// readiness for `build-app.sh` now that the tap, hotkeys and observers run.
+    private func startLifecycle() {
+        guard let lifecycle else { return }
+        lifecycle.isIdle = { [weak self] in self?.store.isIdleForRelaunch ?? false }
+        lifecycle.ranksForHandoff = { [weak self] in self?.store.relaunchRanks() ?? [] }
+        lifecycle.onReplacementDetected = { [weak self] in
+            self?.menuBarController?.showRestartRequired { [weak lifecycle] in lifecycle?.restartFromMenu() }
         }
-        coordinator.startMonitoring()
+        let taken = InstanceLifecycle.takeHandoff(paths: .standard)
+        let restored = store.applyRelaunchRanks(taken.entries)
+        PerformanceDiagnostics.record("lifecycle_launch_ready", fields: [
+            "handoff_rejection": .string(taken.rejection?.rawValue ?? "none"),
+            "restored_ranks": .int(restored),
+            "ready_marker": .bool(lifecycle.writeReadyMarker())
+        ])
+        lifecycle.startMonitoring()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        lifecycle?.writeHandoff()
         appTerminationRefreshTask?.cancel()
         captureLifecycleTask?.cancel()
         spaceLifecycleTask?.cancel()
@@ -371,9 +380,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func warmCaptureCaches(context: String) async {
+    /// `allPreviews` after launch: the in-memory preview cache starts empty
+    /// (also after every relaunch by `build-app.sh`), so warm every window in
+    /// scope instead of the routine four.
+    private func warmCaptureCaches(context: String, allPreviews: Bool = false) async {
         store.scheduleOpenItemsCacheWarmup(context: context)
         await windowCatalog.refreshContentCache(context: context)
-        store.schedulePreviewCacheWarmup(context: context)
+        store.schedulePreviewCacheWarmup(context: context, limit: allPreviews ? nil : 4)
     }
 }

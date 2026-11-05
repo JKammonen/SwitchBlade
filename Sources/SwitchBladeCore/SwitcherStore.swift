@@ -519,7 +519,10 @@ final class SwitcherStore: ObservableObject {
         )
     }
 
-    func warmPreviewCache(context: String) async {
+    /// `limit` nil captures every capturable window in scope: used after a
+    /// launch, when the in-memory preview cache is empty (previews are never
+    /// persisted). Routine warmups keep the cheap four-window budget.
+    func warmPreviewCache(context: String, limit: Int? = 4) async {
         guard SwitchBladeSettings.shared.previewMode != .iconsOnly else { return }
         guard !isVisible, !isSwitching else { return }
         let generation = settingsGeneration
@@ -538,7 +541,7 @@ final class SwitcherStore: ObservableObject {
         let windowIDs = stabilizedItems
             .filter { !$0.isMinimized && $0.canCapturePreview }
             .map(\.windowID)
-        let initialWindowIDs = Array(windowIDs.prefix(4))
+        let initialWindowIDs = limit.map { Array(windowIDs.prefix($0)) } ?? windowIDs
         guard !initialWindowIDs.isEmpty else { return }
         guard !Task.isCancelled else { return }
 
@@ -1798,24 +1801,26 @@ final class SwitcherStore: ObservableObject {
             && !isResolvingPreviousSwitch
     }
 
-    /// Live windows holding a concrete rank, most recent first.
-    func relaunchHandoffWindows() -> [WindowItem] {
-        let live = catalog.snapshotVisibleOnly()
-        let byID = Dictionary(live.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        return mruTracker.recentWindowIDs.compactMap { byID[$0] }
+    /// Every MRU rank, most recent first, for the relaunch handoff. Concrete
+    /// owners are resolved from WindowServer at write time (so minimized and
+    /// other-Space windows keep rank); synthetic minimized rows take the owner
+    /// the switcher knows.
+    func relaunchRanks() -> [RelaunchHandoff.Rank] {
+        var owners: [CGWindowID: pid_t] = [:]
+        for item in freshCachedMinimizedItems() + cachedOpenItems where SyntheticWindowID.isSynthetic(item.id) {
+            owners[item.id] = item.windowProcessIdentifier
+        }
+        return mruTracker.handoffRanks.map {
+            RelaunchHandoff.Rank(windowID: $0.windowID, appIdentity: $0.appIdentity,
+                                 knownOwnerPID: $0.windowID.flatMap { owners[$0] })
+        }
     }
 
-    /// Replays validated ranks oldest first, so the newest ends on top.
+    /// Restores validated ranks in their handed-over order.
     @discardableResult
-    func applyRelaunchHandoff(
-        _ entries: [RelaunchHandoff.Entry],
-        startTime: (pid_t) -> ProcessIdentity.StartTime? = ProcessIdentity.startTime(of:)
-    ) -> Int {
-        let restorable = RelaunchHandoff.restorableItems(entries, in: catalog.snapshotVisibleOnly(), startTime: startTime)
-        for item in restorable.reversed() {
-            mruTracker.trackFocusedWindowActivation(item, context: "relaunch-handoff")
-        }
-        return restorable.count
+    func applyRelaunchRanks(_ entries: [RelaunchHandoff.Entry]) -> Int {
+        mruTracker.restoreHandedOverRanks(entries.map { ($0.windowID, $0.appIdentity) })
+        return entries.count
     }
 
     private func hasAppActivation(since sequence: Int, otherThan targetPID: pid_t) -> Bool {
@@ -2402,18 +2407,18 @@ final class SwitcherStore: ObservableObject {
         panelShowScheduleID += 1
     }
 
-    func schedulePreviewCacheWarmup(context: String) {
-        schedulePreviewCacheWarmup(context: context, delayNanoseconds: 0)
+    func schedulePreviewCacheWarmup(context: String, limit: Int? = 4) {
+        schedulePreviewCacheWarmup(context: context, delayNanoseconds: 0, limit: limit)
     }
 
-    private func schedulePreviewCacheWarmup(context: String, delayNanoseconds: UInt64) {
+    private func schedulePreviewCacheWarmup(context: String, delayNanoseconds: UInt64, limit: Int? = 4) {
         previewWarmupTask?.cancel()
         previewWarmupTask = Task { @MainActor [weak self] in
             if delayNanoseconds > 0 {
                 try? await Task.sleep(nanoseconds: delayNanoseconds)
             }
             guard let self, !Task.isCancelled, !self.isVisible, !self.isSwitching else { return }
-            await self.warmPreviewCache(context: context)
+            await self.warmPreviewCache(context: context, limit: limit)
         }
     }
 
