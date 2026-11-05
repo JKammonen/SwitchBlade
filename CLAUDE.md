@@ -13,9 +13,11 @@ fails to expand). Prefix builds and test runs with
 `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk` until that is fixed.
 
 For user-tested behavior changes, `swift build` is not enough. Rebuild/sign with
-`bash scripts/build-app.sh`, quit any old running SwitchBlade process, and launch the
-rebuilt `dist/SwitchBlade.app`; `.build/debug/SwitchBlade` does not update the app
-bundle the user is running.
+`bash scripts/build-app.sh`; `.build/debug/SwitchBlade` does not update the app
+bundle the user is running. A running instance whose `dist/SwitchBlade.app` was
+replaced relaunches itself when idle (the script only reports
+`Running instance relaunched: pid A -> B`). Launch manually only when no instance
+runs, or once when the running instance predates the relaunch coordinator.
 
 Streaming logs (use the full path: `log` is a zsh builtin, so a bare `log show`
 or `log stream` fails with "too many arguments" or returns nothing):
@@ -380,6 +382,50 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   only the error these rows prove. First run: 25/25 lookups clean; Finder lists
   one AX window whose identity read returns -25201 (likely its desktop window,
   inferred). Regressions: `WindowLookupDiagnostics/*`.
+- **AX calls fail with -25211 (`APIDisabled`) for apps started after a rebuild**
+  → the bundle was replaced under a running instance. Proven 2026-11-05 by a
+  controlled repeat: after `build-app.sh` replaced `dist/` under a running
+  instance, an app launched afterwards answered every AX call from it with
+  -25211 while a shell read it normally; apps contacted before the swap kept
+  working; a relaunch fixed the same target process (Teams in a meeting: 14
+  failed selections). The macOS permission mechanism behind it is inferred.
+  `RelaunchCoordinator` keeps one instance on the published bundle:
+  - `instance.lock` (`~/Library/Application Support/SwitchBlade/`, `flock`,
+    close-on-exec) is taken first in `applicationDidFinishLaunching`, before
+    any monitor, tap or hotkey; `open -n` or a direct exec exits
+    (`singleton_rejected`). A relaunched instance waits up to 5 s for it.
+  - `LaunchIdentity.capture()` runs first in `main`: the executable identity
+    comes from the kernel (mapped image), so a publication racing process
+    start is still seen. The designated requirement is read there too; if the
+    bundle was already replaced, the published bundle's own requirement is
+    accepted only for the same bundle identifier (`relaunch_requirement_fallback`).
+  - Any change of the executable or Info.plist (device/inode/size/mtime) is a
+    replacement, even with an identical CDHash. Relaunch waits until idle
+    (`isIdleForRelaunch`: no switcher, no resolving open or previous-app
+    switch, free window-action lane; `relaunch_deferred`).
+  - Only the running instance acts. It takes `relaunch.lock`, verifies the
+    bundle against its requirement, writes the one-shot rank handoff and
+    spawns `/bin/sh` (new session, only fd 3 = `relaunch.lock` inherited).
+    The helper waits for the old PID, re-verifies with `codesign -R`, opens
+    the bundle with `--switchblade-relaunch-request <uuid>` and waits for the
+    acknowledgement the new instance writes after setup and handoff import.
+    One retry; if another instance runs it logs `superseded`; otherwise
+    `failed` and no instance runs (a build that cannot start). Helper log:
+    `relaunch.log` in the same directory.
+  - Rank handoff (`relaunch-handoff.json`, 0600, < 60 s, same boot session,
+    consumed once): window ID, app PID and start time, window-owner PID and
+    start time; no titles or previews. Only live windows with the same owner
+    and unchanged processes regain rank; minimized windows are not in the
+    visible snapshot and fall back to bundle order. A handoff consumed by an
+    attempt that crashed before acknowledging is `missing` for the retry.
+  - Acceptance (signed app, 2026-11-05): republish with identical bytes, a
+    publication racing the new process (5 + 3 rounds, mapped inode = disk
+    inode, one instance), `open -n` steady and racing a relaunch, two
+    simultaneous direct launches, crash before acknowledgement once (retry ok)
+    and twice (logged failure), corrupt handoff, and an app launched after
+    publication reading AX normally. Fault files for such runs:
+    `fault-crash-before-relaunch-ack` and `fault-corrupt-relaunch-handoff`
+    (count inside, consumed). Regressions: `Relaunch/*`.
 - **Switch reported success but the window did not appear** → read
   `activation_outcome_probe` (debug logging only, diagnostic only: no behavior
   change). About 150 ms after a completed `activate` selection, off the action

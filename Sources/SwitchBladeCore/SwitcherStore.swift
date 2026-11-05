@@ -1788,6 +1788,36 @@ final class SwitcherStore: ObservableObject {
         }
     }
 
+    // MARK: - Relaunch
+
+    /// Nothing in flight: no open switcher, no resolving open or previous-app
+    /// switch, and the window-action lane is free (a dismissed panel can still
+    /// own detached AX work).
+    var isIdleForRelaunch: Bool {
+        !isSwitching && !isVisible && windowActionTask == nil && !isWindowActionLaneBusy
+            && !isResolvingPreviousSwitch
+    }
+
+    /// Live windows holding a concrete rank, most recent first.
+    func relaunchHandoffWindows() -> [WindowItem] {
+        let live = catalog.snapshotVisibleOnly()
+        let byID = Dictionary(live.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return mruTracker.recentWindowIDs.compactMap { byID[$0] }
+    }
+
+    /// Replays validated ranks oldest first, so the newest ends on top.
+    @discardableResult
+    func applyRelaunchHandoff(
+        _ entries: [RelaunchHandoff.Entry],
+        startTime: (pid_t) -> ProcessIdentity.StartTime? = ProcessIdentity.startTime(of:)
+    ) -> Int {
+        let restorable = RelaunchHandoff.restorableItems(entries, in: catalog.snapshotVisibleOnly(), startTime: startTime)
+        for item in restorable.reversed() {
+            mruTracker.trackFocusedWindowActivation(item, context: "relaunch-handoff")
+        }
+        return restorable.count
+    }
+
     private func hasAppActivation(since sequence: Int, otherThan targetPID: pid_t) -> Bool {
         guard appActivationSequence != sequence else { return false }
         // Entries older than the log cannot be checked; treat overflow as newer focus.

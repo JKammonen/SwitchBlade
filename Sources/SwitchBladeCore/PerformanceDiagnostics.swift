@@ -114,6 +114,14 @@ enum PerformanceDiagnostics {
         }
     }
 
+    /// Bounded wait for queued writes before a deliberate process exit
+    /// (relaunch handover, rejected duplicate instance); otherwise their last
+    /// rows are lost. Writes run off the main actor, so waiting here is safe.
+    static func waitForPendingWrites(timeout: TimeInterval = 0.5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while pendingWrites.value > 0, Date() < deadline { usleep(5_000) }
+    }
+
     static func recordWindowOrder(_ event: String, items: [WindowItem], fields: [String: PerformanceMetricValue]) {
         guard isEnabled else { return }
         let rows = items.enumerated().map { index, item in

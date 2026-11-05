@@ -28,9 +28,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (which would otherwise cold-start, possibly inheriting a 60 s
     /// failure cooldown if the launch-time refresh failed).
     private var lastKnownHadScreenRecording = false
+    /// Held for the life of the process; see `RelaunchCoordinator`.
+    private var instanceLock: FileLock?
+    private var relaunchCoordinator: RelaunchCoordinator?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.app.info("SwitchBlade launching (pid: \(getpid(), privacy: .public))")
+        // Exactly one instance, decided atomically before any monitor, event
+        // tap or hotkey exists. `open -n` or a direct exec cannot add another.
+        let relaunchRequestID = RelaunchLaunchArguments.requestID(in: CommandLine.arguments)
+        // Load settings first so the diagnostic rows below honor the logging mode.
+        _ = SwitchBladeSettings.shared
+        if RelaunchCoordinator.isRunningFromAppBundle {
+            guard let lock = RelaunchCoordinator.acquireInstanceLock(
+                paths: .standard, isRelaunch: relaunchRequestID != nil
+            ) else {
+                Logger.app.notice("Another SwitchBlade instance holds the instance lock; exiting")
+                PerformanceDiagnostics.record("singleton_rejected", fields: [
+                    "relaunch_request": .bool(relaunchRequestID != nil)
+                ])
+                PerformanceDiagnostics.waitForPendingWrites()
+                NSApp.terminate(nil)
+                return
+            }
+            instanceLock = lock
+            // Stamp the bundle now: a replacement during setup is still seen.
+            if let executableURL = Bundle.main.executableURL {
+                relaunchCoordinator = RelaunchCoordinator(
+                    paths: .standard, bundleURL: Bundle.main.bundleURL, executableURL: executableURL
+                )
+            }
+        }
         // Run as a menu-bar-only agent — no Dock icon, and ensures our own
         // windows are excluded from the switcher (activationPolicy != .regular).
         NSApp.setActivationPolicy(.accessory)
@@ -143,6 +171,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.menuBarController = menuBar
 
         installLifecycleObservers()
+        startRelaunchCoordination(requestID: relaunchRequestID)
+    }
+
+    /// Relaunches this instance when its published bundle is replaced, and
+    /// completes a relaunch that started this process. Readiness is
+    /// acknowledged only now that the tap, hotkeys and observers run.
+    private func startRelaunchCoordination(requestID: String?) {
+        guard let coordinator = relaunchCoordinator else { return }
+        coordinator.isIdle = { [weak self] in self?.store.isIdleForRelaunch ?? false }
+        coordinator.rankedWindowsForHandoff = { [weak self] in self?.store.relaunchHandoffWindows() ?? [] }
+        if let requestID {
+            RelaunchCoordinator.completeRelaunch(requestID: requestID, paths: .standard) { [store] entries, _ in
+                entries.map { store.applyRelaunchHandoff($0) } ?? 0
+            }
+        }
+        coordinator.startMonitoring()
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
