@@ -537,16 +537,26 @@ enum CaptureTimeoutTests {
             "background open-items warmup must not mutate concrete window MRU"
         )
 
+        // The requirement is that this open does not show the warm cache
+        // unvalidated: it must come from a fresh scan. Counting all snapshots
+        // also counted unrelated post-hide warmups and was timing dependent.
+        let openSources = LockedValue<[String]>([])
+        let previousObserver = PerformanceDiagnostics.testObserver.value
+        PerformanceDiagnostics.testObserver.value = { event, fields in
+            previousObserver?(event, fields)
+            if event == "cold_open", case .string(let source)? = fields["source"] {
+                openSources.withValue { $0.append(source) }
+            }
+        }
+        defer { PerformanceDiagnostics.testObserver.value = previousObserver }
         store.requestCycle(forward: true)
+        for _ in 0..<300 where !store.isVisible { try await Task.sleep(nanoseconds: 10_000_000) }
         await runPendingMainTasks()
 
         try expect(store.isVisible)
         try expectEqual(store.items.map(\.id), [1, 2, 3])
-        try expectEqual(
-            catalog.visibleSnapshotCount,
-            baselineSnapshots + 2,
-            "current-app multi-window open should validate the warm cache before showing it"
-        )
+        try expectEqual(openSources.value, ["snapshot"],
+                        "current-app multi-window open should validate the warm cache before showing it")
     }
 
     @MainActor static func storeForwardsLifecycleInvalidation() async throws {

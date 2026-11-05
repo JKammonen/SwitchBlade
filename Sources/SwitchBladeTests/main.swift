@@ -52,8 +52,16 @@ func runAll() async -> Int {
 
     let started = Date()
 
+    // Flake hunting: SWITCHBLADE_TEST_FILTER (comma-separated name
+    // substrings) selects tests; SWITCHBLADE_TEST_REPEAT runs each N times.
+    let environment = ProcessInfo.processInfo.environment
+    let filters = (environment["SWITCHBLADE_TEST_FILTER"] ?? "")
+        .split(separator: ",").map { String($0) }.filter { !$0.isEmpty }
+    let repeatCount = max(1, Int(environment["SWITCHBLADE_TEST_REPEAT"] ?? "") ?? 1)
+
     for (_, suite) in suites {
-        for (name, thunk) in suite {
+        for (name, thunk) in suite where filters.isEmpty || filters.contains(where: { name.contains($0) }) {
+          for _ in 0..<repeatCount {
             do {
                 try await thunk()
                 print("✓ \(name)")
@@ -65,6 +73,7 @@ func runAll() async -> Int {
                 print("✗ \(name)\n    unexpected error: \(error)")
                 unexpected.append((name, error))
             }
+          }
         }
     }
 

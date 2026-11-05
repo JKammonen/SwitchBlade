@@ -1607,8 +1607,12 @@ enum SwitcherStoreTests {
         store.cycle(forward: true)
         store.cycle(forward: false) // Explicitly return to the default row.
         tracker.trackFocusedWindowActivation(catalog.visibleItems[11])
-        try? await Task.sleep(nanoseconds: 240_000_000)
-        try expect(store.items.contains { $0.id == 50 })
+        // Wait for the delayed minimized merge itself, not a fixed interval:
+        // under load 240 ms after a 200 ms snapshot delay was not enough.
+        for _ in 0..<300 where !store.items.contains(where: { $0.id == 50 }) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(store.items.contains { $0.id == 50 }, "the minimized merge completed")
         try expectEqual(store.items.filter { $0.id != 50 }.map(\.id), displayedIDs)
         try expectEqual(store.selectedID, selection, "late additions must not retarget the user's selection")
     }

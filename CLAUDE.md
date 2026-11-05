@@ -89,6 +89,10 @@ See `AGENTS.md` for the full list with rationale. Headlines:
 ## Tests
 
 - Run: `swift run SwitchBladeTests`
+- Flake hunting: `SWITCHBLADE_TEST_FILTER=name1,name2` (substring match) and
+  `SWITCHBLADE_TEST_REPEAT=N` run selected tests N times. Wait for the event a
+  test is about (poll with a bound), never a fixed sleep or an exact count of
+  background snapshots: post-hide warmups run on their own timer.
 - Adding tests: create a file under `Sources/SwitchBladeTests/`, declare
   `static let all: [(name, @MainActor async throws -> Void)] = [...]`, register
   in `main.swift`.
