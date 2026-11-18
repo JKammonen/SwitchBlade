@@ -181,7 +181,18 @@ enum RelaunchTests {
         try expectNil(taken.rejection)
         try expectEqual(taken.entries.map(\.windowID), [1, 2, 3, 5, 7, 9, 10, 11, 12, 13, 14],
                         "order kept; moved, closed and restarted-owner windows dropped")
-        try expect(!FileManager.default.fileExists(atPath: paths.handoff.path), "one launch consumes it")
+        try expect(FileManager.default.fileExists(atPath: paths.handoff.path), "an unacknowledged launch keeps the handoff")
+        let retry = InstanceLifecycle.takeHandoff(paths: paths, windowOwners: owners,
+            startTime: { $0 == restarted ? other : start }, bootSessionUUID: "boot")
+        try expectEqual(retry.entries, taken.entries, "a failed launch can restore the same ranks")
+        let lifecycle = InstanceLifecycle(paths: paths, bundleURL: paths.directory,
+            executableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+        try FileManager.default.createDirectory(at: paths.readyMarker, withIntermediateDirectories: true)
+        try expect(!lifecycle.writeReadyMarker(handoffReceipt: taken.receipt), "failed ready write cannot consume handoff")
+        try expect(FileManager.default.fileExists(atPath: paths.handoff.path))
+        try FileManager.default.removeItem(at: paths.readyMarker)
+        try expect(lifecycle.writeReadyMarker(handoffReceipt: taken.receipt))
+        try expect(!FileManager.default.fileExists(atPath: paths.handoff.path), "ready acknowledgement consumes it")
         try expectEqual(InstanceLifecycle.takeHandoff(paths: paths, bootSessionUUID: "boot").rejection, .missing)
     }
 

@@ -123,17 +123,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.panelController = panelController
 
         let hotkeyMonitor = HotkeyMonitor()
-        hotkeyMonitor.onHotkey = { [weak self] direction in
+        hotkeyMonitor.onUserInteraction = { [weak self] in
+            MainActor.assumeIsolated { self?.store.handleUserInteraction() }
+        }
+        hotkeyMonitor.onHotkey = { [weak self] direction, timestamp in
             MainActor.assumeIsolated {
-                self?.store.requestCycle(forward: direction == .forward)
+                self?.store.requestCycle(forward: direction == .forward, eventTimestamp: timestamp)
             }
         }
         hotkeyMonitor.shouldTrackModifierRelease = { [weak self] in
             MainActor.assumeIsolated {
                 // Also true while previews are loading (isSwitching) so a
                 // quick Cmd+Tab+release works even before isVisible is set.
-                self?.store.isVisible == true || self?.store.isSwitching == true
+                self?.store.shouldTrackModifierRelease == true
             }
+        }
+        store.deferredModifierFlags = { [weak hotkeyMonitor] in
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            hotkeyMonitor?.reconcileHotkeyModifierState(flags)
+            return flags
         }
         hotkeyMonitor.onCommandReleased = { [weak self] in
             MainActor.assumeIsolated {
@@ -192,7 +200,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         PerformanceDiagnostics.record("lifecycle_launch_ready", fields: [
             "handoff_rejection": .string(taken.rejection?.rawValue ?? "none"),
             "restored_ranks": .int(restored),
-            "ready_marker": .bool(lifecycle.writeReadyMarker())
+            "ready_marker": .bool(lifecycle.writeReadyMarker(handoffReceipt: taken.receipt))
         ])
         lifecycle.startMonitoring()
     }

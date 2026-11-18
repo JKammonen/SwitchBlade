@@ -129,6 +129,30 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   feature code.
 - Commit messages should be plain and specific, without over-claiming readiness.
 
+## Reliability boundaries
+
+- `WindowActionIntent` is carried explicitly into detached window actions. External
+  activation, cancelling hide, settings and Space changes invalidate future native
+  effects; stale completion does not promote MRU or open failure recovery. Pointer
+  input and passed-through Cmd+backtick/Cmd+Tab/Control+F4 revoke pending work,
+  including previous-switch snapshots and hidden openings, and fence cached
+  membership until a post-interaction scan. Ordinary typing/Enter/Esc/arrows and
+  consumed switch shortcuts keep their existing behavior. OS calls
+  already issued cannot be recalled. `FocusIntentIntegrationTests` covers this boundary.
+- Eligible foreground AX notifications invalidate cached membership before the focus
+  read, including `cannotComplete`; initial registration does not force a fresh scan.
+- SC content refresh shares one physical request and one 300 ms soft-deadline waiter.
+  Invalidation advances an epoch; an older response cannot restore invalidated content.
+  A timed-out native call retains its flight until real completion; captures can use
+  the existing guarded CG fallback. `CatalogReliabilityTests` covers these cases.
+- Partial minimized scans publish verified rows with incomplete-owner provenance.
+  Per-owner window cursors and rotating app starts prevent repeated budget starvation.
+  Rows retained after a skipped owner or failed AX read are icon-only/redacted
+  until fresh confirmation and keep their original expiry.
+- Publication retains the previous bundle through readiness and restores it on failed
+  or interrupted startup. Retry terminates only newly appeared exact-bundle starters.
+  MRU handoff consumption follows successful ready-marker acknowledgement.
+
 ## Workflow Reminders
 
 - After two plausible fixes fail the same live symptom, add diagnostics before
@@ -153,6 +177,10 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   store→catalog half is. Manual integration verification still needed.
 
 ## Common Interventions
+
+- Deferred Cmd+Tab while a native action owns the lane: see
+  `docs/deferred-switch-input.md` for the 400 ms outcome/modifier rules,
+  cancellation boundaries and targeted regressions.
 
 - **SwitchBlade unexpectedly quits after Cmd+Q** → the agent's status/application
   Quit menu items intentionally have no keyboard equivalent; explicit menu Quit
@@ -239,9 +267,14 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   Absence from a scope snapshot is not closure: concrete window-ID/owner pixels
   are no longer pruned by liveness, only by LRU capacity (40), and hydrate only
   for the same ID and owner in a fresh row through the usual privacy gates.
-  Live rows are refreshed in LRU order, so absent windows are evicted first.
-  A transparent capture clears retained pixels even when its row already left
-  the list. Minimized rows get retained pixels only when shareable: a concrete
+  Live rows are promoted in LRU order before fresh captures are inserted, so
+  returning rows cannot be evicted ahead of absent windows. Every cached image
+  records its source window ID: a transparent capture revokes every alias of
+  that source even when its row already left the list. A capacity-bounded
+  protection history survives partial snapshots and Space changes until a fresh
+  usable capture replaces it. Cache misses discard embedded pixels, so eviction
+  of bounded protection history cannot resurrect a stale WindowItem preview.
+  Minimized rows get retained pixels only when shareable: a concrete
   minimized row with `canCapturePreview == false` means matched sharingState 0
   (Teams that stopped sharing), and synthetic Teams rows get none.
   Title/app aliases are still pruned. Regressions:

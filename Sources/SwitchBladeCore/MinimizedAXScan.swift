@@ -64,6 +64,7 @@ struct MinimizedAXScanExecutionResult<Item> {
     let applicationsWithUnavailableAX: Int
     let isBudgetExhausted: Bool
     let isComplete: Bool
+    let incompleteCandidateIndices: Set<Int>
 }
 
 enum MinimizedAXScanExecution {
@@ -77,6 +78,8 @@ enum MinimizedAXScanExecution {
         startedAt: TimeInterval,
         now: () -> TimeInterval,
         isCancelled: () -> Bool,
+        startingWindowIndex: (Candidate) -> Int = { _ in 0 },
+        onCandidateProgress: (Candidate, Int?) -> Void = { _, _ in },
         windowsForCandidate: (Candidate) -> [Window]?,
         onUnavailableCandidate: (Candidate) -> Void = { _ in },
         itemForWindow: (Candidate, Int, Window) -> Item?
@@ -91,24 +94,29 @@ enum MinimizedAXScanExecution {
         var applicationsWithoutWindows = 0
         var applicationsWithUnavailableAX = 0
 
-        candidateLoop: for candidate in candidates {
+        var incompleteCandidateIndices = Set(candidates.indices)
+        candidateLoop: for (candidateIndex, candidate) in candidates.enumerated() {
             if isCancelled() { break }
             guard budget.beginApplication(now: now()) else { break }
             guard let windows = windowsForCandidate(candidate) else {
                 applicationsWithUnavailableAX += 1
                 onUnavailableCandidate(candidate)
+                incompleteCandidateIndices.remove(candidateIndex)
+                onCandidateProgress(candidate, nil)
                 continue
             }
             if windows.isEmpty {
                 applicationsWithoutWindows += 1
             }
-            for (index, window) in windows.enumerated() {
-                if isCancelled() { break candidateLoop }
-                guard budget.beginWindow(now: now()) else { break candidateLoop }
-                if let item = itemForWindow(candidate, index, window) {
-                    items.append(item)
-                }
+            let startIndex = windows.isEmpty ? 0 : max(0, startingWindowIndex(candidate)) % windows.count
+            let indices = Array(windows.indices.dropFirst(startIndex)) + Array(windows.indices.prefix(startIndex))
+            for index in indices {
+                if isCancelled() { onCandidateProgress(candidate, index); break candidateLoop }
+                guard budget.beginWindow(now: now()) else { onCandidateProgress(candidate, index); break candidateLoop }
+                if let item = itemForWindow(candidate, index, windows[index]) { items.append(item) }
             }
+            incompleteCandidateIndices.remove(candidateIndex)
+            onCandidateProgress(candidate, nil)
         }
 
         let isComplete = !isCancelled()
@@ -121,7 +129,8 @@ enum MinimizedAXScanExecution {
             applicationsWithoutWindows: applicationsWithoutWindows,
             applicationsWithUnavailableAX: applicationsWithUnavailableAX,
             isBudgetExhausted: budget.isExhausted,
-            isComplete: isComplete
+            isComplete: isComplete,
+            incompleteCandidateIndices: incompleteCandidateIndices
         )
     }
 }
@@ -140,21 +149,36 @@ struct MinimizedWindowCache {
 
     mutating func reconcile(_ snapshot: MinimizedWindowSnapshot, visibleItems: [WindowItem],
                             now: Date, maxAge: TimeInterval) -> [WindowItem] {
-        guard snapshot.isComplete else { return freshItems(now: now, maxAge: maxAge) }
+        let previous = freshItems(now: now, maxAge: maxAge)
+        // A scan without coverage cannot confirm that any prior owner was visited.
+        let incompleteOwners = !snapshot.isComplete && snapshot.incompleteWindowProcessIDs.isEmpty
+            ? Set(previous.map(\.windowProcessIdentifier)) : snapshot.incompleteWindowProcessIDs
+        let freshIDs = Set(snapshot.items.map(\.id))
         let freshOwners = Set(snapshot.items.map(\.windowProcessIdentifier))
         let visibleIDs = Set(visibleItems.filter { !$0.isMinimized }.map(\.id))
         let visibleOwners = Set(visibleItems.filter { !$0.isMinimized }.map(\.windowProcessIdentifier))
-        let retained = freshItems(now: now, maxAge: maxAge).filter {
-            snapshot.unresolvedWindowProcessIDs.contains($0.windowProcessIdentifier)
-                && !freshOwners.contains($0.windowProcessIdentifier)
+        let retained = previous.filter {
+            (incompleteOwners.contains($0.windowProcessIdentifier)
+                || (snapshot.unresolvedWindowProcessIDs.contains($0.windowProcessIdentifier)
+                    && !freshOwners.contains($0.windowProcessIdentifier)))
+                && !freshIDs.contains($0.id)
                 && !visibleIDs.contains($0.id)
                 && !snapshot.retentionDeniedProcessIDs.contains($0.windowProcessIdentifier)
                 // Synthetic IDs can change with AX order or become concrete.
                 // Never retain one alongside fresh evidence from the same owner.
                 && (!SyntheticWindowID.isSynthetic($0.id)
-                    || !visibleOwners.contains($0.windowProcessIdentifier))
+                    || (!visibleOwners.contains($0.windowProcessIdentifier)
+                        && !freshOwners.contains($0.windowProcessIdentifier)))
         }
-        items = snapshot.items + retained
+        let privacySafeRetained = retained.map { item in
+            // Only fresh AX evidence can authorize displaying titles or previews.
+            return WindowItem(windowID: item.windowID, pid: item.pid, appName: item.appName,
+                title: item.title, bounds: item.bounds, isFrontmostApp: item.isFrontmostApp,
+                isMinimized: item.isMinimized, canCapturePreview: false, isTitleRedacted: true,
+                preview: nil, icon: item.icon, bundleIdentifier: item.bundleIdentifier,
+                windowOwnerPID: item.windowOwnerPID)
+        }
+        items = snapshot.items + privacySafeRetained
         let retainedIDs = Set(retained.map(\.id))
         confirmedAt = confirmedAt.filter { retainedIDs.contains($0.key) }
         for item in snapshot.items { confirmedAt[item.id] = now }

@@ -187,6 +187,8 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
         var quitSucceeds = true
         var hideSucceeds = true
         var actionDelayNanoseconds: UInt64 = 0
+        var activationResultOverride: WindowActivationResult?
+        var startedActionCount = 0
     }
 
     private let state = LockedValue(State())
@@ -226,7 +228,17 @@ final class MockWindowActivator: WindowActivating, @unchecked Sendable {
         set { state.withValue { $0.actionDelayNanoseconds = newValue } }
     }
 
+    var startedActionCount: Int { state.value.startedActionCount }
+    var activationResultOverride: WindowActivationResult? {
+        get { state.value.activationResultOverride }
+        set { state.withValue { $0.activationResultOverride = newValue } }
+    }
+    func activateWithResult(_ item: WindowActionTarget) -> WindowActivationResult {
+        let succeeded = activate(item)
+        return succeeded ? (state.value.activationResultOverride ?? .selectedTarget) : .failed
+    }
     private func delayIfNeeded() {
+        state.withValue { $0.startedActionCount += 1 }
         let delay = state.value.actionDelayNanoseconds
         if delay > 0 {
             Thread.sleep(forTimeInterval: Double(delay) / 1_000_000_000)

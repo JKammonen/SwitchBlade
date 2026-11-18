@@ -23,6 +23,7 @@ final class WindowFocusReadRecovery {
     private let frontmostPID: () -> pid_t?
     private let isAllowed: () -> Bool
     private let read: (Request) -> Result
+    private let invalidateMembership: (pid_t) -> Void
     private let deliver: (WindowFocusCapture) -> Void
     private var generation = 0
     private var pending: Request?
@@ -30,12 +31,14 @@ final class WindowFocusReadRecovery {
 
     init(retryDelays: [UInt64] = [150_000_000, 350_000_000, 700_000_000],
          frontmostPID: @escaping () -> pid_t?, isAllowed: @escaping () -> Bool,
-         read: @escaping (Request) -> Result, deliver: @escaping (WindowFocusCapture) -> Void) {
+         read: @escaping (Request) -> Result, invalidateMembership: @escaping (pid_t) -> Void = { _ in },
+         deliver: @escaping (WindowFocusCapture) -> Void) {
         self.retryDelays = retryDelays
         self.frontmostPID = frontmostPID
         self.isAllowed = isAllowed
         self.read = read
         self.deliver = deliver
+        self.invalidateMembership = invalidateMembership
     }
 
     func capture(pid: pid_t, trigger: String, invalidatesMembership: Bool = true) {
@@ -45,6 +48,7 @@ final class WindowFocusReadRecovery {
         let request = Request(pid: pid, trigger: trigger, invalidatesMembership: invalidates,
                               diagnosticID: UUID().uuidString, attempt: 0)
         pending = request
+        if invalidates, isAllowed(), frontmostPID() == pid { invalidateMembership(pid) }
         attempt(request, generation: generation)
     }
 

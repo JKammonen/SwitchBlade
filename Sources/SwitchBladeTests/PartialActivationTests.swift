@@ -180,7 +180,7 @@ enum PartialActivationTests {
         let previousObserver = PerformanceDiagnostics.testObserver.value
         PerformanceDiagnostics.testObserver.value = { event, fields in
             previousObserver?(event, fields)
-            if event == "selection_action_dispatch" || event == "selection_action_failed" { completed.value = true }
+            if event == "window_action_superseded", case .string("superseded")? = fields["result"] { completed.value = true }
         }
         defer { PerformanceDiagnostics.testObserver.value = previousObserver }
         await openSwitcher(store)

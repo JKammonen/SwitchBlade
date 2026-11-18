@@ -25,34 +25,61 @@ actor SCContentCache {
     /// NSWorkspace app activation; the hot-path refresh is the safety net when
     /// the user idles without switching apps.
     static let staleThreshold: TimeInterval = 5
+    private var refreshEpoch: UInt64 = 0
+    private var refreshFlight: (id: UUID, task: Task<Void, Never>, deadline: Task<Void, Never>)?
+    private static let refreshDeadlineMs = 300
+    private let refreshProvider: @Sendable () async throws -> SCShareableContent?
+    private let recordingPermission: @Sendable () -> Bool
+
+    init(refreshProvider: @escaping @Sendable () async throws -> SCShareableContent? = { try await SCShareableContent.current },
+         recordingPermission: @escaping @Sendable () -> Bool = { CGPreflightScreenCaptureAccess() }) {
+        self.refreshProvider = refreshProvider
+        self.recordingPermission = recordingPermission
+    }
 
     func refreshIfAllowed(successContext: String? = nil) async {
         // Guard: SCKit can trigger an OS permission dialog without Screen Recording access.
-        guard CGPreflightScreenCaptureAccess() else {
+        guard recordingPermission() else {
             Logger.capture.notice("SCShareableContent refresh skipped — no Screen Recording permission")
             return
         }
+        if let flight = refreshFlight {
+            await flight.deadline.value
+            return
+        }
+        let id = UUID()
+        let epoch = refreshEpoch
+        let task = Task { await self.performRefresh(id: id, epoch: epoch, successContext: successContext) }
+        // One shared waiter per physical lookup. A timed-out Apple call retains
+        // its flight until it actually returns, even after invalidation.
+        let deadline = Task {
+            _ = await Self.awaitTaskWithSoftTimeout(task, timeoutMs: Self.refreshDeadlineMs)
+        }
+        refreshFlight = (id, task, deadline)
+        await deadline.value
+    }
+
+    private func performRefresh(id: UUID, epoch: UInt64, successContext: String?) async {
+        defer { if refreshFlight?.id == id { refreshFlight = nil } }
         let start = Date()
         do {
-            content = try await SCShareableContent.current
+            let refreshed = try await refreshProvider()
+            guard refreshEpoch == epoch else { return }
+            content = refreshed
             lastRefreshFailedAt = nil
             lastSuccessfulRefresh = Date()
             let ms = Date().timeIntervalSince(start) * 1000
             if let successContext {
                 Logger.capture.info("SCShareableContent refresh ok (\(successContext, privacy: .public)) in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
-            } else if PerformanceLoggingState.mode == .debug {
-                Logger.capture.info("SCShareableContent refresh ok in \(ms, format: .fixed(precision: 1), privacy: .public) ms")
             }
         } catch {
+            guard refreshEpoch == epoch else { return }
             lastRefreshFailedAt = Date()
             let failure = error as NSError
             PerformanceDiagnostics.record("capture_content_refresh", fields: [
-                "succeeded": .bool(false),
-                "error_domain": .string(failure.domain),
-                "error_code": .int(failure.code),
-                "retained_content": .bool(content != nil)
+                "succeeded": .bool(false), "error_domain": .string(failure.domain),
+                "error_code": .int(failure.code), "retained_content": .bool(content != nil)
             ])
-            Logger.capture.error("SCShareableContent refresh failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -77,6 +104,7 @@ actor SCContentCache {
     }
 
     func invalidate(reason: String) {
+        refreshEpoch &+= 1
         content = nil
         lastRefreshFailedAt = nil
         lastSuccessfulRefresh = nil
@@ -1168,6 +1196,11 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
     private let capturePermitPool: CapturePermitPool
     private let minimizedSnapshotCoalescer = InFlightTaskCoalescer<MinimizedSnapshotContext, MinimizedWindowSnapshot>()
     private let minimizedSnapshotEpoch = LockedValue<UInt64>(0)
+    private struct MinimizedScanProgress {
+        var appOffset = 0
+        var windowOffsets: [pid_t: Int] = [:]
+    }
+    private let minimizedScanProgress = LockedValue(MinimizedScanProgress())
     private let rememberedConcreteWindows = LockedValue<[pid_t: [RememberedConcreteWindow]]>([:])
     private let validatedFloatingWindowSignatures = LockedValue<
         [pid_t: Set<ValidatedFloatingWindowSignature>]
@@ -2562,10 +2595,13 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 activationPolicy: resolution.windowApplication.activationPolicy
             )
         }
-        let orderedScanCandidates = MinimizedAXScanPlan.ordered(
+        let priorityScanCandidates = MinimizedAXScanPlan.ordered(
             unorderedScanCandidates,
             windowServerProcessIdentifiers: sharingStateIndex.windowProcessIdentifiers
         )
+        let progress = minimizedScanProgress.value
+        let offset = priorityScanCandidates.isEmpty ? 0 : progress.appOffset % priorityScanCandidates.count
+        let orderedScanCandidates = Array(priorityScanCandidates.dropFirst(offset)) + Array(priorityScanCandidates.prefix(offset))
         let applicationResolutionsByPID: [pid_t: WindowApplicationResolution] = Dictionary(uniqueKeysWithValues:
             unorderedApplicationResolutions.map { ($0.windowProcessIdentifier, $0) }
         )
@@ -2580,6 +2616,10 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
             startedAt: startedAt,
             now: { ProcessInfo.processInfo.systemUptime },
             isCancelled: { cancellation.isCancelled },
+            startingWindowIndex: { progress.windowOffsets[$0.windowProcessIdentifier] ?? 0 },
+            onCandidateProgress: { candidate, nextIndex in
+                self.minimizedScanProgress.withValue { $0.windowOffsets[candidate.windowProcessIdentifier] = nextIndex }
+            },
             windowsForCandidate: { scanCandidate -> [AXUIElement]? in
                 guard let applicationResolution = applicationResolutionsByPID[
                     scanCandidate.windowProcessIdentifier
@@ -2683,6 +2723,18 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         )
         let result = execution.items
         let isComplete = execution.isComplete
+        let incompleteWindowProcessIDs = Set(execution.incompleteCandidateIndices.map {
+            orderedScanCandidates[$0].windowProcessIdentifier
+        })
+        minimizedScanProgress.withValue { state in
+            // Advance past the last attempted owner, including a slow owner;
+            // its per-window cursor handles partial traversal on its next turn.
+            if !orderedScanCandidates.isEmpty {
+                state.appOffset = (offset + max(1, execution.scannedApplications)) % orderedScanCandidates.count
+            }
+            let liveOwners = Set(priorityScanCandidates.map(\.windowProcessIdentifier))
+            state.windowOffsets = state.windowOffsets.filter { liveOwners.contains($0.key) }
+        }
         if !isComplete {
             Logger.capture.notice(
                 "Minimized AX scan incomplete candidates=\(orderedScanCandidates.count, privacy: .public) apps=\(execution.scannedApplications, privacy: .public) windows=\(execution.scannedWindows, privacy: .public) budgetExhausted=\(execution.isBudgetExhausted, privacy: .public) cancelled=\(cancellation.isCancelled, privacy: .public)"
@@ -2724,7 +2776,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
         )
         return MinimizedWindowSnapshot(items: filteredResult, isComplete: isComplete,
                                        unresolvedWindowProcessIDs: unresolvedWindowProcessIDs,
-                                       retentionDeniedProcessIDs: retentionDeniedProcessIDs)
+                                       retentionDeniedProcessIDs: retentionDeniedProcessIDs,
+                                       incompleteWindowProcessIDs: incompleteWindowProcessIDs)
     }
 
     private func shouldIncludeApplication(

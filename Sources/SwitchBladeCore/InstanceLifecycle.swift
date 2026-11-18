@@ -99,10 +99,15 @@ final class InstanceLifecycle {
     /// only when this names a live process whose mapped executable is the
     /// published file (same inode), written after it launched the bundle.
     @discardableResult
-    func writeReadyMarker(now: Date = Date()) -> Bool {
+    func writeReadyMarker(now: Date = Date(), handoffReceipt: Data? = nil) -> Bool {
         guard let inode = launchExecutable?.inode else { return false }
         let text = "\(getpid()) \(inode) \(Int(now.timeIntervalSince1970))\n"
-        return (try? paths.writeAtomically(Data(text.utf8), to: paths.readyMarker)) != nil
+        guard (try? paths.writeAtomically(Data(text.utf8), to: paths.readyMarker)) != nil else { return false }
+        // Consume only after acknowledgement, and never remove a newer handoff.
+        if let handoffReceipt, (try? Data(contentsOf: paths.handoff)) == handoffReceipt {
+            try? FileManager.default.removeItem(at: paths.handoff)
+        }
+        return true
     }
 
     // MARK: - Graceful quit on SIGTERM
@@ -167,21 +172,26 @@ final class InstanceLifecycle {
         PerformanceDiagnostics.waitForPendingWrites()
     }
 
-    /// Reads and removes the handoff (one launch consumes it) and returns the
+    /// Reads the handoff without consuming it until writeReadyMarker acknowledges it; returns the
     /// entries whose windows and owner processes are unchanged.
     static func takeHandoff(
         paths: LifecyclePaths, now: Date = Date(),
         windowOwners: [CGWindowID: pid_t] = RelaunchHandoff.currentWindowOwners(),
         startTime: (pid_t) -> ProcessIdentity.StartTime? = ProcessIdentity.startTime(of:),
         bootSessionUUID: String? = ProcessIdentity.bootSessionUUID()
-    ) -> (entries: [RelaunchHandoff.Entry], rejection: RelaunchHandoff.Rejection?) {
-        guard let data = try? Data(contentsOf: paths.handoff) else { return ([], .missing) }
-        try? FileManager.default.removeItem(at: paths.handoff)
+    ) -> (entries: [RelaunchHandoff.Entry], rejection: RelaunchHandoff.Rejection?, receipt: Data?) {
+        guard let data = try? Data(contentsOf: paths.handoff) else { return ([], .missing, nil) }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
-        guard let handoff = try? decoder.decode(RelaunchHandoff.self, from: data) else { return ([], .unreadable) }
-        if let rejection = handoff.validate(bootSessionUUID: bootSessionUUID, now: now) { return ([], rejection) }
-        return (RelaunchHandoff.restorableEntries(handoff.entries, windowOwners: windowOwners, startTime: startTime), nil)
+        guard let handoff = try? decoder.decode(RelaunchHandoff.self, from: data) else {
+            try? FileManager.default.removeItem(at: paths.handoff)
+            return ([], .unreadable, nil)
+        }
+        if let rejection = handoff.validate(bootSessionUUID: bootSessionUUID, now: now) {
+            try? FileManager.default.removeItem(at: paths.handoff)
+            return ([], rejection, nil)
+        }
+        return (RelaunchHandoff.restorableEntries(handoff.entries, windowOwners: windowOwners, startTime: startTime), nil, data)
     }
 
     // MARK: - Replacement outside build-app.sh

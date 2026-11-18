@@ -317,7 +317,7 @@ source "$repo_root/scripts/relaunch-lifecycle.sh"
 ready_marker="$HOME/Library/Application Support/SwitchBlade/ready"
 # An instance stopped for publication is restarted even if this script is
 # interrupted or fails before restarting it.
-trap 'cleanup_staging_bundle; switchblade_restore_if_stopped' EXIT
+trap 'switchblade_restore_if_stopped && cleanup_staging_bundle' EXIT
 switchblade_publish "$staging_app_bundle" "$final_app_bundle" "$app_name" "$ready_marker" "$atomic_replace_binary" \
     || exit 1
 trap - EXIT HUP INT TERM

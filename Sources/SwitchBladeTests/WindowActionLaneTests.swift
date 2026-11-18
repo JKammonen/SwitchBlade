@@ -4,16 +4,17 @@ import Foundation
 
 /// The single window-action lane stays occupied after `hide()` drops the
 /// caller task, because detached AX work cannot be interrupted. A commit that
-/// arrives meanwhile must surface as a refused action, never vanish silently.
+/// arrives meanwhile waits for that lane and follows normal quick-release opening.
 enum WindowActionLaneTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
-        ("WindowActionLane/cachedQuickReleaseOnBusyLaneShowsRecoveryPanel", cachedQuickReleaseOnBusyLane),
+        ("WindowActionLane/cachedQuickReleaseWaitsForBusyLane", cachedQuickReleaseOnBusyLane),
         ("WindowActionLane/freshQuickReleaseOnBusyLaneDoesNotWedgeOpen", freshQuickReleaseOnBusyLane)
     ]
 
     @MainActor private static func cachedQuickReleaseOnBusyLane() async throws {
         let (store, catalog, activator, _) = makeStore()
         defer { store.cancel() }
+        store.deferredModifierFlags = { [] }
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, isFrontmostApp: true),
             makeItem(id: 2, pid: 200),
@@ -24,13 +25,12 @@ enum WindowActionLaneTests {
         store.requestCycle(forward: true)
         store.commitSelection()
         await runPendingMainTasks()
-        try expect(store.isVisible, "refused quick release must show the recovery panel")
+        try expect(!store.isVisible, "the cancelled native owner must drain before reopening")
         try expect(activator.activatedItems.isEmpty)
 
         try await waitForLane(activator)
-        let selected = try unwrap(store.selectedID)
-        store.commitSelection()
-        try await waitUntil { activator.activatedItems.map(\.id) == [selected] }
+        try await waitUntil { activator.activatedItems.count == 1 && !store.isSwitching }
+        try expectEqual(activator.activatedItems.first?.id, 2, "queued input uses the fresh source after drain")
         try expect(!store.isVisible)
         try expect(!store.isSwitching)
     }
@@ -38,6 +38,7 @@ enum WindowActionLaneTests {
     @MainActor private static func freshQuickReleaseOnBusyLane() async throws {
         let (store, catalog, activator, _) = makeStore(initialFrontmostAppPID: 100, switchBladePID: 999)
         defer { store.cancel() }
+        store.deferredModifierFlags = { [] }
         // Two windows of the current app force the fresh off-main snapshot
         // path, whose quick release used to leave the open phase resolving.
         catalog.visibleItems = [
@@ -50,10 +51,12 @@ enum WindowActionLaneTests {
 
         store.requestCycle(forward: true)
         store.commitSelection()
-        try await waitUntil { store.isVisible }
+        await runPendingMainTasks()
+        try expect(!store.isVisible)
         try expect(activator.activatedItems.isEmpty)
 
         try await waitForLane(activator)
+        try await waitUntil { activator.activatedItems.count == 1 && store.isIdleForRelaunch }
         store.cancel()
         try expect(!store.isSwitching, "cancel must leave the open lifecycle idle")
         await openSwitcher(store)

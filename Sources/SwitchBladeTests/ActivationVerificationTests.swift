@@ -539,7 +539,7 @@ enum ActivationVerificationTests {
         let previous = PerformanceDiagnostics.testObserver.value
         PerformanceDiagnostics.testObserver.value = { event, fields in
             previous?(event, fields)
-            if event == "selection_action_dispatch" || event == "selection_action_failed" { dispatched.value = fields }
+            if event == "selection_action_dispatch" || event == "selection_action_failed" || event == "window_action_superseded" { dispatched.value = fields }
         }
         defer { PerformanceDiagnostics.testObserver.value = previous }
         await openSwitcher(store)
@@ -631,7 +631,7 @@ enum ActivationVerificationTests {
             store.handleAppActivation(pid: 300)
             ranksBeforeCompletion = tracker.recentWindowIDs
         }, started: started, gate: gate)
-        try expectEqual(string(fields, "result"), "selected-target")
+        try expectEqual(string(fields, "result"), "superseded")
         try expectEqual(tracker.recentWindowIDs, ranksBeforeCompletion,
                         "an older verified result must not move ahead of newer external focus")
     }
@@ -704,7 +704,7 @@ enum ActivationVerificationTests {
             store.handleAppActivation(pid: 100)
             ranksBeforeCompletion = tracker.recentWindowIDs
         }, started: started, gate: gate)
-        try expectEqual(string(fields, "result"), "selected-target")
+        try expectEqual(string(fields, "result"), "superseded")
         try expectEqual(tracker.recentWindowIDs, ranksBeforeCompletion,
                         "the newer return to the source app must keep its place")
         try expect(tracker.recentWindowIDs.first != 2)

@@ -158,6 +158,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     }
 
     func activateWithResult(_ item: WindowActionTarget) -> WindowActivationResult {
+        guard WindowActionIntent.permitsSideEffect else { return .failed }
         log(action: "activate", item: item)
         let start = ProcessInfo.processInfo.systemUptime
         // Select the target window first, then activate the app. AX raise/focus
@@ -165,6 +166,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         // AX targeting can raise the app's previously-main sibling window.
         let targetWasActive = isApplicationActive(pid: item.pid)
         let targeting = targetWindow(item)
+        guard WindowActionIntent.permitsSideEffect else { return .failed }
         let targeted = ProcessInfo.processInfo.systemUptime
         // An unidentified target becomes an app-level switch only when that
         // cannot expose an unselected sibling: the app has a single listed row,
@@ -372,11 +374,15 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
     /// reported a different focused sibling. Recheck identity and active app
     /// immediately before acting; a closed target or departure cancels it.
     private func restoreMatchedWindowFocus(_ item: WindowActionTarget, targeting: ActivationTargeting) -> Bool {
+        guard WindowActionIntent.permitsSideEffect else { return false }
         if let restoreFocusOverride { return restoreFocusOverride(item, targeting.matchedIndex) }
-        guard isApplicationActive(pid: item.pid), let window = targeting.element,
+        guard WindowActionIntent.permitsSideEffect, isApplicationActive(pid: item.pid), let window = targeting.element,
               AXWindowIdentity.windowID(of: window) == item.id else { return false }
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let raise = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let main = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let focus = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         return Self.activationTargetingSucceeded(raiseResult: raise, mainResult: main, focusResult: focus)
     }
@@ -497,6 +503,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
         var unminimized = true
         if item.isMinimized {
+            guard WindowActionIntent.permitsSideEffect else { return false }
             unminimized = AXUIElementSetAttributeValue(
                 window,
                 kAXMinimizedAttribute as CFString,
@@ -515,12 +522,16 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             screenFrame: screen.frame,
             to: edge
         )
+        guard WindowActionIntent.permitsSideEffect else { return false }
         guard setFrame(targetFrame, on: window) else {
             return false
         }
 
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let activated = activateTargetApplicationIfNeeded(item)
         let succeeded = unminimized
@@ -557,6 +568,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         // Never quit SwitchBlade itself.
         guard item.pid != getpid(),
               let app = NSRunningApplication(processIdentifier: item.pid) else { return false }
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let requestAccepted = app.terminate()
         let confirmed = Self.confirmRequest(
             requestAccepted: requestAccepted,
@@ -574,6 +586,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         log(action: "hide", item: item)
         guard item.pid != getpid(),
               let app = NSRunningApplication(processIdentifier: item.pid) else { return false }
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let requestAccepted = app.hide()
         let confirmed = Self.confirmRequest(
             requestAccepted: requestAccepted,
@@ -641,16 +654,20 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         var unminimizeMs: Double?
         if item.isMinimized {
             let start = Date()
+            guard WindowActionIntent.permitsSideEffect else { return .unmatched() }
             unminimizeResult = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
             unminimizeMs = Date().timeIntervalSince(start) * 1000
         }
         let raiseStart = Date()
+        guard WindowActionIntent.permitsSideEffect else { return .unmatched() }
         let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         let raiseMs = Date().timeIntervalSince(raiseStart) * 1000
         let mainStart = Date()
+        guard WindowActionIntent.permitsSideEffect else { return .unmatched() }
         let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         let mainMs = Date().timeIntervalSince(mainStart) * 1000
         let focusStart = Date()
+        guard WindowActionIntent.permitsSideEffect else { return .unmatched() }
         let focusResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let focusMs = Date().timeIntervalSince(focusStart) * 1000
         let directTargetingSucceeded = Self.activationTargetingSucceeded(
@@ -760,6 +777,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         }
 
         let start = Date()
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let requestAccepted = app.activate(options: options)
         // NSRunningApplication.activate only acknowledges the request. Real
         // telemetry has p95=84ms and p99=1.79s from request to frontmost
@@ -852,6 +870,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         pid: pid_t,
         options: NSApplication.ActivationOptions = []
     ) -> Bool {
+        guard WindowActionIntent.permitsSideEffect else { return false }
         if let activateApplicationOverride {
             return activateApplicationOverride(pid)
         }
@@ -860,6 +879,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
 
     @discardableResult
     private func performApplicationReopen(pid: pid_t) -> Bool {
+        guard WindowActionIntent.permitsSideEffect else { return false }
         if let reopenApplicationOverride {
             return reopenApplicationOverride(pid)
         }
@@ -921,6 +941,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         )
         let pressResult: AXError
         if let targetIndex {
+            guard WindowActionIntent.permitsSideEffect else { return false }
             pressResult = AXUIElementPerformAction(
                 candidates[targetIndex].element,
                 kAXPressAction as CFString
@@ -1046,6 +1067,7 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
         let closeButton = closeButtonValue as! AXUIElement
         applyAXMessagingTimeout(to: closeButton)
 
+        guard WindowActionIntent.permitsSideEffect else { return false }
         return AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success
     }
 
@@ -1247,7 +1269,9 @@ final class WindowActivator: WindowActivating, @unchecked Sendable {
             return false
         }
 
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let positionResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+        guard WindowActionIntent.permitsSideEffect else { return false }
         let sizeResult = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         return positionResult == .success && sizeResult == .success
     }

@@ -24,13 +24,17 @@ struct MinimizedWindowSnapshot {
     let isComplete: Bool
     let unresolvedWindowProcessIDs: Set<pid_t>
     let retentionDeniedProcessIDs: Set<pid_t>
+    /// Budget-unvisited or partially scanned owners; not AX read failures.
+    let incompleteWindowProcessIDs: Set<pid_t>
 
     init(items: [WindowItem], isComplete: Bool,
-         unresolvedWindowProcessIDs: Set<pid_t> = [], retentionDeniedProcessIDs: Set<pid_t> = []) {
+         unresolvedWindowProcessIDs: Set<pid_t> = [], retentionDeniedProcessIDs: Set<pid_t> = [],
+         incompleteWindowProcessIDs: Set<pid_t> = []) {
         self.items = items
         self.isComplete = isComplete
         self.unresolvedWindowProcessIDs = unresolvedWindowProcessIDs
         self.retentionDeniedProcessIDs = retentionDeniedProcessIDs
+        self.incompleteWindowProcessIDs = incompleteWindowProcessIDs
     }
 }
 

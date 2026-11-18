@@ -136,11 +136,86 @@ final class SwitcherStore: ObservableObject {
     private var windowActionTask: Task<Void, Never>?
     private var windowActionID: UUID?
     private var windowActionGeneration = 0
-    private let windowActionCoordinator = WindowActionCoordinator()
+    private let windowActionCoordinator: WindowActionCoordinator
     /// Main-actor mirror of the coordinator lane. `hide()` drops
     /// `windowActionTask` while detached AX work still owns the lane, so the
     /// task handle alone cannot tell whether a new action would be accepted.
     private var isWindowActionLaneBusy = false
+    private struct DeferredCycle {
+        let startedAt: UInt64
+        var delta: Int
+        var presses = 1
+        var released = false
+    }
+    private enum DeferredCycleOutcome { case success, recovery, unverified }
+    private var deferredCycle: DeferredCycle?
+    private var deferredOpening: DeferredCycle?
+    private var deferredOpeningAllowsCommit = true
+    private var activeActivationTargetPID: pid_t?
+    private var activeActionIntent: WindowActionIntent?
+    // Previous-switch gestures are serialized by isResolvingPreviousSwitch.
+    private var previousSwitchWasSuperseded = false
+    private var previousSwitchIntentGeneration = 0
+    // Injected by tests; AppDelegate also reconciles the monitor's release edge
+    // with this live read, so a delayed old release cannot commit a recovery panel.
+    var deferredInputClock: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+    var deferredModifierFlags: () -> CGEventFlags = { CGEventSource.flagsState(.combinedSessionState) }
+    var shouldTrackModifierRelease: Bool { isVisible || isSwitching || deferredCycle != nil }
+
+    private func deferredAge(_ input: DeferredCycle) -> Double {
+        HotkeyMonitor.eventDelayMilliseconds(from: input.startedAt, to: deferredInputClock())
+    }
+    private func logDeferredCycle(_ input: DeferredCycle, outcome: String) {
+        PerformanceDiagnostics.record("hotkey_deferred_action_in_flight", fields: [
+            "age_ms": .double(deferredAge(input)), "press_count": .int(input.presses),
+            "cycle_delta": .int(input.delta), "released": .bool(input.released),
+            "outcome": .string(outcome)
+        ])
+    }
+    private func discardDeferredCycle(_ reason: String) {
+        if let input = deferredCycle { logDeferredCycle(input, outcome: reason) }
+        if let input = deferredOpening { logDeferredCycle(input, outcome: reason) }
+        deferredCycle = nil
+        deferredOpening = nil
+    }
+    private func deferCycle(_ delta: Int, timestamp: UInt64) {
+        if let input = deferredCycle, deferredAge(input) > 400 { discardDeferredCycle("expired-before-next-press") }
+        if var input = deferredCycle {
+            // The deadline belongs to the first press, not to key repeat.
+            input.delta = max(-1024, min(1024, input.delta + delta))
+            input.presses = min(1024, input.presses + 1)
+            input.released = false
+            deferredCycle = input
+        } else { deferredCycle = DeferredCycle(startedAt: timestamp, delta: delta) }
+        logDeferredCycle(deferredCycle!, outcome: "queued")
+    }
+    private func resumeDeferredCycle(_ outcome: DeferredCycleOutcome) {
+        guard !isWindowActionLaneBusy, windowActionTask == nil, let input = deferredCycle else { return }
+        guard input.startedAt <= deferredInputClock(), deferredAge(input) <= 400 else {
+            discardDeferredCycle("expired"); return
+        }
+        // Sampling the configured modifier wins over a missed/reordered edge.
+        let held = deferredModifierFlags().contains(SwitchBladeSettings.shared.modifier.cgFlag)
+        deferredCycle = nil
+        var observed = input
+        observed.released = !held
+        logDeferredCycle(observed, outcome: "resumed-\(held ? "held" : "released")-\(outcome)")
+        if isVisible {
+            moveSelection(input.delta)
+            // A failure/recovery panel never commits an already-released gesture.
+            return
+        }
+        if outcome == .unverified {
+            // Cancelled native work may still have moved focus. The old completion
+            // deliberately did not publish MRU facts; use normal fresh opening.
+            cachedOpenItems = []
+            cachedOpenItemsNeedResnapshot = true
+        }
+        deferredOpening = input
+        deferredOpeningAllowsCommit = held || outcome != .recovery
+        beginCycle(delta: input.delta, commitWhenReady: !held && outcome != .recovery)
+    }
+
     private var settingsCancellables: Set<AnyCancellable> = []
     private var inFlightVisibleSnapshot: InFlightVisibleSnapshot?
     private var previewGeneration = 0
@@ -274,8 +349,10 @@ final class SwitcherStore: ObservableObject {
             NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
         },
         windowStackReader: WindowStackReading = SystemWindowStackReader(),
-        activationOutcomeProbeDelayNanoseconds: UInt64 = 150_000_000
+        activationOutcomeProbeDelayNanoseconds: UInt64 = 150_000_000,
+        windowActionCoordinator: WindowActionCoordinator = WindowActionCoordinator()
     ) {
+        self.windowActionCoordinator = windowActionCoordinator
         self.windowStackReader = windowStackReader
         self.activationOutcomeProbeDelayNanoseconds = activationOutcomeProbeDelayNanoseconds
         self.catalog = catalog
@@ -298,6 +375,12 @@ final class SwitcherStore: ObservableObject {
         windowFocusObserver?.shouldCaptureFocus = { [weak self] in
             guard let self else { return false }
             return !self.isSwitching && !self.isVisible && self.windowActionTask == nil && !self.isWindowActionLaneBusy
+        }
+        windowFocusObserver?.onMembershipInvalidated = { [weak self] pid in
+            guard let self, pid == self.currentAppPID, !self.isSwitching,
+                  !self.isVisible, !self.isWindowActionLaneBusy else { return }
+            self.cachedOpenItemsNeedResnapshot = true
+            self.focusMembershipInvalidatedAt = ProcessInfo.processInfo.systemUptime
         }
         windowFocusObserver?.onFocus = { [weak self] capture in
             self?.handleWindowFocus(capture)
@@ -346,6 +429,13 @@ final class SwitcherStore: ObservableObject {
         recentAppActivations.append((appActivationSequence, pid))
         if recentAppActivations.count > 32 { recentAppActivations.removeFirst() }
         let pendingSelfActivation = recordObservedActivationIfNeeded(pid: pid)
+        if pid != switchBladePID, pid != activeActivationTargetPID, pendingSelfActivation == nil {
+            activeActionIntent?.invalidate()
+            previousSwitchIntentGeneration &+= 1
+            let wasOpening = deferredOpening != nil
+            discardDeferredCycle("external-activation")
+            if wasOpening { hide() }
+        }
         let externalWhileSwitching = pid != switchBladePID && isSwitching && pendingSelfActivation == nil
         let disposition: String
         if pid == switchBladePID { disposition = "ignored-own-app" }
@@ -593,12 +683,15 @@ final class SwitcherStore: ObservableObject {
 
     /// Entry point for the CGEventTap hotkey callback. Keep this cheap so
     /// macOS does not disable the tap while SwitchBlade enumerates windows.
-    func requestCycle(forward: Bool) {
+    func requestCycle(forward: Bool, eventTimestamp: UInt64? = nil) {
+        // An owned native lane still defers this input. A previous gesture
+        // merely awaiting membership must not run after this newer open.
+        if isResolvingPreviousSwitch && !isWindowActionLaneBusy { previousSwitchIntentGeneration &+= 1 }
         windowFocusObserver?.cancelPendingFocusReads()
         startFocusDiagnosticSamplingIfNeeded()
         Logger.switcher.notice("requestCycle: enter isVisible=\(self.isVisible, privacy: .public) isSwitching=\(self.isSwitching, privacy: .public)")
-        guard windowActionTask == nil else {
-            Logger.switcher.info("Cmd+Tab ignored while a committed window action is in flight")
+        if windowActionTask != nil || isWindowActionLaneBusy {
+            deferCycle(forward ? 1 : -1, timestamp: eventTimestamp ?? deferredInputClock())
             return
         }
         if isVisible {
@@ -614,10 +707,20 @@ final class SwitcherStore: ObservableObject {
         // resolving. Starting another open would duplicate the work, but dropping
         // the key-down makes rapid Cmd+Tab stop one window early.
         if isSwitching {
+            // A fresh explicit gesture owns this opening now; do not let the
+            // previous released recovery gesture suppress its new release.
+            if let input = deferredOpening {
+                logDeferredCycle(input, outcome: "superseded-by-new-open-input")
+                deferredOpening = nil
+            }
             pendingOpenCycleDelta = (pendingOpenCycleDelta ?? 0) + (forward ? 1 : -1)
             return
         }
 
+        beginCycle(delta: forward ? 1 : -1, commitWhenReady: false)
+    }
+
+    private func beginCycle(delta: Int, commitWhenReady: Bool) {
         lastSwitcherUse = Date()
         contentCacheWarmupTask?.cancel()
         openItemsWarmupTask?.cancel()
@@ -626,9 +729,9 @@ final class SwitcherStore: ObservableObject {
         previewWarmupTask?.cancel()
         pendingOpenRequestedAt = Date()
         openRequestedUptime = ProcessInfo.processInfo.systemUptime
-        pendingOpenCycleDelta = forward ? 1 : -1
+        pendingOpenCycleDelta = delta
         activeOpenRequestedAt = pendingOpenRequestedAt
-        enterResolving(commitWhenReady: false)
+        enterResolving(commitWhenReady: commitWhenReady)
 
         staleCacheHealTask?.cancel()
         staleCacheHealTask = nil
@@ -1046,6 +1149,12 @@ final class SwitcherStore: ObservableObject {
     }
 
     func commitSelection() {
+        if var input = deferredCycle {
+            input.released = true
+            deferredCycle = input
+            logDeferredCycle(input, outcome: "modifier-released")
+            return
+        }
         if isSwitching, !isVisible {
             if case .previewHidden = phase, let item = selectedItem {
                 if hiddenStaleCommitNeedsFreshSnapshot(for: item) {
@@ -1085,6 +1194,21 @@ final class SwitcherStore: ObservableObject {
         ) { activator, selectedItem in
             Self.activateSelectionTarget(selectedItem, using: activator)
         }
+    }
+
+    /// Pointer input or explicit focus shortcuts supersede pending work even within the
+    /// same app. AX notifications cannot distinguish our own raises from that
+    /// choice; the input edge arrives before a panel click starts a new intent.
+    func handleUserInteraction() {
+        let hiddenOpening = isSwitching && !isVisible
+        guard activeActionIntent != nil || deferredCycle != nil || deferredOpening != nil || hiddenOpening || isResolvingPreviousSwitch else { return }
+        cachedOpenItemsNeedResnapshot = true
+        focusMembershipInvalidatedAt = ProcessInfo.processInfo.systemUptime
+        activeActionIntent?.invalidate()
+        previousSwitchIntentGeneration &+= 1
+        let wasOpening = deferredOpening != nil
+        discardDeferredCycle("user-interaction")
+        if wasOpening || hiddenOpening { hide() }
     }
 
     func cancel() {
@@ -1138,11 +1262,22 @@ final class SwitcherStore: ObservableObject {
             return
         }
 
+        let requestGeneration = previousSwitchIntentGeneration
+        let requestedActivationSequence = appActivationSequence
+        let requestedSettingsGeneration = settingsGeneration
+        let requestedActionGeneration = windowActionGeneration
+        let sourcePID = currentAppPID
+
         if let targetPID = fastPreviousApplicationPIDFromCache() {
             isResolvingPreviousSwitch = true
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 defer { self.isResolvingPreviousSwitch = false }
+                guard self.previousSwitchIntentGeneration == requestGeneration,
+                      self.appActivationSequence == requestedActivationSequence,
+                      self.settingsGeneration == requestedSettingsGeneration,
+                      self.windowActionGeneration == requestedActionGeneration,
+                      self.currentAppPID == sourcePID, !self.isVisible, !self.isSwitching else { return }
                 await self.performFastPreviousApplicationSwitch(
                     targetPID: targetPID,
                     switchStart: switchStart
@@ -1161,8 +1296,12 @@ final class SwitcherStore: ObservableObject {
             guard let self else { return }
             defer { self.isResolvingPreviousSwitch = false }
             let orderedItems = await self.itemsForPreviousSwitchTarget()
-            guard !self.isVisible, !self.isSwitching else {
-                Logger.switcher.info("Double modifier switch aborted: switcher opened during snapshot")
+            guard self.previousSwitchIntentGeneration == requestGeneration,
+                  self.appActivationSequence == requestedActivationSequence,
+                  self.settingsGeneration == requestedSettingsGeneration,
+                  self.windowActionGeneration == requestedActionGeneration,
+                  self.currentAppPID == sourcePID, !self.isVisible, !self.isSwitching else {
+                Logger.switcher.info("Double modifier switch aborted: request superseded during snapshot")
                 return
             }
             await self.performPreviousApplicationSwitch(orderedItems: orderedItems, switchStart: switchStart)
@@ -1170,6 +1309,10 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func performPreviousApplicationSwitch(orderedItems: [WindowItem], switchStart: Date) async {
+        var succeeded = false
+        previousSwitchWasSuperseded = false
+        defer { resumeDeferredCycle(succeeded ? .success : (previousSwitchWasSuperseded ? .unverified : .recovery)) }
+
         let effectiveCurrentPID = orderedItems.first?.pid ?? currentAppPID
         if let targetItem = previousSwitchTarget(from: orderedItems, currentPID: effectiveCurrentPID) {
             Logger.switcher.info(
@@ -1183,7 +1326,7 @@ final class SwitcherStore: ObservableObject {
             let activationSequenceAtStart = appActivationSequence
             guard await runActivatorOperation({
                 Self.activateSelectionTarget(target, using: activator) == .selectedTarget
-            }) else {
+            }, targetPID: target.pid) else {
                 Logger.switcher.notice(
                     "Double modifier window activation failed targetWindow=\(targetItem.id, privacy: .public) targetPID=\(targetItem.pid, privacy: .public); preserving app history"
                 )
@@ -1197,6 +1340,8 @@ final class SwitcherStore: ObservableObject {
                 previousAppPID = effectiveCurrentPID
             }
             currentAppPID = targetItem.pid
+            if deferredCycle != nil { syncCachedOpenStateAfterSelection(targetItem, liveItems: orderedItems) }
+            succeeded = true
             recordPreviousSwitchDispatch(
                 context: "modifier-window",
                 switchStart: switchStart,
@@ -1224,7 +1369,7 @@ final class SwitcherStore: ObservableObject {
             windowID: nil
         )
         let activationSequenceAtStart = appActivationSequence
-        guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }) else {
+        guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }, targetPID: targetPID) else {
             cancelActivationRequest(pid: targetPID, id: activationRequestID)
             Logger.switcher.notice(
                 "Double modifier app activation failed target=\(targetPID, privacy: .public); preserving app history"
@@ -1238,6 +1383,8 @@ final class SwitcherStore: ObservableObject {
             previousAppPID = effectiveCurrentPID
         }
         currentAppPID = targetPID
+        if deferredCycle != nil { cachedOpenItemsNeedResnapshot = true }
+        succeeded = true
         recordPreviousSwitchDispatch(
             context: "modifier-app",
             switchStart: switchStart,
@@ -1247,6 +1394,10 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func performFastPreviousApplicationSwitch(targetPID: pid_t, switchStart: Date) async {
+        var succeeded = false
+        previousSwitchWasSuperseded = false
+        defer { resumeDeferredCycle(succeeded ? .success : (previousSwitchWasSuperseded ? .unverified : .recovery)) }
+
         guard let effectiveCurrentPID = currentAppPID else { return }
         Logger.switcher.info(
             "Fast previous-app switch current=\(effectiveCurrentPID, privacy: .public) target=\(targetPID, privacy: .public)"
@@ -1259,7 +1410,7 @@ final class SwitcherStore: ObservableObject {
             windowID: nil
         )
         let activationSequenceAtStart = appActivationSequence
-        guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }) else {
+        guard await runActivatorOperation({ activator.activateApplication(pid: targetPID) }, targetPID: targetPID) else {
             cancelActivationRequest(pid: targetPID, id: activationRequestID)
             Logger.switcher.notice(
                 "Fast previous-app activation failed target=\(targetPID, privacy: .public); preserving app history"
@@ -1271,6 +1422,8 @@ final class SwitcherStore: ObservableObject {
         lastSwitcherUse = Date()
         previousAppPID = effectiveCurrentPID
         currentAppPID = targetPID
+        if deferredCycle != nil { cachedOpenItemsNeedResnapshot = true }
+        succeeded = true
         recordPreviousSwitchDispatch(
             context: "modifier-fast-app",
             switchStart: switchStart,
@@ -1280,23 +1433,32 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func runActivatorOperation(
-        _ operation: @escaping @Sendable () -> Bool
+        _ operation: @escaping @Sendable () -> Bool,
+        targetPID: pid_t
     ) async -> Bool {
         guard !isWindowActionLaneBusy else {
             Logger.switcher.notice("Window action ignored while another detached action is still running")
             return false
         }
         isWindowActionLaneBusy = true
+        activeActivationTargetPID = targetPID
+        let intent = WindowActionIntent()
+        activeActionIntent = intent
         windowFocusObserver?.cancelPendingFocusReads()
         defer {
             isWindowActionLaneBusy = false
+            activeActivationTargetPID = nil
+            activeActionIntent = nil
             resumeDeferredFocusedWindowTracking()
         }
-        guard let result = await windowActionCoordinator.run(operation: operation) else {
+        guard let result = await windowActionCoordinator.run(operation: {
+            WindowActionIntent.$current.withValue(intent) { operation() }
+        }) else {
             Logger.switcher.notice("Window action ignored while another detached action is still running")
             return false
         }
-        return result
+        previousSwitchWasSuperseded = !intent.isValid
+        return intent.isValid && result
     }
 
     private func previousSwitchTarget(from orderedItems: [WindowItem], currentPID: pid_t?) -> WindowItem? {
@@ -1427,6 +1589,11 @@ final class SwitcherStore: ObservableObject {
             "Begin selection action=\(actionName, privacy: .public) source=\(actionSource, privacy: .public) item id=\(item.id, privacy: .public) pid=\(item.pid, privacy: .public)"
         )
         let started = startWindowAction(
+            activationTargetPID: item.pid,
+            onRefused: { [weak self] in
+                self?.recoverFromRefusedSelectionAction(item: item, liveItems: liveItems,
+                    actionName: actionName, source: actionSource)
+            },
             operation: {
                 let operationStart = Date()
                 executionTiming.withValue { $0.queueMs = operationStart.timeIntervalSince(actionStart) * 1000 }
@@ -1499,15 +1666,15 @@ final class SwitcherStore: ObservableObject {
             ]
         )
         guard !isVisible else { return }
-        if case .resolving = phase {
-            applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
-            enterPreviewHidden(stale: false)
-        }
+        applyDisplayItems(hydratedForDisplay(liveItems), selectedID: item.id)
+        enterPreviewHidden(stale: false)
         showPreparedPanelIfNeeded()
     }
 
     @discardableResult
     private func startWindowAction<Result: Sendable>(
+        activationTargetPID: pid_t? = nil,
+        onRefused: (@MainActor () -> Void)? = nil,
         operation: @escaping @Sendable () -> Result,
         completion: @escaping @MainActor (Result) -> Void
     ) -> Bool {
@@ -1519,13 +1686,20 @@ final class SwitcherStore: ObservableObject {
         let actionID = UUID()
         windowActionID = actionID
         isWindowActionLaneBusy = true
+        activeActivationTargetPID = activationTargetPID
+        let intent = WindowActionIntent()
+        activeActionIntent = intent
         windowFocusObserver?.cancelPendingFocusReads()
         windowActionTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await self.windowActionCoordinator.run(operation: operation)
+            let result = await self.windowActionCoordinator.run(operation: {
+                WindowActionIntent.$current.withValue(intent) { operation() }
+            })
             // The lane is free once detached work returns, even when hide()
             // already cancelled and detached this caller task.
             self.isWindowActionLaneBusy = false
+            self.activeActivationTargetPID = nil
+            self.activeActionIntent = nil
             if self.windowActionID == actionID {
                 self.windowActionTask = nil
                 self.windowActionID = nil
@@ -1533,13 +1707,25 @@ final class SwitcherStore: ObservableObject {
             // Also drains after a cancelled detached action finally releases
             // its lane; hide() may have dropped its task handle earlier.
             defer { self.resumeDeferredFocusedWindowTracking() }
-            guard let result else {
-                Logger.switcher.error("Window action lane refused an action the store believed was free")
+            guard !Task.isCancelled, intent.isValid,
+                  self.windowActionGeneration == generation else {
+                if !intent.isValid {
+                    PerformanceDiagnostics.record("window_action_superseded", fields: ["result": .string("superseded")])
+                }
+                // Supersession is cancellation, never failed-action recovery.
+                if self.isSwitching { self.hide(cancelWindowAction: false, scheduleWarmups: false) }
+                self.resumeDeferredCycle(.unverified)
                 return
             }
-            guard !Task.isCancelled,
-                  self.windowActionGeneration == generation else { return }
+            guard let result else {
+                Logger.switcher.error("Window action lane refused an action the store believed was free")
+                onRefused?()
+                self.resumeDeferredCycle(.recovery)
+                return
+            }
             completion(result)
+            let failed = (result as? WindowActivationResult) == .failed || (result as? Bool) == false
+            self.resumeDeferredCycle(failed ? .recovery : .success)
         }
         return true
     }
@@ -1694,7 +1880,7 @@ final class SwitcherStore: ObservableObject {
         if dismissedBeforeCompletion {
             schedulePostHideWarmups()
         } else {
-            hide()
+            hide(cancelWindowAction: false)
         }
         let dispatchDelayMs = Date().timeIntervalSince(scheduledAt) * 1000
         let preHideMs = scheduledAt.timeIntervalSince(actionStart) * 1000
@@ -1852,6 +2038,11 @@ final class SwitcherStore: ObservableObject {
     }
 
     private func invalidateDisplayCachesForSettingsChange(preserveConcretePreviews: Bool = false) {
+        activeActionIntent?.invalidate()
+        previousSwitchIntentGeneration &+= 1
+        let wasDeferredOpening = deferredOpening != nil
+        discardDeferredCycle(preserveConcretePreviews ? "space-change" : "settings-change")
+        if wasDeferredOpening { hide(scheduleWarmups: false) }
         sourceFocusBeforePanel = nil
         foregroundFocus = nil
         focusHistoryGeneration &+= 1
@@ -1938,6 +2129,10 @@ final class SwitcherStore: ObservableObject {
     // `phase` in its didSet; `isSwitching` is derived (`phase != .idle`).
 
     private func enterIdle(resumeDeferredFocus: Bool = true) {
+        if let input = deferredOpening {
+            logDeferredCycle(input, outcome: "opening-ended")
+            deferredOpening = nil
+        }
         sourceFocusBeforePanel = nil
         phase = .idle
         if resumeDeferredFocus { resumeDeferredFocusedWindowTracking() }
@@ -1986,6 +2181,9 @@ final class SwitcherStore: ObservableObject {
         scheduleWarmups: Bool = true
     ) {
         if cancelWindowAction {
+            activeActionIntent?.invalidate()
+            previousSwitchIntentGeneration &+= 1
+            discardDeferredCycle("cancelled-hide")
             windowActionGeneration &+= 1
             windowActionTask?.cancel()
             windowActionTask = nil
@@ -2055,6 +2253,17 @@ final class SwitcherStore: ObservableObject {
         // mutators at the end of this method (enterPreviewHidden / enterVisible).
         let preselectedID = pendingOpenSelectedID(in: displayOrderedItems)
         pendingOpenCycleDelta = nil
+
+        if let input = deferredOpening {
+            guard deferredAge(input) <= 400 else {
+                discardDeferredCycle("expired-during-open")
+                hide()
+                return
+            }
+            let held = deferredModifierFlags().contains(SwitchBladeSettings.shared.modifier.cgFlag)
+            enterResolving(commitWhenReady: !held && deferredOpeningAllowsCommit)
+            deferredOpening = nil
+        }
 
         // Quick Cmd+Tab release should not pay the panel show or preview path
         // once the target window has already been resolved off-main.
@@ -3294,7 +3503,6 @@ final class SwitcherStore: ObservableObject {
             await withTaskCancellationHandler {
                 let minimizedSnapshot = await catalog.snapshotMinimized(cancellation: cancellation)
                 guard !Task.isCancelled, !cancellation.isCancelled else { return }
-                guard minimizedSnapshot.isComplete else { return }
                 let previewWindowIDs = self?.mergeMinimizedItems(
                     minimizedSnapshot,
                     generation: mergeGeneration

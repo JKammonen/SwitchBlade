@@ -25,7 +25,9 @@ final class HotkeyMonitor {
         case supersetModifiers = "superset_modifiers"
     }
 
-    var onHotkey: ((Direction) -> Void)?
+    var onHotkey: ((Direction, UInt64) -> Void)?
+    /// Observes pointer input and explicit focus shortcuts without reading text or consuming input.
+    var onUserInteraction: (() -> Void)?
     var onCommandReleased: (() -> Void)?
     var onModifierDoubleTap: (() -> Void)?
     var onModifierMouseSwitch: (() -> Void)?
@@ -34,6 +36,11 @@ final class HotkeyMonitor {
     /// The event-tap watchdog is also the reliable signal for a live
     /// Accessibility revocation while this accessory app remains inactive.
     var onPermissionStateMayHaveChanged: (() -> Void)?
+
+    static func eventDelayMilliseconds(from then: UInt64, to now: UInt64) -> Double {
+        guard now >= then else { return 0 }
+        return Double(now - then) / 1_000_000
+    }
 
     private var eventTap: CFMachPort?
     private var eventTapSource: CFRunLoopSource?
@@ -45,6 +52,9 @@ final class HotkeyMonitor {
     private var lastTapModifierPressTimestamp: TimeInterval?
     private var tapWatchdogTask: Task<Void, Never>?
     private var wasHotkeyModifierDown = false
+    private var reconciledRelease = false
+    private var releaseReconciliationGeneration = 0
+    var liveModifierFlags: () -> CGEventFlags = { CGEventSource.flagsState(.combinedSessionState) }
     private var lastSecureInputProbeAt: TimeInterval = -.infinity
 
     /// Secure Input hides every keyDown from event taps, so a Cmd+Tab pressed
@@ -68,17 +78,16 @@ final class HotkeyMonitor {
         return info
     }()
 
-    /// Converts a `mach_absolute_time` delta into milliseconds. CGEvent.timestamp
-    /// is mach_absolute_time at event creation — comparing it to now reveals how
-    /// long the event sat in the system event queue before the tap callback
-    /// dispatched it.
-    static func machDeltaMilliseconds(from then: UInt64, to now: UInt64) -> Double {
-        guard now >= then else {
-            return 0
+    /// The HID tap on Apple Silicon delivers hardware clock ticks as well as
+    /// events stamped in uptime nanoseconds. Use the representation nearest
+    /// callback uptime, preserving time already spent in the event queue.
+    static func eventUptimeNanoseconds(_ timestamp: UInt64, now: UInt64) -> UInt64 {
+        let nanos = Double(timestamp) * Double(machTimebase.numer) / Double(machTimebase.denom)
+        guard nanos < Double(UInt64.max),
+              abs(nanos - Double(now)) < abs(Double(timestamp) - Double(now)) else {
+            return timestamp
         }
-        let delta = now - then
-        let nanos = Double(delta) * Double(machTimebase.numer) / Double(machTimebase.denom)
-        return nanos / 1_000_000
+        return UInt64(nanos)
     }
 
     func start() {
@@ -154,6 +163,8 @@ final class HotkeyMonitor {
         let eventMask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.otherMouseDown.rawValue)
 
         guard let eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -271,8 +282,22 @@ final class HotkeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
-        if type == .leftMouseDown {
-            return handleLeftMouseDown(event)
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            // Delivered before AppKit handles the click. A click selecting a
+            // panel tile therefore precedes that tile's new action intent.
+            if type == .leftMouseDown {
+                let isSwitchShortcut = MainActor.assumeIsolated {
+                    Self.shouldTriggerModifierMouseSwitch(
+                        isEnabled: SwitchBladeSettings.shared.doubleModifierSwitchEnabled,
+                        flags: event.flags, doubleTapModifier: SwitchBladeSettings.shared.doubleModifier.cgFlag)
+                }
+                // This is an existing consumed switch gesture, not a click
+                // delivered to another app. Preserve its busy-lane behavior.
+                if !isSwitchShortcut { onUserInteraction?() }
+                return handleLeftMouseDown(event)
+            }
+            onUserInteraction?()
+            return Unmanaged.passUnretained(event)
         }
 
         guard type == .keyDown else {
@@ -317,11 +342,14 @@ final class HotkeyMonitor {
                     ]
                 )
             }
+            if Self.isFocusChangingShortcut(keyCode: keyCode, flags: event.flags) { onUserInteraction?() }
             return Unmanaged.passUnretained(event)
         }
 
         armHotkeyModifierReleaseTrackingIfNeeded()
-        let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
+        let now = DispatchTime.now().uptimeNanoseconds
+        let eventTime = Self.eventUptimeNanoseconds(event.timestamp, now: now)
+        let queueDelayMs = Self.eventDelayMilliseconds(from: eventTime, to: now)
         PerformanceDiagnostics.record(
             "hotkey_event",
             fields: [
@@ -332,7 +360,7 @@ final class HotkeyMonitor {
         Logger.hotkey.notice(
             "Hotkey forwarded: \(String(describing: direction), privacy: .public) (queue delay \(queueDelayMs, format: .fixed(precision: 1), privacy: .public) ms)"
         )
-        onHotkey?(direction)
+        onHotkey?(direction, eventTime)
         return nil
     }
 
@@ -354,7 +382,9 @@ final class HotkeyMonitor {
         // The double-tap modifier was used with a mouse button, so it was not
         // a standalone double-tap.
         lastTapModifierPressTimestamp = nil
-        let queueDelayMs = Self.machDeltaMilliseconds(from: event.timestamp, to: mach_absolute_time())
+        let now = DispatchTime.now().uptimeNanoseconds
+        let eventTime = Self.eventUptimeNanoseconds(event.timestamp, now: now)
+        let queueDelayMs = Self.eventDelayMilliseconds(from: eventTime, to: now)
         PerformanceDiagnostics.record(
             "hotkey_event",
             fields: [
@@ -365,6 +395,16 @@ final class HotkeyMonitor {
         Logger.hotkey.info("Double-tap modifier + left mouse detected")
         onModifierMouseSwitch?()
         return nil
+    }
+
+    /// Only explicit OS focus-switching chords revoke a pending switch.
+    /// Ordinary typing may already be intended for that pending target.
+    static func isFocusChangingShortcut(keyCode: Int64, flags: CGEventFlags) -> Bool {
+        let modifiers = flags.intersection(relevantShortcutFlags).subtracting(.maskShift)
+        if modifiers == .maskCommand {
+            return keyCode == Int64(kVK_ANSI_Grave) || keyCode == Int64(kVK_Tab)
+        }
+        return modifiers == .maskControl && keyCode == Int64(kVK_F4)
     }
 
     static func shouldTriggerModifierMouseSwitch(
@@ -450,6 +490,15 @@ final class HotkeyMonitor {
         didInstallEventMonitors = true
     }
 
+    /// A live read can observe a release before its NSEvent callback arrives.
+    /// Reconcile only the release edge; never synthesize a shortcut or double tap.
+    func reconcileHotkeyModifierState(_ flags: CGEventFlags) {
+        let configured = MainActor.assumeIsolated { SwitchBladeSettings.shared.modifier.cgFlag }
+        wasHotkeyModifierDown = flags.contains(configured)
+        reconciledRelease = true
+        releaseReconciliationGeneration += 1
+    }
+
     private func handleFlagsChanged(_ event: NSEvent) {
         // NSEvent flag monitors fire independently of CGEventTap, so this is
         // the earliest moment we know the user touched a modifier — including
@@ -527,8 +576,12 @@ final class HotkeyMonitor {
             isTapModifierPressed = false
         }
 
+        var nextHotkeyModifierDown = isHotkeyModifierDown
+        let reconciliationGeneration = releaseReconciliationGeneration
         defer {
-            wasHotkeyModifierDown = isHotkeyModifierDown
+            if reconciliationGeneration == releaseReconciliationGeneration {
+                wasHotkeyModifierDown = nextHotkeyModifierDown
+            }
         }
 
         guard shouldHandleConfiguredRelease,
@@ -540,6 +593,15 @@ final class HotkeyMonitor {
         // transition. Fire only on the actual down -> up edge so release
         // handling survives either source going missing without double-commit.
         if wasHotkeyModifierDown && !isHotkeyModifierDown {
+            if reconciledRelease {
+                let configured = MainActor.assumeIsolated { SwitchBladeSettings.shared.modifier.cgFlag }
+                if liveModifierFlags().contains(configured) {
+                    // This up edge predates the re-press seen by the live read.
+                    nextHotkeyModifierDown = true
+                    return
+                }
+                reconciledRelease = false
+            }
             onCommandReleased?()
         }
     }
@@ -560,6 +622,10 @@ final class HotkeyMonitor {
             timestamp: timestamp,
             shouldHandleConfiguredRelease: shouldHandleConfiguredRelease
         )
+    }
+
+    func handleEventTapForTesting(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        handleEventTap(type: type, event: event)
     }
 
     func armHotkeyModifierReleaseTrackingForTesting() {

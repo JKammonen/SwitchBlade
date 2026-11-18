@@ -586,14 +586,15 @@ enum CachedSwitchOrderingTests {
     @MainActor private static func newerActivationSurvivesCompletion() async throws {
         let catalog = MockWindowCatalog()
         let activator = HeldActivation()
+        let tracker = MRUTracker(userDefaults: makeIsolatedUserDefaults())
         let store = SwitcherStore(
             catalog: catalog, activator: activator, permissionService: MockPermissionService(),
-            userDefaults: makeIsolatedUserDefaults(), focusedRankUpgradeDelayNanoseconds: 5_000_000_000,
+            userDefaults: makeIsolatedUserDefaults(), mruTracker: tracker, focusedRankUpgradeDelayNanoseconds: 5_000_000_000,
             workspaceNotificationCenter: NotificationCenter(),
             initialFrontmostAppPID: 100, switchBladePID: 999
         )
         defer { activator.release(); store.cancel() }
-        let completion = selectionCompletionProbe()
+        let completion = selectionCompletionProbe(supersededExpected: true)
         defer { completion.restore() }
         catalog.visibleItems = [
             makeItem(id: 1, pid: 100, isFrontmostApp: true, bundleIdentifier: "fixture.a"),
@@ -606,8 +607,11 @@ enum CachedSwitchOrderingTests {
         try await waitUntil { activator.started.value }
         store.handleAppActivation(pid: 200)
         store.handleAppActivation(pid: 300)
+        let ranksBeforeCompletion = tracker.recentWindowIDs
         activator.release()
         try await waitUntil { completion.completed.value }
+        try expectEqual(tracker.recentWindowIDs, ranksBeforeCompletion, "superseded completion must not change newer focus ranks")
+        try expect(!store.isVisible, "supersession must not show recovery")
 
         store.requestCycle(forward: true)
         try expectEqual(store.items.first?.id, 3, "an older action must not replace newer observed focus")
@@ -688,12 +692,14 @@ enum CachedSwitchOrderingTests {
         try expect(false, "mock operation did not reach the expected state")
     }
 
-    private static func selectionCompletionProbe() -> (completed: LockedValue<Bool>, restore: () -> Void) {
+    private static func selectionCompletionProbe(supersededExpected: Bool = false) -> (completed: LockedValue<Bool>, restore: () -> Void) {
         let completed = LockedValue(false)
         let previousObserver = PerformanceDiagnostics.testObserver.value
         PerformanceDiagnostics.testObserver.value = { event, fields in
             previousObserver?(event, fields)
-            if event == "selection_action_dispatch" || event == "selection_action_failed" {
+            if supersededExpected {
+                if event == "window_action_superseded", case .string("superseded")? = fields["result"] { completed.value = true }
+            } else if event == "selection_action_dispatch" || event == "selection_action_failed" {
                 completed.value = true
             }
         }

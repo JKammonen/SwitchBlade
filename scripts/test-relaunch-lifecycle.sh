@@ -23,17 +23,23 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 cat > "$work/fake.c" <<'C'
 #include <mach-o/dyld.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
+    const char *lockpath = getenv("FAKE_LOCK");
+    if (lockpath) { int fd = open(lockpath, O_RDWR | O_CREAT, 0600); if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB)) return 2; }
     if (getenv("FAKE_IGNORE_TERM")) signal(SIGTERM, SIG_IGN);
     const char *marker = getenv("FAKE_MARKER");
     if (marker && !getenv("FAKE_NO_MARKER")) {
         char path[4096]; uint32_t size = sizeof(path); struct stat st;
         if (_NSGetExecutablePath(path, &size) == 0 && stat(path, &st) == 0) {
+            char unready[4200]; snprintf(unready, sizeof(unready), "%s.unready", path);
+            if (access(unready, F_OK) == 0) { sleep(60); return 0; }
             char tmp[4200]; snprintf(tmp, sizeof(tmp), "%s.tmp%d", marker, getpid());
             FILE *f = fopen(tmp, "w");
             if (f) { fprintf(f, "%d %llu %ld\n", getpid(), (unsigned long long)st.st_ino, (long)time(NULL)); fclose(f); rename(tmp, marker); }
@@ -53,13 +59,19 @@ make_bundle() {  # $1 bundle dir
 final="$work/Dist Bundle+(x)"
 marker="$work/ready"
 export FAKE_MARKER="$marker"
+export FAKE_LOCK="$work/fake.lock"
 
 # Fake launcher: starts "<bundle>/Contents/MacOS/FakeApp" detached; records calls.
 cat > "$work/fake-open" <<SH
 #!/bin/zsh
 [[ "\$1" == -n ]] && shift
 print -r -- "\$1" >> "$work/open-calls"
-nohup "\$1/Contents/MacOS/$app" 60 >/dev/null 2>&1 &
+if [[ -f "\$1/hang-once" ]]; then
+    rm "\$1/hang-once"
+    FAKE_NO_MARKER=1 nohup "\$1/Contents/MacOS/$app" 60 >/dev/null 2>&1 &
+else
+    nohup "\$1/Contents/MacOS/$app" 60 >/dev/null 2>&1 &
+fi
 exit 0
 SH
 chmod +x "$work/fake-open"
@@ -70,7 +82,11 @@ source "$repo_root/scripts/relaunch-lifecycle.sh"
 if [[ -n "\$(switchblade_running_pids "\$2/Contents/MacOS/$app" "$marker" "$app")" ]]; then
   print -r -- "swap-under-running" >> "$work/violations"
 fi
-rm -rf "\$2" && mv "\$1" "\$2"
+if [[ -d "\$2" ]]; then
+    mv "\$2" "\$2.swap" && mv "\$1" "\$2" && mv "\$2.swap" "\$1"
+else
+    mv "\$1" "\$2"
+fi
 SH
 chmod +x "$work/fake-replace"
 cat > "$work/failing-replace" <<'SH'
@@ -110,10 +126,13 @@ switchblade_publish "$work/staging" "$final" "$app" "$marker" "$work/fake-replac
 # 4. New build never becomes ready: failure, never success.
 start_instance
 make_bundle "$work/staging"
-if out="$(FAKE_NO_MARKER=1 switchblade_publish "$work/staging" "$final" "$app" "$marker" "$work/fake-replace" "$work/fake-open" 30 10 2>&1)"; then
+touch "$work/staging/Contents/MacOS/$app.unready"
+if out="$(switchblade_publish "$work/staging" "$final" "$app" "$marker" "$work/fake-replace" "$work/fake-open" 30 10 2>&1)"; then
     fail "an unready build was reported as success"
 fi
-[[ "$out" == *"no build reported ready"* ]] || fail "unready failure not reported: $out"
+[[ "$out" == *"Restored previous build"* ]] || fail "previous healthy build was not restored: $out"
+[[ ! -f "$final/Contents/MacOS/$app.unready" ]] || fail "unready bundle remains published"
+switchblade_marker_instance "$marker" "$final/Contents/MacOS/$app" "$app" >/dev/null || fail "rollback did not report ready"
 pkill -KILL -f "^$work/" 2>/dev/null || true; sleep 0.2
 
 # 5. Swap fails after stopping: the previous build is restarted, failure reported.
@@ -142,10 +161,29 @@ read -r p i t < "$work/ready" 2>/dev/null || true
 print -r -- "$$ 1 0" > "$marker"
 switchblade_wait_ready "$marker" "$final/Contents/MacOS/$app" 1 "$app" 3 >/dev/null 2>&1 && fail "stale marker accepted"
 
+# A hung first starter holds the singleton lock; retry must terminate it first.
+pkill -KILL -f "^$work/" 2>/dev/null || true; sleep 0.2
+rm -f "$marker" "$work/open-calls"
+touch "$final/hang-once"
+retry_pid="$(switchblade_start_and_wait "$final" "$app" "$marker" "$work/fake-open" 5)" || fail "hung first starter prevented retry"
+[[ "$(wc -l < "$work/open-calls" | tr -d ' ')" == 2 ]] || fail "expected one retry"
+switchblade_pid_alive "$retry_pid" || fail "retry process not alive"
+
 # 8. Interrupted publication: the trap helper restarts the stopped bundle.
 rm -f "$work/open-calls"
+cp -R "$final" "$work/interrupted-backup"
+touch "$work/interrupted-backup/previous-release"
+touch "$final/Contents/MacOS/$app.unready"
 SWITCHBLADE_STOPPED_BUNDLE="$final" SWITCHBLADE_STOPPED_OPEN_CMD="$work/fake-open"
+SWITCHBLADE_PREVIOUS_BUNDLE="$work/interrupted-backup"
+SWITCHBLADE_REPLACE_CMD="$work/fake-replace"
+SWITCHBLADE_RECOVERY_APP_NAME="$app"
+SWITCHBLADE_RECOVERY_MARKER="$marker"
 switchblade_restore_if_stopped 2>/dev/null
 [[ -f "$work/open-calls" ]] || fail "an interrupted publication did not restart the app"
+[[ -f "$final/previous-release" ]] || fail "interrupted publication did not restore the old bundle"
+[[ ! -f "$final/Contents/MacOS/$app.unready" ]] || fail "interrupted publication retained faulty release"
+switchblade_wait_ready "$marker" "$final/Contents/MacOS/$app" 0 "$app" 30 >/dev/null || fail "interrupted rollback did not become ready"
+[[ ! -f "$work/violations" ]] || fail "interruption swapped under running starter"
 
 echo "Relaunch lifecycle tests passed"

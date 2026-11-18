@@ -219,6 +219,31 @@ enum PreviewCacheStoreTests {
         let classifications = await PreviewCacheStore.classifyCapturedFrames([9: empty])
         store.record([9: empty], liveItems: [makeItem(id: 1, pid: 10)], classifications: classifications)
         try expectNil(store.hydrated(mail, liveItems: [mail]).preview)
+        let minimized = makeItem(id: 9, pid: 90, appName: "Outlook", title: "Inbox",
+            isMinimized: true, canCapturePreview: true)
+        try expectNil(store.hydrated(minimized, liveItems: [minimized]).preview,
+            "late transparency must clear the retained exact-window alias")
+        let recreated = makeItem(id: 99, pid: 90, appName: "Outlook", title: "Inbox",
+            isMinimized: true, canCapturePreview: true)
+        try expectNil(store.hydrated(recreated, liveItems: [recreated]).preview,
+            "late transparency must clear retained cross-ID aliases too")
+        store.record([:], liveItems: [makeItem(id: 1, pid: 10)])
+        store.prepareForSpaceChange()
+        try expectNil(store.hydrated(minimized.withPreview(makeRasterPreview()), liveItems: [minimized]).preview,
+            "an absent protected ID must also suppress embedded stale pixels")
+        let fresh = makeRasterPreview()
+        store.record([9: fresh], liveItems: [mail])
+        try expect(store.hydrated(minimized, liveItems: [minimized]).preview === fresh,
+            "a fresh usable capture must lift suppression")
+
+        let bounded = PreviewCacheStore(capacity: 1)
+        let old = makeRasterPreview()
+        bounded.record([9: old], liveItems: [mail])
+        bounded.record([9: empty], liveItems: [], classifications: classifications)
+        bounded.record([10: empty], liveItems: [],
+            classifications: PreviewFrameClassifications(fullyTransparentIDs: [10]))
+        try expectNil(bounded.hydrated(minimized.withPreview(old), liveItems: [minimized]).preview,
+            "evicting protection history must not authenticate embedded old pixels")
     }
 
     /// Review P3: captures of absent windows must not evict live rows first.
@@ -232,6 +257,18 @@ enum PreviewCacheStoreTests {
         }
         try expect(store.hydrated(live, liveItems: [live]).preview != nil, "live row kept its slot")
         try expectNil(store.hydrated(transient[0], liveItems: [transient[0]]).preview, "oldest absent row evicted")
+
+        // A scope round trip can make a returning live row older than absent
+        // rows. Promote it BEFORE a fresh capture fills an already-full cache.
+        let returning = PreviewCacheStore(capacity: 3)
+        let a = makeItem(id: 1, pid: 10), b = makeItem(id: 2, pid: 20)
+        let c = makeItem(id: 3, pid: 30), d = makeItem(id: 4, pid: 40)
+        returning.record([1: makeRasterPreview()], liveItems: [a])
+        returning.record([2: makeRasterPreview()], liveItems: [b])
+        returning.record([3: makeRasterPreview()], liveItems: [c])
+        returning.record([4: makeRasterPreview()], liveItems: [a, d])
+        try expect(returning.hydrated(a, liveItems: [a, d]).preview != nil, "returning live row kept")
+        try expectNil(returning.hydrated(b, liveItems: [b]).preview, "oldest absent row evicted first")
     }
 
     @MainActor static func concretePixelsBoundedByCapacity() throws {

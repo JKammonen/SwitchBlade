@@ -48,7 +48,7 @@ final class PreviewCacheStore {
     private var ambiguousSignatures: LRUDictionary<String, Date>
     // Empty capture can be intentional content protection. Suppress embedded
     // stale images too, until fresh visible pixels are accepted for this ID.
-    private var transparentWindowIDs: Set<CGWindowID> = []
+    private var transparentWindowIDs: LRUDictionary<CGWindowID, Bool>
     /// Consecutive white captures are deferred once, then accepted as content.
     private var whiteDeferredIDs: Set<CGWindowID> = []
     private let retainedPreviewMaxAge: TimeInterval
@@ -59,6 +59,7 @@ final class PreviewCacheStore {
         retainedPreviewMaxAge: TimeInterval = 300,
         now: @escaping () -> Date = Date.init
     ) {
+        transparentWindowIDs = LRUDictionary(capacity: capacity)
         ambiguousSignatures = LRUDictionary(capacity: capacity)
         byID = LRUDictionary(capacity: capacity)
         bySignature = LRUDictionary(capacity: capacity)
@@ -70,14 +71,15 @@ final class PreviewCacheStore {
     }
 
     struct CachedPreview {
+        let windowID: CGWindowID
         let image: NSImage
         let ownerPID: pid_t
         let bounds: CGRect
         let capturedAt: Date
     }
 
-    /// Returns a hydrated copy of `item` if we have any usable preview,
-    /// otherwise the item unchanged.
+    /// Returns pixels authenticated by the current cache. An embedded preview
+    /// alone is not evidence: its source may have been revoked or evicted.
     ///
     /// Stale-while-revalidate: a windowID hit returns its cached image even
     /// when bounds drifted (user resized the window). The fresh capture is
@@ -90,7 +92,7 @@ final class PreviewCacheStore {
         // Teams or AX-verified Outlook) must not show pixels captured while it was still shareable.
         // Minimized rows are never live-capturable; their privacy gate is the
         // title redaction above, and retained previews stay valid for them.
-        guard !transparentWindowIDs.contains(item.windowID),
+        guard transparentWindowIDs[item.windowID] != true,
               !item.isTitleRedacted, !item.isApplicationFallback,
               item.canCapturePreview || Self.minimizedRowMayShowRetainedPixels(item) else {
             return item.withPreview(nil)
@@ -124,7 +126,9 @@ final class PreviewCacheStore {
            isFreshEnough(cached) {
             return item.withPreview(cached.image)
         }
-        return item
+        // Old WindowItems can outlive both captures and bounded protection
+        // history. A cache miss must never resurrect their embedded pixels.
+        return item.withPreview(nil)
     }
 
     /// A minimized row is never live-capturable. A concrete (WindowServer-ID)
@@ -165,10 +169,9 @@ final class PreviewCacheStore {
             byRecentlySeenSignature[key] = nil
             for item in group { bySignature[signature(for: item)] = nil }
         }
-        guard !previews.isEmpty else {
-            keepOnlyLive(liveItems)
-            return [:]
-        }
+        // Promote returning live entries before insertion can evict them.
+        keepOnlyLive(liveItems)
+        guard !previews.isEmpty else { return [:] }
         let itemsByID = Dictionary(liveItems.map { ($0.windowID, $0) }, uniquingKeysWith: { first, _ in first })
         let singleWindowAppIdentities = Self.singleWindowAppIdentities(in: liveItems, appIdentity: appIdentity(for:))
         var accepted: [CGWindowID: NSImage] = [:]
@@ -179,16 +182,17 @@ final class PreviewCacheStore {
                 // concrete pixels are retained, so a protected-content signal
                 // must still clear them.
                 if quality == .fullyTransparent {
-                    byID[windowID] = nil
-                    transparentWindowIDs.insert(windowID)
+                    invalidateCapturedWindow(windowID)
+                    transparentWindowIDs[windowID] = true
                 }
                 continue
             }
             if quality == .fullyTransparent {
                 // Outlook can return transparent pixels while showing protected
                 // mail. Do not retain or resurrect the previous window content.
+                invalidateCapturedWindow(windowID)
                 invalidate([item])
-                transparentWindowIDs.insert(windowID)
+                transparentWindowIDs[windowID] = true
                 continue
             }
             if quality == .uniformlyBlack {
@@ -216,8 +220,8 @@ final class PreviewCacheStore {
                 whiteDeferredIDs.remove(windowID)
             }
             whiteDeferredIDs.remove(windowID)
-            transparentWindowIDs.remove(windowID)
-            let cached = CachedPreview(image: image, ownerPID: item.windowProcessIdentifier,
+            transparentWindowIDs[windowID] = nil
+            let cached = CachedPreview(windowID: windowID, image: image, ownerPID: item.windowProcessIdentifier,
                 bounds: item.bounds, capturedAt: now())
             byID[windowID] = cached
             byRecentlySeenWindowIdentity[windowIdentity(for: item)] = cached
@@ -230,8 +234,23 @@ final class PreviewCacheStore {
             }
             accepted[windowID] = image
         }
-        keepOnlyLive(liveItems)
         return accepted
+    }
+
+    /// A late protected frame has no live row from which to reconstruct aliases.
+    /// Track capture provenance so every alias of that frame can still be revoked.
+    private func invalidateCapturedWindow(_ windowID: CGWindowID) {
+        byID[windowID] = nil
+        Self.removeCaptures(of: windowID, from: &bySignature)
+        Self.removeCaptures(of: windowID, from: &byRecentlySeenWindowIdentity)
+        Self.removeCaptures(of: windowID, from: &byRecentlySeenSignature)
+        Self.removeCaptures(of: windowID, from: &byAppProcessIdentity)
+        whiteDeferredIDs.remove(windowID)
+    }
+
+    private static func removeCaptures(of windowID: CGWindowID, from cache: inout LRUDictionary<String, CachedPreview>) {
+        let keys = Set(cache.keysInOrder.filter { cache[$0]?.windowID == windowID })
+        cache.removeAll { keys.contains($0) }
     }
 
     /// Drops cached previews for the given concrete windows/app identities.
@@ -272,7 +291,7 @@ final class PreviewCacheStore {
         byRecentlySeenSignature.keepOnly([])
         byAppProcessIdentity.keepOnly([])
         whiteDeferredIDs.removeAll()
-        transparentWindowIDs.removeAll()
+        transparentWindowIDs.keepOnly([])
     }
 
     private func keepOnlyLive(_ items: [WindowItem]) {
@@ -292,7 +311,8 @@ final class PreviewCacheStore {
                 .map(appProcessIdentity(for:))
         ))
         whiteDeferredIDs.formIntersection(liveWindowIDs)
-        transparentWindowIDs.formIntersection(liveWindowIDs)
+        // Protection survives partial snapshots until a usable capture arrives.
+        // Its separate LRU is capacity-bounded, like the retained pixel caches.
     }
 
     private func signature(for item: WindowItem) -> String {

@@ -17,7 +17,7 @@ enum HotkeyMonitorTests {
         ("HotkeyMonitor/modifierMouseSwitch_rejectsCompanionModifiers", modifierMouseSwitchRejectsCompanionModifiers),
         ("HotkeyMonitor/hotkeyDirection_allowsModifierAndShiftOnly", hotkeyDirectionAllowsModifierAndShiftOnly),
         ("HotkeyMonitor/hotkeyDirection_rejectsSupersetModifiers", hotkeyDirectionRejectsSupersetModifiers),
-        ("HotkeyMonitor/machDelta_clampsFutureTimestamp", machDeltaClampsFutureTimestamp),
+        ("HotkeyMonitor/eventTimestampPreservesAgeInBothClockDomains", eventTimestampPreservesAgeInBothClockDomains),
         ("HotkeyMonitor/passthroughReason_reportsSupersetModifiersOnly", passthroughReasonReportsSupersetModifiersOnly),
         ("HotkeyMonitor/secureInputProbe_throttlesToModifierDownInterval", secureInputProbeThrottlesToModifierDownInterval),
         ("HotkeyMonitor/doubleTap_firesWithCapsLockOn", doubleTapFiresWithCapsLockOn),
@@ -96,6 +96,16 @@ enum HotkeyMonitorTests {
         monitor.handleModifierFlagsChangedForTesting(flags: [], shouldHandleConfiguredRelease: true)
 
         try expectEqual(releaseCount, 1)
+
+        // An up event from BEFORE a re-press cannot commit the re-pressed gesture.
+        var live: CGEventFlags = [.maskCommand]
+        monitor.liveModifierFlags = { live }
+        monitor.reconcileHotkeyModifierState(live)
+        monitor.handleModifierFlagsChangedForTesting(flags: [], shouldHandleConfiguredRelease: true)
+        try expectEqual(releaseCount, 1, "stale up while live modifier is held")
+        live = []
+        monitor.handleModifierFlagsChangedForTesting(flags: [], shouldHandleConfiguredRelease: true)
+        try expectEqual(releaseCount, 2, "the subsequent real release still commits exactly once")
     }
 
     @MainActor static func commandReleaseKeyDownWithoutPriorModifierDownStillFires() throws {
@@ -280,14 +290,18 @@ enum HotkeyMonitorTests {
         ))
     }
 
-    @MainActor static func machDeltaClampsFutureTimestamp() throws {
-        try expectEqual(
-            HotkeyMonitor.machDeltaMilliseconds(from: 2_000, to: 1_000),
-            0
-        )
-        try expectGreaterThan(
-            HotkeyMonitor.machDeltaMilliseconds(from: 1_000, to: 2_000),
-            0
-        )
+    @MainActor static func eventTimestampPreservesAgeInBothClockDomains() throws {
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let now: UInt64 = 5_000_000_000_000
+        for age: UInt64 in [100_000_000, 500_000_000] {
+            let nanos = now - age
+            let ticks = nanos * UInt64(timebase.denom) / UInt64(timebase.numer)
+            let normalized = HotkeyMonitor.eventUptimeNanoseconds(ticks, now: now)
+            try expect(abs(Double(normalized) - Double(nanos)) < 100)
+            try expectEqual(HotkeyMonitor.eventUptimeNanoseconds(nanos, now: now), nanos)
+        }
+        try expectEqual(HotkeyMonitor.eventDelayMilliseconds(from: 1_000_000, to: 151_000_000), 150)
+        try expectEqual(HotkeyMonitor.eventDelayMilliseconds(from: 2_000_000, to: 1_000_000), 0)
     }
 }

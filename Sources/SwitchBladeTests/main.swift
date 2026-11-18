@@ -7,6 +7,9 @@ import Foundation
 @MainActor
 func runAll() async -> Int {
     let suites: [(String, [(String, @MainActor () async throws -> Void)])] = [
+        ("CatalogReliability", CatalogReliabilityTests.all),
+        ("FocusIntent", FocusIntentIntegrationTests.all),
+        ("InteractionIntent", InteractionIntentTests.all),
         ("WindowItem",              WindowItemTests.all),
         ("PermissionState",         PermissionStateTests.all),
         ("Localization",            LocalizationTests.all),
@@ -36,6 +39,7 @@ func runAll() async -> Int {
         ("ActivationOutcomeProbe",   ActivationOutcomeProbeTests.all),
         ("WindowLookupDiagnostics",  WindowLookupDiagnosticsTests.all),
         ("Relaunch",                 RelaunchTests.all),
+        ("DeferredInput", DeferredInputTests.all),
         ("WindowActionLane",         WindowActionLaneTests.all),
         ("MRUPersistence",          MRUPersistenceTests.all),
         ("PerformanceMetrics",      PerformanceMetricsTests.all),

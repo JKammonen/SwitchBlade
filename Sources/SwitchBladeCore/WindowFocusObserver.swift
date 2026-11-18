@@ -21,12 +21,14 @@ struct WindowFocusCapture: Sendable {
 @MainActor
 protocol WindowFocusObserving: AnyObject {
     var onFocus: ((WindowFocusCapture) -> Void)? { get set }
+    var onMembershipInvalidated: ((pid_t) -> Void)? { get set }
     var shouldCaptureFocus: (() -> Bool)? { get set }
     func observe(pid: pid_t?)
     func cancelPendingFocusReads()
 }
 
 extension WindowFocusObserving {
+    var onMembershipInvalidated: ((pid_t) -> Void)? { get { nil } set { } }
     var shouldCaptureFocus: (() -> Bool)? {
         get { nil }
         set { }
@@ -119,6 +121,7 @@ struct WindowFocusSubscriptions {
 @MainActor
 final class WindowFocusObserver: WindowFocusObserving {
     var onFocus: ((WindowFocusCapture) -> Void)?
+    var onMembershipInvalidated: ((pid_t) -> Void)?
     var shouldCaptureFocus: (() -> Bool)?
     private let catalog: WindowCatalog
     private var registration: Registration?
@@ -128,7 +131,8 @@ final class WindowFocusObserver: WindowFocusObserving {
         isAllowed: { [weak self] in self?.shouldCaptureFocus?() ?? (self != nil) },
         read: { [weak self] request in
             self?.readFocus(request) ?? .failure(.invalidUIElement, "discarded-no-registration")
-        }, deliver: { [weak self] capture in self?.onFocus?(capture) }
+        }, invalidateMembership: { [weak self] pid in self?.onMembershipInvalidated?(pid) },
+        deliver: { [weak self] capture in self?.onFocus?(capture) }
     )
     private lazy var registrationDriver = WindowFocusRegistration(
         attempt: { [weak self] pid, attempt in
