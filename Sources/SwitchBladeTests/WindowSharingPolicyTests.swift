@@ -6,6 +6,7 @@ enum WindowSharingPolicyTests {
     static let all: [(String, @MainActor () async throws -> Void)] = [
         ("WindowSharingPolicy/privateOutlookUsesExactBundleIdentity", privateOutlookUsesExactBundleIdentity),
         ("WindowSharingPolicy/privateMinimizedOutlookRedactsTitle", privateMinimizedOutlookRedactsTitle),
+        ("WindowSharingPolicy/untitledMinimizedWindowRequiresConcreteEvidence", untitledMinimizedWindowRequiresConcreteEvidence),
         ("WindowSharingPolicy/listsShareableWindows", listsShareableWindows),
         ("WindowSharingPolicy/rejectsPrivateNonTeamsWindows", rejectsPrivateNonTeamsWindows),
         ("WindowSharingPolicy/rejectsTeamsSharingIndicator", rejectsTeamsSharingIndicator),
@@ -24,6 +25,22 @@ enum WindowSharingPolicyTests {
         ("WindowSharingStateIndex/retainedOffscreenShareableWindowProvidesFallbackEvidence", retainedOffscreenShareableWindowProvidesFallbackEvidence),
         ("WindowSharingStateIndex/rejectsUnsafeRetainedFallbackEvidence", rejectsUnsafeRetainedFallbackEvidence)
     ]
+
+    @MainActor static func untitledMinimizedWindowRequiresConcreteEvidence() throws {
+        for title in ["", "  "] {
+            for confirmed in [false, true] {
+                let decision = WindowSharingPolicy.minimizedTitleDecision(
+                    appName: "Browser", bundleIdentifier: "example.browser",
+                    title: title, matchingSharingStates: nil,
+                    confirmedUntitledStandardWindow: confirmed
+                )
+                try expectEqual(decision, confirmed ? .redactTitle : .exclude)
+                try expect(!WindowSharingPolicy.canCaptureMinimizedPreview(
+                    matchedSharingState: 1, titleDecision: decision
+                ))
+            }
+        }
+    }
 
     @MainActor static func privateOutlookUsesExactBundleIdentity() throws {
         try expect(WindowSharingPolicy.canListWindow(appName: "Renamed app",

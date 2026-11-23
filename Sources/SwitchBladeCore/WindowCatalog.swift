@@ -476,10 +476,13 @@ enum WindowSharingPolicy {
         appName: String,
         bundleIdentifier: String?,
         title: String,
-        matchingSharingStates: [Int]?
+        matchingSharingStates: [Int]?,
+        confirmedUntitledStandardWindow: Bool = false
     ) -> MinimizedTitleDecision {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return .exclude }
+        guard !trimmedTitle.isEmpty else {
+            return confirmedUntitledStandardWindow ? .redactTitle : .exclude
+        }
         guard let matchingSharingStates,
               !matchingSharingStates.isEmpty else {
             return .redactTitle
@@ -2645,16 +2648,33 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                 guard isMinimized else { return nil }
 
                 let appName = applicationResolution.appName
-                guard let title = axString(kAXTitleAttribute, on: window) else {
-                    unresolvedWindowProcessIDs.insert(scanCandidate.windowProcessIdentifier)
-                    return nil
+                let axTitle = axString(kAXTitleAttribute, on: window)
+                let title = axTitle ?? ""
+                let ownerPID = applicationResolution.windowProcessIdentifier
+                var untitledWindowID: CGWindowID?
+                if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // A missing title cannot identify a sibling or rule out a Teams indicator.
+                    // Require the exact shareable off-screen row and standard AX subrole.
+                    guard !WindowSharingPolicy.isMicrosoftTeams(
+                        appName: appName, bundleIdentifier: applicationResolution.hostApplication.bundleIdentifier
+                    ), axString(kAXSubroleAttribute, on: window) == kAXStandardWindowSubrole,
+                       let id = AXWindowIdentity.windowID(of: window),
+                       sharingStateIndex.hasSafeRetainedOffscreenWindow(windowID: id, ownerPID: ownerPID) else {
+                        if axTitle == nil {
+                            unresolvedWindowProcessIDs.insert(ownerPID)
+                        } else {
+                            retentionDeniedProcessIDs.insert(ownerPID)
+                        }
+                        return nil
+                    }
+                    untitledWindowID = id
                 }
                 let frame = axFrame(on: window)
                 let exactTitleMatch = sharingStateIndex.uniqueWindow(
                     pid: applicationResolution.windowProcessIdentifier,
                     title: title
                 )
-                let frameMatch = exactTitleMatch == nil
+                let frameMatch = untitledWindowID == nil && exactTitleMatch == nil
                     ? frame.flatMap {
                         sharingStateIndex.uniqueWindow(
                             pid: applicationResolution.windowProcessIdentifier,
@@ -2676,7 +2696,8 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                         ?? sharingStateIndex.sharingStates(
                             pid: applicationResolution.windowProcessIdentifier,
                             title: title
-                        )
+                        ),
+                    confirmedUntitledStandardWindow: untitledWindowID != nil
                 )
                 if titleDecision == .redactTitle,
                    applicationResolution.hostApplication.bundleIdentifier == "com.microsoft.Outlook",
@@ -2692,7 +2713,7 @@ final class WindowCatalog: WindowSnapshotProviding, Sendable {
                     titleDecision: titleDecision
                 )
 
-                let windowID = matchedWindow?.windowID ?? SyntheticWindowID.make(
+                let windowID = untitledWindowID ?? matchedWindow?.windowID ?? SyntheticWindowID.make(
                     pid: applicationResolution.windowProcessIdentifier,
                     index: index,
                     title: title

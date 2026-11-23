@@ -149,6 +149,9 @@ See `AGENTS.md` for the full list with rationale. Headlines:
   Per-owner window cursors and rotating app starts prevent repeated budget starvation.
   Rows retained after a skipped owner or failed AX read are icon-only/redacted
   until fresh confirmation and keep their original expiry.
+  A minimized AX standard window with an unreadable or blank title can appear
+  icon-only when its exact WindowServer ID and owner match a safe retained
+  off-screen row. Teams requires a readable title to filter sharing indicators.
 - Publication retains the previous bundle through readiness and restores it on failed
   or interrupted startup. Retry terminates only newly appeared exact-bundle starters.
   MRU handoff consumption follows successful ready-marker acknowledgement.
